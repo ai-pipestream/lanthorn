@@ -52,9 +52,9 @@ pub use pin::{
 };
 pub use score::{ScoreWatch, score_in_status};
 pub use storage::{
-    DiskBuild, QUETZAL_EXT, SCOTT_EXT, disk_story_key, existing_saves, game_dir,
-    game_dir_with_key, is_yes, overwrite_warning, pick_save, resolve_save_input,
-    save_list_line, story_key, story_key_at, story_key_for, StoryOrigin,
+    DiskBuild, QUETZAL_EXT, SCOTT_EXT, build_for_key, disk_story_key, existing_saves, game_dir,
+    game_dir_with_key, is_yes, known_loose_build, overwrite_warning, pick_save,
+    resolve_save_input, save_list_line, story_key, story_key_at, story_key_for, StoryOrigin,
 };
 pub use titles::known_title;
 pub use term::{

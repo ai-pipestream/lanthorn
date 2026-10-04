@@ -1,0 +1,1295 @@
+# SQ-1600: a verified command sequence for Zork Zero (zork0-r393-s890714.z6),
+# reconstructed by booting the real game headlessly and driving it turn by
+# turn, checking every reply against the actual interpreter. This is NOT a
+# copy of any published walkthrough's prose -- it is this project's own
+# derived list of literal game commands, produced for automated regression
+# testing (crates/app/tests/suites/walkthrough_zork0.rs).
+#
+# Derived with the aid of, as a guide only (never transcribed):
+#   "Zork Zero walkthrough", eristic.net, archived 2021-05-08 via the Wayback
+#   Machine (the live site's TLS certificate has since expired):
+#   https://web.archive.org/web/20210508080538/http://www.eristic.net/games/infocom/zorkzero.html
+#
+# DELIBERATELY PARTIAL: this script stops after sitting down at the Double
+# Fanucci table in the Port Foozle Casino, NOT at the game's actual win. See
+# the module doc comment in walkthrough_zork0.rs for exactly why (Double
+# Fanucci's hand of cards is rendered as pictures with no decodable text
+# signal) and what it blocks. This is a documented scope boundary, not a bug.
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. A line submitted while the game is at a single-keypress (Char)
+# prompt is sent as a keypress (its first character); otherwise it is
+# submitted as an ordinary typed line.
+#
+# The walkthrough_zork0.rs harness injects three persistence checks (an
+# in-game @save/@restore round trip, a host Save State/Restore State round
+# trip, and a restart-reboot probe) right after the "west" that arrives at
+# the Wharf (the 1262nd command below, one screen short of the Casino) — see
+# that file's `CHECKPOINT_AFTER_COMMAND` for exactly where and why.
+
+northeast
+south
+west
+wait
+wait
+dive under table
+wait
+wait
+wait
+stand
+take calendar
+up
+south
+south
+take bag
+press button
+north
+north
+down
+south
+south
+take scepter
+sit on throne
+snap fingers
+stand
+south
+take candle
+south
+west
+up
+up
+take iron key
+y
+west
+south
+take glove
+take cloak
+wear glove
+north
+east
+down
+down
+east
+east
+down
+south
+down
+take seaman's cap
+wear seaman's cap
+wait
+wait
+wait
+wait
+triplet
+southwest
+look
+open iron maiden
+open water chamber
+open snake pit
+open comfy chair
+look
+take metronome
+northeast
+north
+up
+west
+north
+north
+north
+north
+north
+east
+put scepter in cauldron
+put metronome in cauldron
+east
+look
+down
+look
+take walnut
+up
+west
+west
+look
+ring bell
+time
+north
+look
+take worm
+northwest
+northwest
+up
+turn wheel
+look
+down
+northwest
+northwest
+southwest
+look
+open locker
+take steel key
+northeast
+northeast
+southeast
+east
+north
+look
+bookkeeper
+take coin
+remove nose
+drop nose
+south
+east
+look
+south
+look
+take package
+read package
+open package
+examine pigeon
+read pigeon
+north
+east
+look
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+up
+look
+south
+look
+take t-square
+remove nose
+drop nose
+north
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+down
+look
+southeast
+look
+southeast
+look
+southeast
+look
+northwest
+northwest
+northwest
+look
+northeast
+look
+southeast
+look
+east
+look
+east
+look
+east
+look
+down
+look
+push button
+look
+south
+look
+stand on conductor's stand
+look
+get off stand
+look
+inventory
+drop bag
+drop calendar
+take violin
+stand on conductor's stand
+look
+get off stand
+look
+get off stand
+look
+north
+look
+up
+look
+west
+look
+west
+look
+west
+look
+northwest
+look
+southwest
+look
+southeast
+look
+southeast
+look
+southeast
+look
+southeast
+look
+south
+look
+east
+look
+put t-square in cauldron
+put violin in cauldron
+south
+look
+southeast
+look
+unlock door with iron key
+open door
+drop iron key
+east
+look
+north
+look
+touch armor
+touch armor
+touch armor
+look
+take lance
+look up jester
+continue
+continue
+south
+look
+south
+look
+open trap door
+look
+north
+look
+east
+look
+take wand
+east
+look
+up
+look
+open north door
+north
+look
+north
+look
+take goggles
+wear goggles
+south
+look
+south
+look
+open south door
+look
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+4
+R
+1
+R
+2
+C
+1
+C
+3
+R
+1
+L
+2
+R
+1
+R
+5
+L
+1
+C
+2
+L
+1
+L
+3
+C
+1
+R
+2
+C
+1
+C
+4
+L
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+6
+R
+1
+R
+2
+C
+1
+C
+3
+R
+1
+L
+2
+R
+1
+R
+4
+C
+1
+C
+2
+L
+1
+L
+3
+C
+1
+R
+2
+C
+1
+C
+5
+R
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+4
+R
+1
+R
+2
+C
+1
+C
+3
+R
+1
+L
+2
+R
+1
+R
+look
+look
+open north door
+look
+north
+look
+east
+look
+take manuscript
+west
+look
+south
+look
+open south door
+1
+C
+2
+L
+1
+L
+3
+C
+1
+R
+2
+C
+1
+C
+4
+L
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+5
+C
+1
+R
+2
+C
+1
+C
+3
+R
+1
+L
+2
+R
+1
+R
+4
+C
+1
+C
+2
+L
+1
+L
+3
+C
+1
+R
+2
+C
+1
+C
+6
+L
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+4
+R
+1
+R
+2
+C
+1
+C
+3
+R
+1
+L
+2
+R
+1
+R
+5
+L
+1
+C
+2
+L
+1
+L
+3
+C
+1
+R
+2
+C
+1
+C
+4
+L
+1
+L
+2
+R
+1
+R
+3
+L
+1
+C
+2
+L
+1
+L
+look
+look
+open north door
+look
+north
+look
+west
+look
+take cup
+east
+look
+south
+look
+down
+look
+west
+look
+west
+look
+west
+look
+northwest
+look
+north
+look
+put lance in cauldron
+put manuscript in cauldron
+inventory
+south
+look
+southeast
+look
+east
+look
+east
+look
+east
+look
+up
+look
+north
+look
+west
+look
+take cup
+east
+look
+south
+look
+down
+look
+west
+look
+west
+look
+west
+look
+northwest
+look
+west
+look
+west
+look
+north
+look
+point wand at lobster
+look
+take nutcracker
+south
+look
+southwest
+look
+unlock door with steel key
+open door
+drop steel key
+west
+look
+west
+look
+open walnut with nutcracker
+show walnut to jester
+eat walnut
+look
+take paper
+read paper
+drop paper
+drop slate
+north
+look
+play peggleboz
+Q
+G
+S
+Q
+H
+R
+U
+L
+I
+K
+T
+I
+E
+J
+O
+G
+A
+E
+F
+N
+M
+O
+L
+J
+P
+F
+F
+C
+B
+D
+D
+K
+Q
+G
+E
+J
+O
+G
+X
+north
+look
+ask jester about shells
+ask jester about bill
+point at left shell
+point at hat
+south
+sing lullaby
+look
+south
+look
+south
+look
+east
+look
+northeast
+look
+east
+look
+east
+look
+north
+look
+put zorkmid bill in cauldron
+south
+look
+west
+look
+west
+look
+southwest
+look
+west
+look
+south
+look
+take dumbbell
+north
+look
+east
+look
+northeast
+look
+east
+look
+east
+look
+north
+look
+drop walnut shell
+south
+look
+west
+look
+southwest
+look
+west
+look
+take large fly
+down
+look
+down
+look
+down
+look
+down
+look
+east
+look
+north
+look
+north
+look
+north
+look
+north
+look
+west
+look
+southwest
+look
+west
+look
+south
+look
+drop wand
+drop cup
+drop package
+drop coin
+drop worm
+drop cloak
+inventory
+drop candle
+take dumbbell
+north
+look
+east
+look
+northeast
+look
+east
+look
+east
+look
+north
+look
+put dumbbell in cauldron
+south
+look
+west
+look
+west
+look
+southwest
+look
+west
+look
+south
+look
+take wand
+take cup
+take package
+take coin
+take worm
+take cloak
+take candle
+southwest
+look
+northeast
+look
+north
+look
+east
+look
+northeast
+look
+east
+look
+down
+look
+down
+look
+examine door
+examine dial
+turn dial to 1234
+look
+open door
+south
+look
+take stock certificate
+north
+look
+north
+look
+take passages
+read notice
+drop notice
+south
+look
+up
+look
+southwest
+look
+south
+look
+west
+look
+west
+look
+southwest
+look
+southeast
+look
+west
+look
+west
+look
+north
+look
+northeast
+look
+west
+look
+southwest
+look
+take larger fly
+west
+look
+west
+look
+east
+look
+north
+look
+west
+look
+west
+music
+east
+look
+enter dock
+look
+leave dock
+look
+south
+look
+east
+look
+northeast
+look
+north
+look
+up
+look
+take amulet
+wear amulet
+push boulder
+north
+look
+push button
+down
+look
+inventory
+take wand
+take cup
+take package
+take coin
+take worm
+take cloak
+take candle
+take stock certificate
+take diploma
+up
+look
+southwest
+look
+south
+look
+west
+look
+west
+look
+southwest
+look
+southeast
+look
+west
+look
+west
+look
+north
+look
+northeast
+look
+north
+look
+south
+look
+southwest
+look
+south
+look
+east
+look
+east
+look
+northwest
+look
+northeast
+look
+east
+look
+east
+look
+north
+look
+northeast
+look
+down
+look
+take passages
+up
+look
+southwest
+look
+south
+look
+west
+look
+west
+look
+southwest
+look
+southeast
+look
+west
+look
+west
+look
+north
+look
+northeast
+look
+north
+look
+inventory
+install northwest-southeast passage in northwest wall
+look
+northwest
+look
+northeast
+look
+install north-south passage in north wall
+look
+north
+look
+northeast
+look
+west
+look
+southwest
+look
+southwest
+look
+southwest
+look
+west
+look
+northwest
+look
+open package
+drop perch
+wear cloak
+look
+west
+look
+west
+look
+west
+look
+north
+look
+give pigeon to soldier
+look
+remove cloak
+look
+take pigeon from knight
+knight, north then north then west
+look
+drop pigeon
+take pigeon
+look
+knight, east then south then south
+look
+drop pigeon
+take pigeon
+look
+take hardhat
+wear hardhat
+take perch
+look
+southeast
+east
+northeast
+northeast
+northeast
+east
+southwest
+south
+southwest
+southeast
+south
+southwest
+south
+east
+east
+northwest
+northeast
+east
+east
+look
+south
+look
+south
+look
+read sign
+put coin in basket
+look
+drop perch
+drop pigeon
+drop diploma
+drop stock certificate
+drop cloak
+drop worm
+drop package
+drop cup
+drop wand
+south
+look
+east
+look
+down
+look
+take orbs
+look
+up
+look
+west
+look
+north
+look
+take perch
+take pigeon
+take diploma
+take stock certificate
+take cloak
+take worm
+take package
+take cup
+take wand
+put pigeon in package
+put perch in package
+take package
+take cup
+look
+north
+look
+east
+look
+goozums
+drop diploma
+drop stock certificate
+drop cup
+take bomb
+look
+west
+look
+north
+look
+north
+look
+northeast
+look
+down
+look
+down
+look
+throw bomb at pits
+look
+take lantern
+up
+look
+up
+look
+up
+look
+north
+look
+east
+look
+inventory
+wait
+wait
+wait
+wait
+inventory
+west
+look
+take lantern
+take orbs
+take package
+take worm
+take cloak
+take glove
+take cap
+take goggles
+drop worm
+take candle
+take hardhat
+wear glove
+wear cap
+wear goggles
+wear hardhat
+inventory
+east
+look
+put lantern in cauldron
+west
+look
+south
+look
+down
+look
+southwest
+look
+south
+look
+south
+look
+south
+look
+take wand
+north
+look
+east
+look
+take cup
+take diploma
+take stock certificate
+look
+west
+look
+north
+look
+north
+look
+northeast
+look
+up
+look
+north
+look
+take worm
+east
+look
+put diploma in cauldron
+put stock certificate in cauldron
+inventory
+drop cup
+drop package
+drop cloak
+drop wand
+drop orbs
+west
+look
+south
+look
+down
+look
+north
+look
+take screwdriver
+south
+look
+up
+look
+north
+look
+east
+look
+put screwdriver in cauldron
+south
+look
+west
+look
+down
+look
+southwest
+look
+south
+look
+inventory
+wait
+wait
+wait
+wait
+inventory
+take candle
+look
+south
+look
+west
+look
+west
+look
+southwest
+look
+west
+look
+west
+look
+west
+look
+north
+look
+sit

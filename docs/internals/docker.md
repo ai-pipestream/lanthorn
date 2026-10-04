@@ -69,6 +69,7 @@ Serve-mode knobs, as environment variables:
 |---|---|---|
 | `LANTHORN_WEB_PORT` | port ttyd listens on | `7681` |
 | `LANTHORN_WEB_CREDENTIAL` | HTTP basic auth, `user:pass` | unset (no auth) |
+| `LANTHORN_WEB_AUTH_HEADER` | proxy mode: trust this request header (set by a reverse proxy after it authenticated the visitor) as the player's name (see below) | unset |
 | `LANTHORN_WEB_AUDIO` | `on` or `off`: the game's sound, played in the browser | `on` |
 | `LANTHORN_WEB_AUDIO_PORT` | the port that sound is served on | `7682` |
 | `LANTHORN_WEB_IMAGES` | `sixel` or `halfblocks`: how pictures are sent to the browser | `sixel` |
@@ -90,6 +91,57 @@ speaks plain HTTP/WebSocket here.
 
 `docker-compose.yml` at the repo root is a ready-made example of this mode:
 `mkdir -p stories && docker compose up -d`.
+
+### Where game documents land
+
+A game's documents folder (`<Title> [<IFDB id>]`, SQ-1679) is created under
+`<user dir>/documents`, which in this image is `/data/.lanthorn/documents`, on
+the same `lanthorn-data` volume as the saves, so it survives a container
+replacement and is shared by every player, proxy mode included. Nothing in the
+image creates or serves it; `create_documents_folders` and `documents_dir` in the
+shared `config.toml` behave exactly as they do outside Docker.
+
+### Proxy mode: one player per authenticated user
+
+`LANTHORN_WEB_AUTH_HEADER=<header>` (SQ-1318) starts ttyd with
+`--auth-header <header>`. ttyd 1.7.7 then takes the header's value as the
+connection's user and exports it to the child as `TTYD_USER` (truncated to 29
+characters, the same as lanthorn's player-name limit). `docker/serve-session.sh`
+validates it with the rule `data_roots::validate_player_name` uses and exports
+`LANTHORN_PLAYER`; an invalid or missing name refuses the session on the
+terminal. Outside proxy mode `TTYD_USER` is never read.
+
+- **Lanthorn authenticates nobody.** The trust is entirely the proxy's. ttyd's
+  port must be reachable only through it, and it must overwrite client copies
+  of the header.
+- **With `LANTHORN_WEB_CREDENTIAL` too, the entrypoint exits.** ttyd's
+  `check_auth` (src/protocol.c, 1.7.7) returns the header result immediately
+  when an auth header is configured and never consults the credential, so the
+  password would look like protection while providing none; the proxy is the
+  authentication.
+- **A client `--player` is dropped.** `--player` outranks `LANTHORN_PLAYER`
+  inside lanthorn, so the wrapper removes `--player`, `--player=…` from the
+  arguments (the page's `?arg=` is unauthenticated) in proxy mode.
+- **Sessions are keyed by (player, id).** Sockets, stamps and pid files live in
+  `<session dir>/<player>/<id>.*` (`_default` with no player), so reusing
+  another player's session id starts a fresh game. The sweeper walks every
+  player's directory and names a session `<player>/<id>`.
+- **Sound goes through the proxy too.** Normally web-audio.js dials
+  `host:7682/audio/<id>` directly. In proxy mode `build_index` also injects
+  `window.LANTHORN_WEB_AUDIO_PATH='/lanthorn-audio/'` (the same inline-config
+  mechanism as `LANTHORN_WEB_AUDIO_PORT`) and the page dials its own origin at
+  that path, so the operator's proxy authenticates it and routes it to the
+  relay port. The relay (`crates/audio-relay`) reads `LANTHORN_WEB_AUTH_HEADER`
+  from its environment, requires that header on the websocket upgrade (a 401
+  and no session when it is missing or not a valid player name), and takes the
+  player from it alone: nothing in the URL path or query can choose one. It
+  accepts both `/audio/<id>` and `/lanthorn-audio/<id>`. Its player-name check
+  is a copy of `data_roots::validate_player_name`, which is the source of
+  truth. FIFOs follow the socket layout, `<audio dir>/<player|_default>/<id>.pcm`,
+  which is also what serve-session.sh exports as `LANTHORN_AUDIO_OUT`, and the
+  sweeper unlinks `<audio dir>/<player>/<id>.pcm` for every player's session.
+  The relay port must be reachable only through the proxy, and the proxy must
+  strip client copies of the header on this route as well as ttyd's.
 
 ### The touch grab zone
 
@@ -135,8 +187,10 @@ longer costs the player anything.
 `--auto-save on`, so the resume archive in `/data` is rewritten as each turn
 completes and again on the way out. This is a flag on the command line rather
 than a line written into `/data/.lanthorn/config.toml`, deliberately: the
-container's cadence must never silently become the player's own setting, and a
-desktop lanthorn still ships with `auto_save = false`. `LANTHORN_WEB_AUTOSAVE=off`
+container's cadence must never silently become the player's own setting, even
+though a desktop lanthorn now ships with `auto_save = true` by default too
+(SQ-1624) — the container's flag is a one-run override, not a config write, so
+it never depends on what the desktop default happens to be. `LANTHORN_WEB_AUTOSAVE=off`
 turns it off; an explicit `--auto-save off` after `serve` wins over both.
 
 **And the game outlives the connection.** Each visitor's page mints a session id

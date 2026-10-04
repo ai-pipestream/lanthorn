@@ -4,7 +4,7 @@
 //!
 //! # What was actually invisible
 //!
-//! Not lanthorn's own `/open-hints` companion panel (`render::hints_panel`) —
+//! Not lanthorn's own `/open-hints` companion panel (`hints_tab`) —
 //! Counterfeit Monkey ships no local InvisiClues-style hint file, so that panel
 //! never opens for it at all (`hints::resolve_hint_source` finds nothing, and
 //! `open_hints` in `main.rs` only sets a status message). The game's OWN
@@ -131,7 +131,7 @@ fn boot_cm_past_accessibility_gate(honor: bool) -> Option<(GlulxSession, AppStat
     let blorb = Blorb::parse(std::fs::read(&path).unwrap()).expect("parse gblorb");
     let image = blorb.executable().expect("exec chunk").1.to_vec();
     let mut sess =
-        GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("boot CM");
+        GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("boot CM");
 
     let mut state = fresh_state(honor);
     state.push_transcript_runs(&sess.take_transcript(), TranscriptKind::Story, &[]);

@@ -53,7 +53,7 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
     if !z0.is_file() {
         return; // gitignored fixture
     }
-    let found = discover_art_candidates(&z0, None);
+    let found = discover_art_candidates(&z0, None, None);
     assert!(!found.is_empty(), "Zork Zero's archives sit beside it");
 
     for c in &found {
@@ -62,7 +62,7 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
         assert!(c.pictures > 0, "{} lists no pictures", c.filename);
         assert!(c.part >= 1, "{} has no part number", c.filename);
         assert!(
-            matches!(c.rendition, "Amiga" | "MCGA" | "EGA" | "CGA" | "EGA/CGA"),
+            matches!(c.rendition, "Amiga" | "Amiga/Mac" | "MCGA" | "EGA" | "CGA" | "EGA/CGA"),
             "{} got an unrecognised rendition label {:?}",
             c.filename,
             c.rendition
@@ -150,7 +150,7 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
         if !path.is_file() {
             continue; // gitignored fixture
         }
-        let found = discover_art_candidates(&path, None);
+        let found = discover_art_candidates(&path, None, None);
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
         for w in *wanted {
             // Only assert on archives this library actually has.
@@ -190,7 +190,7 @@ fn a_split_ega_archive_is_offered_as_one_entry_carrying_both_files() {
         if !path.is_file() || !fixture_path(tail).is_file() {
             continue; // gitignored fixtures
         }
-        let found = discover_art_candidates(&path, None);
+        let found = discover_art_candidates(&path, None, None);
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
 
         let c = found
@@ -237,7 +237,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
     std::fs::copy(&eg2, dir.join("arthur.eg2")).unwrap();
     std::fs::write(dir.join("arthur.z6"), b"x").unwrap();
 
-    let found = discover_art_candidates(&dir.join("arthur.z6"), None);
+    let found = discover_art_candidates(&dir.join("arthur.z6"), None, None);
     let c = found
         .iter()
         .find(|c| c.filename.eq_ignore_ascii_case("arthur.eg2"))
@@ -247,7 +247,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
 
     // Put part 1 back and the row disappears into it.
     std::fs::copy(fixture_path("arthur.eg1"), dir.join("arthur.eg1")).unwrap();
-    let found = discover_art_candidates(&dir.join("arthur.z6"), None);
+    let found = discover_art_candidates(&dir.join("arthur.z6"), None, None);
     assert!(!found.iter().any(|c| c.filename.eq_ignore_ascii_case("arthur.eg2")));
     assert_eq!(
         found.iter().find(|c| c.filename.eq_ignore_ascii_case("arthur.eg1")).map(|c| c.pictures),
@@ -264,12 +264,12 @@ fn the_detected_list_is_sorted_and_holds_only_native_archives() {
     if !z0.is_file() {
         return;
     }
-    let found = discover_art_candidates(&z0, None);
+    let found = discover_art_candidates(&z0, None, None);
     let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted, "the list is alphabetical");
-    assert_eq!(found, discover_art_candidates(&z0, None), "and stable across calls");
+    assert_eq!(found, discover_art_candidates(&z0, None, None), "and stable across calls");
     assert!(found.iter().all(|c| !c.filename.eq_ignore_ascii_case("Zork0.blb")));
     assert!(found.iter().all(|c| !c.filename.to_lowercase().ends_with(".z6")));
 }
@@ -509,7 +509,7 @@ fn the_dialog_opens_on_what_the_story_already_inherits() {
     if !z0.is_file() {
         return;
     }
-    let all = discover_art_candidates(&z0, None);
+    let all = discover_art_candidates(&z0, None, None);
     let Some(i) = all.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.eg1")) else {
         return;
     };
@@ -619,7 +619,11 @@ fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
     }
-    let found = discover_art_candidates(&image, None);
+    // This medium is a known Macintosh HFS disk, so the caller can hand its
+    // machine straight to discovery (SQ-1650) — the same fact
+    // `LaunchOptionsState::new` threads through from its own `disk_image`
+    // parameter, spelled out here since this test calls the free function.
+    let found = discover_art_candidates(&image, None, Some(blorb::medium::Machine::Macintosh));
     let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
 
     let colour = found
@@ -636,7 +640,9 @@ fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
     assert_eq!(mono.path, image);
 
     // The labels a human reads, which is the whole point of listing two rows.
-    assert_eq!(colour.rendition, "Amiga", "a colour AmigaMac archive stays honestly ambiguous");
+    // A known Macintosh medium resolves the colour archive's ambiguity too
+    // (SQ-1650) — it no longer merely stays honestly unresolved.
+    assert_eq!(colour.rendition, "Mac", "a known Macintosh medium resolves the ambiguity");
     assert_eq!(mono.rendition, "Mac B&W", "the two-colour one is the standard Macintosh's");
     assert_ne!(colour.rendition, mono.rendition, "two rows a person cannot tell apart is the bug");
 
@@ -668,7 +674,9 @@ fn an_amiga_floppy_offers_its_own_archive_through_the_same_seam() {
         eprintln!("SKIP: gitignored Amiga medium missing");
         return;
     }
-    let found = discover_art_candidates(&adf, None);
+    // A known Amiga ADF, so the machine is passed straight through, mirroring
+    // the Macintosh case above (SQ-1650).
+    let found = discover_art_candidates(&adf, None, Some(blorb::medium::Machine::Amiga));
     let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
     let pic = found
         .iter()
@@ -830,7 +838,7 @@ fn adding_the_medium_arm_moved_nothing_beside_the_story() {
         if !path.is_file() {
             continue; // gitignored fixtures
         }
-        let found = discover_art_candidates(&path, None);
+        let found = discover_art_candidates(&path, None, None);
         let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
         assert_eq!(names, want, "{story}");
         assert!(found.iter().all(|c| !c.on_medium), "{story} is not release media");
@@ -923,17 +931,25 @@ fn the_dialog_shows_the_disks_own_archives_and_says_where_they_live() {
 /// promising two-colour art to someone who is about to get colour.
 #[test]
 fn a_single_image_release_says_from_game_disk_and_names_its_default() {
-    // (image, the archive that boots when nothing is overridden)
-    for (name, default_archive, rendition) in [
-        ("Zork Zero Disk.image", "CPic.data", "Amiga"),
-        ("Zork Zero - The Revenge of Megaboz.adf", "Pic.data", "Amiga"),
+    // (image, the archive that boots when nothing is overridden, its known
+    // disk image, and the rendition that machine resolves the archive to —
+    // SQ-1650: with the disk image threaded through, the Macintosh's colour
+    // `CPic.data` is no longer just honestly ambiguous, it says "Mac".)
+    for (name, default_archive, disk_image, rendition) in [
+        ("Zork Zero Disk.image", "CPic.data", blorb::medium::DiskImage::Hfs, "Mac"),
+        (
+            "Zork Zero - The Revenge of Megaboz.adf",
+            "Pic.data",
+            blorb::medium::DiskImage::Adf,
+            "Amiga",
+        ),
     ] {
         let image = fixture_path(name);
         if !image.is_file() {
             eprintln!("SKIP: gitignored medium missing: {name}");
             continue;
         }
-        let st = LaunchOptionsState::new("Zork Zero", &image, None, None, Some(6), None);
+        let st = LaunchOptionsState::new("Zork Zero", &image, None, None, Some(6), Some(disk_image));
 
         // No candidate off this medium carries a disk number, because the
         // release is one disk — and each says the phrase that means exactly

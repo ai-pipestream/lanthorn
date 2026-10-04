@@ -12,7 +12,7 @@ use mapper::mapper::Mapper;
 
 use crate::engine::Engine;
 use crate::engine_helpers::{
-    apply_archive_state, restore_from_file, zvm_session_opt, RestoreOutcome,
+    apply_archive_state, engine_tag, restore_error_msg, restore_from_file, zvm_session_opt, RestoreOutcome,
 };
 use crate::state::AppState;
 
@@ -52,6 +52,7 @@ fn write_save_state(
         location,
         score,
         trigger: crate::archive::SaveTrigger::HostState,
+        source: state.source.clone(),
     };
     let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(session);
     for d in &v6_diags {
@@ -72,11 +73,12 @@ fn write_save_state(
     .map_err(|e| e.to_string())
 }
 
-/// Save on exit ONLY when auto_save is enabled. With auto_save off (the default),
-/// nothing is saved automatically — the user controls saving via the quit prompt's
-/// "Save State & quit", the /save-state command, or named save slots. This keeps
-/// "Quit without saving" honest and avoids silently overwriting an explicit save
-/// point on exit.
+/// Save on exit ONLY when auto_save is enabled (the default, since SQ-1624).
+/// With auto_save off, nothing is saved automatically on exit — the user
+/// controls saving via the quit prompt's "Save State & quit", the
+/// /save-state command, or named save slots. This keeps "Quit without
+/// saving" honest and avoids silently overwriting an explicit save point on
+/// exit.
 ///
 /// Exit auto-save is engine-neutral: the save routes through Engine::save_state
 /// (Quetzal for zvm, the gvm snapshot for Glulx); screen.bin is written for
@@ -149,6 +151,7 @@ pub fn exit_clear_resume_save(
         ifid,
         now_rfc3339(),
         &state.command_history,
+        &state.source,
     ) {
         Ok(()) => ExitSave::Saved,
         Err(e) => ExitSave::Failed(e.to_string()),
@@ -349,4 +352,89 @@ pub fn load_save(
         }
     }
     Loaded::default()
+}
+
+/// What [`resume_from_turn`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[must_use]
+pub struct Rewound {
+    /// The resume completed: the engine, transcript, map and history all now
+    /// reflect the picked turn. `false` when `idx` was out of range for
+    /// `state.history` (nothing was touched) or the engine refused the restore
+    /// (a `[Resume failed: …]` notice was already pushed either way).
+    pub ok: bool,
+    /// Something on screen changed, for a host that doesn't blanket-redraw
+    /// every action — mirrors [`super::clock::Fired::redraw`]. The TUI's own
+    /// event loop already forces a redraw unconditionally before dispatching
+    /// any action, so this matters mainly to a non-terminal host. `false` only
+    /// when `idx` was out of range and nothing happened at all.
+    pub redraw: bool,
+}
+
+/// Resume play from a recorded rewind/replay turn (`state.history[idx]`): restore
+/// the engine to that turn's snapshot, swap in the map as it stood at-or-before
+/// it, truncate history to `[0..=idx]` (a linear rewind — turns after it are
+/// discarded, so playing on overwrites them, the way typing over a rewound point
+/// works in any other IF interpreter), rebuild the transcript to match, reset the
+/// transcript sidecars and the scraped word set, and re-observe the resumed room.
+/// The shared core of the rewind/replay modal's Resume — every host reaches
+/// `state.history` through the same picker, so this is the one place that reads
+/// it back out.
+///
+/// Re-observing the room is [`reobserve_location`]'s job, not hand-rolled here:
+/// it also recenters the map pane on the resumed room, which the TUI's own
+/// former inline version of this code did NOT do — a genuine improvement that
+/// falls out of sharing the helper every other restore/resume arm already uses,
+/// not something added deliberately beyond what this dedup was asked for.
+///
+/// **Does not autosave.** Resuming only changes in-memory state and pushes a
+/// notice; nothing is written to the archive, matching the TUI's existing
+/// behaviour today. A host that wants the resumed turn to survive a crash or
+/// relaunch has to trigger its own Save State afterwards — every host now gets
+/// this same (non-autosaving) behaviour uniformly, by calling this one function.
+///
+/// `idx` out of range for `state.history` is a no-op: returns `Rewound::default()`
+/// with nothing touched and no notice pushed.
+pub fn resume_from_turn(
+    session: &mut dyn Engine,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    idx: usize,
+    map_view: Option<(u16, u16)>,
+) -> Rewound {
+    if idx >= state.history.len() {
+        return Rewound::default();
+    }
+    let plan = crate::history::resume_plan(&state.history, idx);
+    // History snapshots come from the running engine; wrap them with its tag so
+    // restore_state accepts them (both engines).
+    let es = crate::engine::EngineSave::new(engine_tag(&*session), 1, plan.save.clone());
+    if let Err(e) = session.restore_state(&es) {
+        state.push_notice(&format!("[Resume failed: {}]", restore_error_msg(e)));
+        return Rewound { ok: false, redraw: true };
+    }
+    if let Some(json) = &plan.map_json {
+        if let Ok(m) = mapper::persist::from_json(json) {
+            *mapper = m;
+        }
+    }
+    // Linear: discard later turns.
+    state.history.truncate(idx + 1);
+    let (lines, kinds) = crate::history::rebuild_transcript(&state.history, idx);
+    state.transcript = lines;
+    state.clear_anchor = None;
+    state.top_anchor = None;
+    state.transcript_kinds = kinds;
+    // History replay carries no style runs; keep the parallel vecs length-synced
+    // (unstyled, left rows).
+    state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+    state.transcript_para = vec![crate::state::ParaFmt::default(); state.transcript.len()];
+    state.reset_transcript_sidecars();
+    // Rebuilt from the replayed transcript (SQ-1135): a rewind to turn 4 offers
+    // the words turn 4 had printed.
+    crate::input::refresh_seen_words(state, &*session);
+    state.turns = plan.turn;
+    reobserve_location(state, mapper, &*session, map_view);
+    state.push_notice(&format!("[Resumed from turn {}]", plan.turn));
+    Rewound { ok: true, redraw: true }
 }

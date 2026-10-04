@@ -22,6 +22,73 @@ graphical v6 games paint no status line at all so lanthorn reads the band
 above the story window, and Glulx games get it from the bold room heading
 Inform prints as you enter — but you never configure any of it.
 
+**The Journal.** The panel on the right is the Journal, and it has tabs along
+its top: **Map**, **Room**, **Inventory**, **Hints** and **Documents**. Click a tab
+name, press **Alt+1** to **Alt+5**, or run `/journal-tab map|room|inventory|hints|documents`
+(`/journal-next-tab` and `/journal-prev-tab` step through them). The leader
+panel (`Ctrl+P`) has `j`, `k` and `i` for the first three. Your terminal may need
+"Option as Alt" turned on for the Alt keys to reach lanthorn. The Room tab shows
+the notes, exit card and objects for the room you are standing in — or the one
+you clicked on the map, which pins it (Esc lets go) — and the Inventory tab lists
+what you carry and where everything else was last seen. It remembers which tab you
+left on, per story. Narrow it down far enough and the bar shortens its labels, then
+shows only the current tab between `‹` and `›`. `/toggle-map` hides or shows the
+whole Journal, and the splitter beside it drags to any width.
+
+**The room card.** Click a room on the Map tab and a compact card appears under
+the map: the room's name and layer, the description the game last printed there
+(cut with `…` to fit), the move it was seen at, and **Rename…**, **Notes…**,
+**Move to another layer…** and **Details** buttons. The first three do what the
+right-click menu does; Details opens the Room tab.
+Esc, clicking the room again, or clicking empty map space puts the card away; with
+nothing selected there is no card.
+
+**The Hints tab.** A game's *InvisiClues* file, if lanthorn finds one in the game's
+documents folder, beside the story (or you have downloaded one), runs here in a
+window of its own: its topic menu on top, the clue text below, an input row at the
+bottom. It starts the first time you show the tab and keeps its place while you look
+at other tabs. With no hint file the tab says so, names the game's documents folder
+(or says to link the game to IFDB first, if it is not linked) and offers **Download
+hints…** (`/download-hints`, also `Shift+H` in the story browser). If several hint
+files could be the game's, the tab lists them as rows: click one, or press **Tab** to
+give the tab the keyboard, **Up/Down** and **Enter**, and **Esc** to give it back.
+The pick is remembered for the game. If the story ships its own `HINT` command, the
+tab points you at that too.
+
+Who is typing? The keyboard stays with the story when you show the tab by clicking
+its label, pressing **Alt+4** or running `/open-hints`. It moves to the hint window
+when you **click inside it**, or press **Tab** on an empty story prompt while the
+tab is showing (**Shift+Tab** goes back the other way). While the hint window has
+it, every key goes to the hint file — arrows, Enter and single letters included,
+because InvisiClues menus are driven that way — and **PageUp/PageDown** scroll the
+clues. The mouse wheel scrolls them whoever holds the keyboard. The input that has
+the keyboard shows the cursor and the other one dims, and the **Hints** label gets a
+`▸` in front. **Esc**, **Tab** on an empty hint line, a click on the story, or
+switching to another tab hands the keyboard back to the story.
+
+**The Documents tab.** The manual, the map, the feelies: whatever sits in this
+game's documents folder (see [getting started](getting-started.md)) is listed in
+the Documents tab with its kind and size, so you can read it without leaving the
+story. The header shows the folder as a link, with **Download documents…** to pull
+manuals and maps from IFDB and, when the folder does not exist yet, **Create
+documents folder**. A hint file there (an *InvisiClues* program) is listed as
+"hint program — opens in Hints tab": opening it shows the Hints tab running that
+file, and the keyboard stays in the story. A game that is not linked to IFDB says "Link to IFDB for a
+documents folder"; an empty folder tells you to drop files in or download some.
+
+Click a row to select it and double-click to open it. Text opens in a pager that
+wraps to the pane (and again if you resize it), copes with old Mac and DOS files,
+and says so if it cut off a huge one; pictures are drawn in the pane the same way
+the story picker draws covers; a PDF opens in your system viewer. A file whose
+name looks like a walkthrough, hint sheet or solution is marked `spoiler` and
+asks before it opens. From the keyboard: **Shift+Up/Down** move the selection (or
+scroll an open document), **Shift+Right** opens the selected row, **Shift+PageUp/
+PageDown** page, and **Esc** or **Shift+Left** return to the list. Plain typing,
+plain arrows and Esc on the list still belong to the command line.
+`/open-document`, `/close-document`, `/select-document` and `/scroll-document`
+do the same by name. (In the browser-served container there is no viewer to
+launch, so a PDF shows its path instead.)
+
 **Getting around.** `/zoom-map in|out|reset` scales between a detailed view
 and a compact overview; `/pan-map <dx> <dy>` slides the viewport and
 `/center-map` snaps back to wherever you're standing. You can also press and

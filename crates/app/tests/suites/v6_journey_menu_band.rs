@@ -366,7 +366,7 @@ const HOST_PAGE: image::Rgba<u8> = image::Rgba([0, 0, 0, 255]);
 fn empty_prose(_cols: u16, rows: u16) -> (MainText, RasterMetrics) {
     (
         MainText { lines: Vec::new(), styles: Vec::new(), input: String::new(), cursor_col: 0, awaiting: false, floats: Vec::new() },
-        RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0 },
+        RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0, top_anchored_fits: false },
     )
 }
 
@@ -399,6 +399,8 @@ fn menu_anchor_compose(
         more_prompt_pair: (HOST_INK, HOST_PAGE),
         text,
         bottom_anchor_menu,
+        hybrid_text_rows: std::collections::HashSet::new(),
+        extend_flanks_under_story_grid: false,
     };
     compose_v6_frame(&layout, frame, &inputs)
 }
@@ -1090,9 +1092,10 @@ fn boot_host(file: &str, want_release: u16, tag: &str) -> Option<BootedStory> {
             random_seed: Some(1),
             ..app::config::Config::default()
         },
-        data_base: home.join("saves"),
+        roots: app::data_roots::DataRoots::single(home.join("saves")),
         flags: LaunchFlags::default(),
         terminal: TerminalFacts::default(),
+        fresh_start: false,
     };
     Some(boot_story(req, &mut QuietBoot).expect("the story boots headlessly"))
 }

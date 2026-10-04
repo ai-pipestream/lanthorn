@@ -187,6 +187,7 @@ fn scan(path: &Path, name: &str) -> Option<Row> {
     let mut state = AppState::default();
     state.assist_preamble_shown = true;
     state.probe.arm(ShadowRecipe {
+        catalogue: None,
         story_bytes: Arc::new(bytes),
         store: PathBuf::new(),
         vfs_bytes: Arc::new(Vec::new()),
@@ -309,7 +310,7 @@ fn boot(loaded: app::hints::LoadedStory) -> Option<Box<dyn Engine>> {
         }
         app::hints::LoadedStory::Glulx(b) => {
             let s =
-                app::glulx_session::GlulxSession::new(b, 80, 24, true, false, false, (1, 1), None, &[])
+                app::glulx_session::GlulxSession::new(b, 80, 24, true, false, false, (1.0, 1.0), None, &[])
                     .ok()?;
             Some(Box::new(s))
         }

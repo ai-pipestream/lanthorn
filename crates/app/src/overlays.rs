@@ -22,6 +22,9 @@ use app::render::confirm_delete_dialog::{
 use app::render::confirm_overwrite_dialog::{
     confirm_overwrite_key_focused, draw_confirm_overwrite_dialog, ConfirmOverwriteAction, ConfirmOverwriteDialogRects,
 };
+use app::render::confirm_spoiler_dialog::{
+    confirm_spoiler_key_focused, draw_confirm_spoiler_dialog, ConfirmSpoilerAction, ConfirmSpoilerDialogRects,
+};
 use app::render::dialog::DialogRects;
 use app::render::fetch_keep_dialog::{
     button_count as fetch_keep_button_count, draw_fetch_keep_dialog, fetch_keep_key_focused,
@@ -32,7 +35,6 @@ use app::render::game_over_dialog::{
     draw_game_over_dialog, game_over_dialog_key_focused, GameOverAction, GameOverDialogRects,
 };
 use app::render::file_picker::draw_file_picker;
-use app::render::hints_panel::{draw_hints_panel, HintsPanelRects};
 use app::render::history::draw_history;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::launch_dialog::{
@@ -69,10 +71,10 @@ pub(crate) struct OverlayRects {
     pub text_entry: Option<TextEntryDialogRects>,
     pub confirm_delete: Option<ConfirmDeleteDialogRects>,
     pub confirm_overwrite: Option<ConfirmOverwriteDialogRects>,
+    pub confirm_spoiler: Option<ConfirmSpoilerDialogRects>,
     pub quit_dialog: Option<QuitDialogRects>,
     pub launch_dialog: Option<LaunchDialogRects>,
     pub region_prompt: Option<RegionPromptRects>,
-    pub hints_panel: Option<HintsPanelRects>,
 }
 
 /// Draw the z-ordered modal/overlay ladder over the current frame.
@@ -88,7 +90,6 @@ pub(crate) fn draw_all(
     state: &AppState,
     screen_model: &ScreenModel,
     story_area: Rect,
-    story_pane: Rect,
     full: Rect,
     buf: &mut Buffer,
     dialog_seed: Option<DialogRects>,
@@ -107,10 +108,10 @@ pub(crate) fn draw_all(
         text_entry: None,
         confirm_delete: None,
         confirm_overwrite: None,
+        confirm_spoiler: None,
         quit_dialog: None,
         launch_dialog: None,
         region_prompt: None,
-        hints_panel: None,
     };
 
     // Modal dialogs center within the graphics-free text region (story text +
@@ -163,17 +164,14 @@ pub(crate) fn draw_all(
         }
     }
 
+    // ── Documents chooser (SQ-1680) ────────────────────────────────────────
+    if let Some(ds) = &state.overlays.documents {
+        out.dialog = Some(app::documents_chooser::draw_documents(&ds.chooser, dialog_area, &state.colors, buf));
+    }
+
     // ── Command palette popup — drawn over everything (SQ-0419) ────────────
     if state.overlays.palette.is_some() {
         out.dialog = draw_palette(state, dialog_area, buf, modal_list_viewport, palette_hits);
-    }
-
-    // ── Hints panel overlay — drawn after the common dialogs ───────────────
-    // Laid over the story pane's full rect (not the centered dialog area), so it
-    // reads as the story panel temporarily replaced by the hint session and
-    // resizes with it.
-    if state.overlays.hints.is_some() {
-        out.hints_panel = draw_hints_panel(state, story_pane, buf);
     }
 
     out
@@ -230,6 +228,8 @@ pub(crate) enum OverlayAct {
     TextEntryCancel,
     ConfirmDelete(bool),
     ConfirmOverwrite(bool),
+    /// The Documents tab's spoiler question was answered (SQ-1681): `true` opens it.
+    ConfirmSpoiler(bool),
     QuitSave,
     QuitQuit,
     QuitCancel,
@@ -259,6 +259,7 @@ pub(crate) enum OverlayKind {
     Reset,
     GameOver,
     ConfirmOverwrite,
+    ConfirmSpoiler,
     SaveName,
     TextEntry,
     ConfirmDelete,
@@ -299,6 +300,7 @@ pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     &ResetOverlay,
     &GameOverOverlay,
     &ConfirmOverwriteOverlay,
+    &ConfirmSpoilerOverlay,
     &SaveNameOverlay,
     &TextEntryOverlay,
     &ConfirmDeleteOverlay,
@@ -723,6 +725,44 @@ impl Overlay for ConfirmOverwriteOverlay {
             OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(false))
         } else if in_overwrite {
             OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(true))
+        } else {
+            OverlayOutcome::Consumed
+        }
+    }
+}
+
+// ── Confirm-spoiler (two-button, the Documents tab's question; SQ-1681) ────
+struct ConfirmSpoilerOverlay;
+impl Overlay for ConfirmSpoilerOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::ConfirmSpoiler }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.confirm_spoiler_document.is_some() }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.confirm_spoiler = draw_confirm_spoiler_dialog(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
+                OverlayOutcome::Consumed
+            }
+            code => match confirm_spoiler_key_focused(code, state.overlays.dialog_focus) {
+                ConfirmSpoilerAction::Open => OverlayOutcome::Act(OverlayAct::ConfirmSpoiler(true)),
+                ConfirmSpoilerAction::Cancel => OverlayOutcome::Act(OverlayAct::ConfirmSpoiler(false)),
+                ConfirmSpoilerAction::None => OverlayOutcome::Consumed,
+            },
+        }
+    }
+    fn mouse(&self, _state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(cd) = &panes.confirm_spoiler else { return OverlayOutcome::Consumed };
+        if cd.close.is_some_and(|r| r.contains(pt)) || cd.cancel.is_some_and(|r| r.contains(pt)) {
+            OverlayOutcome::Act(OverlayAct::ConfirmSpoiler(false))
+        } else if cd.open.is_some_and(|r| r.contains(pt)) {
+            OverlayOutcome::Act(OverlayAct::ConfirmSpoiler(true))
         } else {
             OverlayOutcome::Consumed
         }
@@ -1210,6 +1250,7 @@ mod tests {
                 existing_name: "s".to_string(),
                 pending: app::state::PendingOverwrite::SaveAs,
             }), OverlayKind::ConfirmOverwrite),
+            (|o| o.confirm_spoiler_document = Some("walkthrough.txt".to_string()), OverlayKind::ConfirmSpoiler),
             (|o| o.save_name_dialog = Some(app::state::SaveNameDialog::new(String::new(), false)), OverlayKind::SaveName),
             (|o| o.text_entry = Some(app::state::TextEntryDialog::new(app::state::TextEntryKind::CreateFile, "")), OverlayKind::TextEntry),
             (|o| o.confirm_delete_save = Some(std::path::PathBuf::from("s.sav")), OverlayKind::ConfirmDelete),

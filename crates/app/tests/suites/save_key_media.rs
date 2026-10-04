@@ -262,30 +262,59 @@ fn the_zork_zero_builds_never_collide() {
     assert!(ran > 0 || !any_media_present(), "no Zork Zero medium present");
 }
 
-// ── Guard 1: no existing save is orphaned ────────────────────────────────────
+// ── Guard 1: no existing save is orphaned (refined by SQ-1635) ───────────────
 
-/// The promise. A loose `.z3`/`.z5`/`.z6`/`.zblorb` resolves to exactly the
-/// directory it resolved to before SQ-0850 — its sanitized basename — so nobody
-/// who already has saves loses sight of them. Measured through the path-only
-/// door (`story_key_at`), which is the one that reads the file and could have
-/// mistaken a story for a disk.
+/// The promise, refined by SQ-1635: a loose `.z3`/`.z5`/`.z6`/`.zblorb` keeps
+/// its basename directory UNLESS its own header names a KNOWN, CATALOGUED
+/// commercial release that is not Version 6 — see `cli_host::storage`'s module
+/// docs, "A loose file that is secretly a known release" — in which case it now
+/// shares a disk-mounted copy's directory instead, on purpose (going forward
+/// only: no existing save is moved or merged). Measured through the path-only
+/// door (`story_key_at`), which is the one that reads the file and decides
+/// which of the two applies.
+///
+/// [`LOOSE`]'s five fixtures cover both halves on real media: `zork1-r88` and
+/// `beyondzork-r57` are known, non-v6 releases and must now UNIFY; `zork0-r393`,
+/// `journey-r83` and `arthur-r74` are known but Version 6 and must NOT.
 #[test]
-fn a_loose_story_files_directory_does_not_move() {
+fn a_loose_story_files_directory_matches_its_release_or_its_basename() {
     let mut ran = 0;
-    for name in LOOSE {
+    let mut unified = 0;
+
+    // Hard-pinned, not oracle-derived: the two concrete fixtures this quest
+    // names, checked against a literal expected key rather than against
+    // `cli_host::storage::build_for_key`'s own answer, so a bug shared between
+    // the production code and the oracle below cannot hide here.
+    for (name, want) in [
+        ("zork1-r88-s840726.z3", "zork-i-r88-s840726"),
+        ("beyondzork-r57-s871221.z5", "beyond-zork-r57-s871221"),
+    ] {
         let path = stories_dir().join(name);
         if !path.exists() {
             continue;
         }
         ran += 1;
-        assert_eq!(
-            story_key_at(&path),
-            *name,
-            "{name}: a loose story file keys on its basename, unchanged",
-        );
+        unified += 1;
+        assert_eq!(story_key_at(&path), want, "{name}: must unify with its known release");
     }
+    // The three Version 6 fixtures must still keep their basename — unaffected,
+    // exactly as this test always pinned.
+    for name in ["zork0-r393-s890714.z6", "journey-r83-s890706.z6", "arthur-r74-s890714.z6"] {
+        let path = stories_dir().join(name);
+        if !path.exists() {
+            continue;
+        }
+        ran += 1;
+        assert_eq!(story_key_at(&path), name, "{name}: Version 6 keeps its basename, unchanged");
+    }
+
     // Every `.z*` sitting loose in `stories/`, not just the named ones — the
     // promise is not limited to a list somebody remembered to write down.
+    // Here the expected key IS oracle-derived (`build_for_key`), because the
+    // corpus is not enumerated by name; this still catches `story_key_at`'s
+    // `mounted_build` door disagreeing with the shared `build_for_key` helper
+    // every other call site goes through, which is a real class of bug this
+    // change could have introduced (SQ-1635).
     if let Ok(rd) = std::fs::read_dir(stories_dir()) {
         for e in rd.flatten() {
             let p = e.path();
@@ -295,10 +324,23 @@ fn a_loose_story_files_directory_does_not_move() {
             }
             ran += 1;
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-            assert_eq!(story_key_at(&p), name, "{name} must keep its basename directory");
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            let want = match cli_host::storage::build_for_key(&bytes, None) {
+                Some(build) => {
+                    unified += 1;
+                    cli_host::storage::disk_story_key(&build)
+                }
+                None => name.to_string(),
+            };
+            assert_eq!(story_key_at(&p), want, "{name}: expected key per SQ-1635's rule");
         }
     }
     assert!(ran > 0 || !any_media_present(), "no loose story file present");
+    assert!(
+        unified > 0 || !any_media_present(),
+        "no loose fixture exercised the SQ-1635 unification — this suite would pass \
+         having tested only the unrecognized/v6 basename cases",
+    );
 }
 
 // ── The volume whose story is not on it ──────────────────────────────────────

@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::data_roots::DataRoots;
 use crate::hints;
 
 /// The VM engine a story runs on (version-agnostic).
@@ -240,6 +241,10 @@ pub struct StoryMeta {
     /// A fetch ran but IFDB had no record for this IFID — so the panel offers a
     /// manual IFDB search link instead of a dead end (SQ-0371).
     pub fetch_not_found: bool,
+    /// The story's IFDB id (TUID), read from the fetched block itself rather than
+    /// recovered from `ifdb_link`; present once fetched/linked. Names the
+    /// documents folder (SQ-1679).
+    pub ifdb_tuid: Option<String>,
 }
 
 impl StoryMeta {
@@ -270,24 +275,32 @@ impl StoryMeta {
             ifdb_link: None,
             ifdb_rating: None,
             ifdb_rating_count: None,
-            fetch_not_found: false,
+            fetch_not_found: false, ifdb_tuid: None,
         }
     }
 
-    /// The build that names this story's save directory when it was mounted out
-    /// of a disk image, and `None` for a loose story file — the scan already
-    /// read the header, so a row can be keyed without touching the disk again
-    /// (SQ-0850). Feed to [`crate::storage::story_key_for`].
+    /// The build that names this story's save directory: its disk build when
+    /// it was mounted out of an image, or — for a loose story file whose own
+    /// header names a KNOWN, CATALOGUED commercial release (SQ-1635) — the
+    /// same build a disk-mounted copy of it would carry, so the two share one
+    /// save folder. `None` for every other loose file, unaffected by this at
+    /// all. The scan already read the header, so a row can be keyed without
+    /// touching the disk again (SQ-0850). Feed to [`crate::storage::story_key_for`].
     pub fn disk_build(&self) -> Option<crate::storage::DiskBuild> {
-        Some(crate::storage::DiskBuild {
+        let version = self.version.as_deref().and_then(|v| v.parse().ok())?;
+        let release = self.release?;
+        let serial = self.serial.as_ref()?;
+        match self.disk_image {
             // The MEDIUM and the VERSION are half of what names a Version 6
             // game's directory (SQ-1068) — one build pressed onto two disks is
             // one game for v1-v5 and two machines for v6.
-            medium: self.disk_image?,
-            version: self.version.as_deref().and_then(|v| v.parse().ok())?,
-            release: self.release?,
-            serial: self.serial.as_ref()?.clone(),
-        })
+            Some(medium) => {
+                Some(crate::storage::DiskBuild { medium, version, release, serial: serial.clone() })
+            }
+            // See `cli_host::storage::known_loose_build`'s docs for exactly
+            // when this answers `Some` (a known release, never Version 6).
+            None => cli_host::storage::known_loose_build(version, release, serial),
+        }
     }
 }
 
@@ -380,9 +393,16 @@ impl StoryEntry {
         })
     }
 
-    /// Where this story's saves, sidecars and fetched metadata live.
-    pub fn game_dir(&self, data_base: &Path) -> PathBuf {
-        crate::storage::game_dir(data_base, &self.story_key())
+    /// Where this player's saves and sidecars for the story live.
+    pub fn game_dir(&self, roots: &DataRoots) -> PathBuf {
+        roots.player_dir(&self.story_key())
+    }
+
+    /// Where the story's SHARED metadata (`info.json`, `cover.png`, IFDB link
+    /// state) lives. The same folder as [`StoryEntry::game_dir`] for the default
+    /// player; the shared catalogue's for a named one (SQ-1676).
+    pub fn catalogue_dir(&self, roots: &DataRoots) -> PathBuf {
+        roots.catalogue_dir(&self.story_key())
     }
 
     /// The key this row's cover art is cached under — and the file the decoder
@@ -395,9 +415,9 @@ impl StoryEntry {
     /// five, and a disk image is never a blorb — there is no frontispiece in
     /// there to lose. The fetched `cover.png` sits in that same directory, so
     /// the key doubles as the source.
-    pub fn cover_key(&self, data_base: &Path) -> PathBuf {
+    pub fn cover_key(&self, roots: &DataRoots) -> PathBuf {
         match self.meta.disk_entry {
-            Some(_) => self.game_dir(data_base),
+            Some(_) => self.catalogue_dir(roots),
             None => self.path.clone(),
         }
     }
@@ -600,15 +620,39 @@ pub struct StoryAux {
     /// reads `disk_fonts`. Display-only, and unlike `disk_fonts` there is no
     /// "in use": see [`crate::system_fonts`].
     pub system_fonts: Vec<crate::system_fonts::SystemFace>,
+    /// Where this game's documents folder stands (SQ-1679): found, would-be, or
+    /// not linked to IFDB. Looked up, never created, here; the panel's button and
+    /// the `create-documents-folder` command do the creating and then drop this
+    /// aux so it is read again.
+    pub documents: crate::documents::Location,
+    /// The files in that folder (SQ-1700), for the panel's "Documents (N)" list.
+    /// Read here, never per frame; empty unless the folder exists. Refreshed by
+    /// [`refresh_doc_files`] when the row is re-selected (a file dropped in by
+    /// hand), and rebuilt with the whole aux after a download or a create.
+    pub doc_files: Vec<crate::documents::DocEntry>,
 }
 
-/// Resolve the lazy aux for one story. `data_base` is the storage base
-/// (`user_dir/saves` or `--data-dir`); the story's saves live in its per-game
-/// dir `<data_base>/<story-key>/` (SQ-0284). `hint_index` is the shared index
+/// The files of a documents folder: the Documents tab's own listing
+/// ([`crate::documents_tab::entries_for`]), so the panel cannot disagree with it.
+pub fn doc_files_of(location: &crate::documents::Location) -> Vec<crate::documents::DocEntry> {
+    crate::documents_tab::entries_for(location)
+}
+
+/// Re-read the documents folder of an already-resolved aux, cheaply: the folder
+/// location is looked up again (it may have been created) and its files listed,
+/// without redoing the medium scans the rest of the aux holds.
+pub fn refresh_doc_files(aux: &mut StoryAux, roots: &DataRoots, entry: &StoryEntry) {
+    aux.documents = crate::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title);
+    aux.doc_files = doc_files_of(&aux.documents);
+}
+
+/// Resolve the lazy aux for one story. `roots` is the storage bases
+/// (`user_dir/saves` or `--data-dir`, plus a named player's own); the story's
+/// saves live in its per-game dir `<player base>/<story-key>/` (SQ-0284). `hint_index` is the shared index
 /// loaded once at picker start (still keyed by IFID).
 pub fn resolve_aux(
     entry: &StoryEntry,
-    data_base: &Path,
+    roots: &DataRoots,
     hint_index: &hints::HintIndex,
 ) -> StoryAux {
     // Only record an ASSOCIATED blorb (a different file); the self-blorb case is
@@ -624,7 +668,7 @@ pub fn resolve_aux(
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
-    let game_dir = entry.game_dir(data_base);
+    let game_dir = entry.game_dir(roots);
     let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
     let qzl_saves = crate::persist_files::list_qzl(&game_dir);
@@ -632,6 +676,25 @@ pub fn resolve_aux(
     let mut sidecars = Vec::new();
     if game_dir.join("default.aux").exists() { sidecars.push("default.aux"); }
     if game_dir.join("default.glkvfs").exists() { sidecars.push("default.glkvfs"); }
+    // The MEDIUM names the machine, the same door the launch takes — not the path,
+    // and not a guess (SQ-0876). Resolved here, ahead of the artwork scan below,
+    // so the art candidates can reuse its answer rather than mounting the medium
+    // a second time to ask the same question (SQ-1650): `profile_source ==
+    // Medium` is exactly "the machine came off the disk, not off a guess", and
+    // a resolve with no explicit number/named-art/pre-mounted medium can only
+    // land on `Amiga`/`Macintosh` there when the medium's own `DiskImage::machine`
+    // said so.
+    let (profile, profile_source) =
+        crate::interpreter::InterpreterProfile::resolve_with_source(&entry.path, None, None, None);
+    let known_machine = (profile_source == crate::interpreter::ProfileSource::Medium)
+        .then_some(match profile {
+            crate::interpreter::InterpreterProfile::Amiga => Some(blorb::medium::Machine::Amiga),
+            crate::interpreter::InterpreterProfile::Macintosh => {
+                Some(blorb::medium::Machine::Macintosh)
+            }
+            _ => None,
+        })
+        .flatten();
     // Resolved here rather than in the panel because the panel redraws every
     // frame and this reads and parses whole archives; the aux cache is already
     // the per-story "things that touch the disk" tier.
@@ -640,6 +703,7 @@ pub fn resolve_aux(
     let art_candidates = crate::launch_options::discover_art_candidates(
         &entry.path,
         entry.meta.disk_entry.as_deref(),
+        known_machine,
     );
     let art_in_use = crate::styles::read_per_game_pictures(&game_dir);
     // Same tier as the artwork scan above, and for the same reason: it mounts the
@@ -647,13 +711,6 @@ pub fn resolve_aux(
     let mut disk_sounds: Vec<crate::native_sound::DiskSound> =
         crate::native_sound::from_medium(&entry.path).into_values().collect();
     disk_sounds.sort_by_key(|s| s.effect);
-    // Same tier again, and paired with this story's own entry for the same reason
-    // the artwork scan is (SQ-0876/SQ-1018): a compilation carries one
-    // application per game, and only one of them is this row's.
-    // The MEDIUM names the machine, the same door the launch takes — not the path,
-    // and not a guess (SQ-0876).
-    let (profile, profile_source) =
-        crate::interpreter::InterpreterProfile::resolve_with_source(&entry.path, None, None, None);
     // `disks: None` — this column is about the STORY's own medium, and asking the
     // system rung as well would cost a second mount of every boot disk per row for
     // an answer it cannot change: a release face the cascade admits is drawn either
@@ -684,6 +741,7 @@ pub fn resolve_aux(
     } else {
         Vec::new()
     };
+    let documents = crate::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title);
     StoryAux {
         assoc_blorb,
         saves,
@@ -697,6 +755,8 @@ pub fn resolve_aux(
         disk_sounds,
         disk_fonts,
         system_fonts,
+        doc_files: doc_files_of(&documents),
+        documents,
     }
 }
 
@@ -974,6 +1034,7 @@ struct Resolved {
     ifdb_rating: Option<f32>,
     ifdb_rating_count: Option<u32>,
     fetch_not_found: bool,
+    ifdb_tuid: Option<String>,
 }
 
 /// The publication year from a Treaty of Babel `<firstpublished>`, which is
@@ -1278,7 +1339,7 @@ fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
 
 /// The title the story browser resolves for `path` from **real metadata**, with
 /// no filename fallback: the container's own `IFmd` chunk, then the fetched IFDB
-/// sidecar under `data_base`, then the bundled tables. `None` when no source
+/// sidecar under `roots`, then the bundled tables. `None` when no source
 /// knows this story.
 ///
 /// This is the browser's own answer, exported so the in-game story pane can ask
@@ -1292,12 +1353,12 @@ fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
 /// row does.
 pub fn metadata_title(
     path: &Path,
-    data_base: &Path,
+    roots: &DataRoots,
     ifid: &str,
     is_scott: bool,
     bytes: &[u8],
 ) -> Option<String> {
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(path));
+    let game_dir = roots.catalogue_dir(&crate::storage::story_key_at(path));
     metadata_title_in(path, &game_dir, ifid, is_scott, bytes)
 }
 
@@ -1378,9 +1439,10 @@ fn resolve(
     let ifdb_rating = fetched.and_then(|f| f.ifdb_rating);
     let ifdb_rating_count = fetched.and_then(|f| f.ifdb_rating_count);
     let fetch_not_found = fetched.map(|f| f.not_found).unwrap_or(false);
+    let ifdb_tuid = fetched.and_then(|f| f.ifdb_tuid.clone()).filter(|t| !t.is_empty());
     Resolved {
         title, author, year, genre, language, description, ifdb_link, ifdb_rating,
-        ifdb_rating_count, fetch_not_found,
+        ifdb_rating_count, fetch_not_found, ifdb_tuid,
     }
 }
 
@@ -1389,10 +1451,10 @@ fn resolve(
 /// a supported story are silently skipped (v6 is supported since SQ-0186).
 /// Sorted by title (case-insensitive), then filename.
 ///
-/// `data_base` is the storage base (as passed to `ensure_aux`/`compute_row_badges`),
+/// `roots` is the storage base (as passed to `ensure_aux`/`compute_row_badges`),
 /// used to locate each story's per-game `info.json` sidecar (SQ-0348's fetched
 /// metadata) for precedence resolution.
-pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
+pub fn scan_stories(dir: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -1413,12 +1475,19 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
         if !has_story_ext(path) {
             continue;
         }
-        out.extend(resolve_entries(path, data_base));
+        out.extend(resolve_entries(path, roots));
     }
     dedupe_within_a_volume(&mut out);
     dedupe_within_sets(&mut out, &sets);
     associate_hint_sidecars(&mut out);
     sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
+    // Every detected game that already carries an IFDB id gets its documents
+    // folder (SQ-1679); the other half of "as soon as a TUID is known" is
+    // `fetch_worker::write_fetched`. Unlinked games get none.
+    crate::documents::ensure_linked(
+        roots,
+        out.iter().filter_map(|e| Some((e.meta.ifdb_tuid.as_deref()?, e.title.as_str()))),
+    );
     out
 }
 
@@ -1459,7 +1528,7 @@ pub fn scan_folders(dir: &Path) -> Vec<StoryEntry> {
 /// One directory at a time, on purpose. The scan opens every candidate file it
 /// lists, and a whole library is gigabytes; walking it is the indexer's job
 /// ([`spawn_library_index`]), off the thread that draws.
-pub fn library_rows(dir: &Path, root: &Path, data_base: &Path) -> Vec<StoryEntry> {
+pub fn library_rows(dir: &Path, root: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
     let mut out: Vec<StoryEntry> = Vec::new();
     if dir != root {
         if let Some(parent) = dir.parent() {
@@ -1467,7 +1536,7 @@ pub fn library_rows(dir: &Path, root: &Path, data_base: &Path) -> Vec<StoryEntry
         }
     }
     out.extend(scan_folders(dir));
-    out.extend(scan_stories(dir, data_base));
+    out.extend(scan_stories(dir, roots));
     sort_stories(&mut out, Sort::default());
     out
 }
@@ -1503,9 +1572,9 @@ pub struct IndexBatch {
 /// it finishes. Per-folder rather than one flat scan, so the rules that only
 /// make sense within a directory (multi-disk grouping, hint-sidecar
 /// association) keep applying within one.
-pub fn index_library(root: &Path, data_base: &Path, mut deliver: impl FnMut(IndexBatch)) {
+pub fn index_library(root: &Path, roots: &DataRoots, mut deliver: impl FnMut(IndexBatch)) {
     for dir in library_dirs(root) {
-        let entries = scan_stories(&dir, data_base);
+        let entries = scan_stories(&dir, roots);
         deliver(IndexBatch { dir, entries });
     }
 }
@@ -1513,10 +1582,10 @@ pub fn index_library(root: &Path, data_base: &Path, mut deliver: impl FnMut(Inde
 /// [`index_library`] on its own thread. The receiver yields one batch per
 /// folder and disconnects when the walk is done, so a reader can tell "still
 /// indexing" from "indexed" without a flag.
-pub fn spawn_library_index(root: PathBuf, data_base: PathBuf) -> std::sync::mpsc::Receiver<IndexBatch> {
+pub fn spawn_library_index(root: PathBuf, roots: DataRoots) -> std::sync::mpsc::Receiver<IndexBatch> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        index_library(&root, &data_base, |batch| {
+        index_library(&root, &roots, |batch| {
             // A dropped receiver means the picker has gone; nothing to do but
             // stop walking, which the next iteration's send failure also does.
             let _ = tx.send(batch);
@@ -1528,14 +1597,14 @@ pub fn spawn_library_index(root: PathBuf, data_base: PathBuf) -> std::sync::mpsc
 /// The fetch targets a headless `--fetch` works through: one per story in
 /// `source`, and for a library that means the stories in all of its folders,
 /// in the order [`index_library`] visits them.
-pub fn fetch_targets(source: &StorySource, data_base: &Path) -> Vec<crate::fetch_worker::FetchTarget> {
+pub fn fetch_targets(source: &StorySource, roots: &DataRoots) -> Vec<crate::fetch_worker::FetchTarget> {
     let mut out: Vec<crate::fetch_worker::FetchTarget> = Vec::new();
     match source {
-        StorySource::Library(root) => index_library(root, data_base, |batch| {
+        StorySource::Library(root) => index_library(root, roots, |batch| {
             out.extend(batch.entries.iter().map(crate::fetch_worker::FetchTarget::row));
         }),
         other @ StorySource::DiskSet { .. } => {
-            out.extend(other.scan(data_base).iter().map(crate::fetch_worker::FetchTarget::row));
+            out.extend(other.scan(roots).iter().map(crate::fetch_worker::FetchTarget::row));
         }
     }
     out
@@ -1798,7 +1867,7 @@ impl StorySource {
     /// The mount that answers it is the cost, so it is asked only of files that
     /// really are disk images, and only after the cheap name-only rule has
     /// declined. Every loose story file still leaves here on the first line.
-    pub fn of(path: &Path, data_base: &Path) -> Option<StorySource> {
+    pub fn of(path: &Path, roots: &DataRoots) -> Option<StorySource> {
         if path.is_dir() {
             return Some(StorySource::Library(path.to_path_buf()));
         }
@@ -1806,7 +1875,7 @@ impl StorySource {
             .or_else(|| holds_several_games(path).then(|| vec![path.to_path_buf()]))?;
         let dir = path.parent()?.to_path_buf();
         let source = StorySource::DiskSet { dir, members };
-        (source.scan(data_base).len() >= 2).then_some(source)
+        (source.scan(roots).len() >= 2).then_some(source)
     }
 
     /// The directory these stories live in — where a download lands and what the
@@ -1819,13 +1888,13 @@ impl StorySource {
     }
 
     /// This source's stories, sorted by title, deduped within the set.
-    pub fn scan(&self, data_base: &Path) -> Vec<StoryEntry> {
+    pub fn scan(&self, roots: &DataRoots) -> Vec<StoryEntry> {
         match self {
-            StorySource::Library(dir) => scan_stories(dir, data_base),
+            StorySource::Library(dir) => scan_stories(dir, roots),
             StorySource::DiskSet { members, .. } => {
                 let mut out: Vec<StoryEntry> = Vec::new();
                 for m in members {
-                    out.extend(resolve_entries(m, data_base));
+                    out.extend(resolve_entries(m, roots));
                 }
                 // **Only across volumes**, because that is what the fold means:
                 // "a build an EARLIER volume already offered". A lone volume has
@@ -1927,14 +1996,15 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
             .to_string();
         let title = out[g].title.clone();
         let ifid = out[g].meta.ifid.clone();
-        let chosen = sidecar_idxs.iter().copied().find(|&s| {
-            // Identity first (SQ-0767): a story mounted out of a disk image is
-            // named for the box, so neither its stem nor its title can say
-            // which clues file is its own.
-            hints::hint_matches_identity(&names[s], &ifid)
-                || hints::hint_matches_story(&names[s], &stem)
-                || hints::hint_matches_story(&names[s], &title)
-        });
+        // The one shared matcher (SQ-1689); identity first (SQ-0767): a story
+        // mounted out of a disk image is named for the box, so neither its stem
+        // nor its title can say which clues file is its own.
+        let cand: Vec<&str> = sidecar_idxs.iter().map(|&s| names[s].as_str()).collect();
+        let target = hints::HintTarget { stem: &stem, title: &title, ifid: &ifid };
+        let chosen = match hints::match_hint_sidecar(target, &cand) {
+            hints::HintPick::One(k) => Some(sidecar_idxs[k]),
+            _ => None,
+        };
         if let Some(s) = chosen {
             out[g].hint_sidecar = Some(out[s].path.clone());
             matched.insert(out[s].path.clone());
@@ -1950,8 +2020,8 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
 /// the picker's fetch-progress handler (SQ-0348), which re-resolves a single
 /// story right after its sidecar is (re)written so a completed fetch's title/
 /// author/year land in the list without a full re-scan.
-pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
-    resolve_entry_from(path, None, data_base)
+pub fn resolve_entry(path: &Path, roots: &DataRoots) -> Option<StoryEntry> {
+    resolve_entry_from(path, None, roots)
 }
 
 /// [`resolve_entry`] for one **named** story off a disk image that holds several
@@ -1960,10 +2030,10 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
 pub fn resolve_entry_from(
     path: &Path,
     disk_entry: Option<&str>,
-    data_base: &Path,
+    roots: &DataRoots,
 ) -> Option<StoryEntry> {
     let (loaded, disk_image) = crate::hints::load_mounted_story_from(path, disk_entry).ok()?;
-    entry_from_loaded(path, disk_entry, loaded, disk_image, data_base)
+    entry_from_loaded(path, disk_entry, loaded, disk_image, roots)
 }
 
 /// **Every** launchable story `path` offers, as its own row.
@@ -1978,33 +2048,55 @@ pub fn resolve_entry_from(
 /// a six-game disk costs the read it always cost. A container holding one story
 /// takes the plain path with no selector at all: nothing about a single-game
 /// floppy or a single-game download changes, which is most of the corpus.
-pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
-    if let Some((_, stories)) = crate::hints::mounted_stories(path) {
-        if stories.len() >= 2 {
-            let mut rows: Vec<StoryEntry> = stories
-                .into_iter()
-                .filter_map(|(story, image)| {
-                    let loaded = crate::hints::extract_story(story.bytes).ok()?;
-                    // `image` is THIS story's, not the volume's: on a hybrid
-                    // disc the two differ, and the row's badge and interpreter
-                    // both follow from it (SQ-0876).
-                    entry_from_loaded(path, Some(&story.name), loaded, Some(image), data_base)
-                })
-                .collect();
-            // One build per machine, once — the same fold the directory scan
-            // applies, applied here because this door builds a volume's rows on
-            // its own (SQ-0878).
-            dedupe_within_a_volume(&mut rows);
-            return rows;
+pub fn resolve_entries(path: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
+    // A disk image already found to hold no story, and unchanged since (SQ-1691):
+    // every scan and index path comes through here, so one check serves them all.
+    if crate::miss_cache::is_known_miss(roots, path) {
+        return Vec::new();
+    }
+    match crate::hints::scan_mounted_stories(path) {
+        crate::hints::DiskScan::Stories(found) => {
+            let stories = found.stories;
+            if stories.len() >= 2 {
+                let mut rows: Vec<StoryEntry> = stories
+                    .into_iter()
+                    .filter_map(|(story, image)| {
+                        let loaded = crate::hints::extract_story(story.bytes).ok()?;
+                        // `image` is THIS story's, not the volume's: on a hybrid
+                        // disc the two differ, and the row's badge and interpreter
+                        // both follow from it (SQ-0876).
+                        entry_from_loaded(path, Some(&story.name), loaded, Some(image), roots)
+                    })
+                    .collect();
+                // One build per machine, once — the same fold the directory scan
+                // applies, applied here because this door builds a volume's rows on
+                // its own (SQ-0878).
+                dedupe_within_a_volume(&mut rows);
+                return rows;
+            }
+            // Exactly one story: the plain path, no selector — `disk_entry` stays
+            // `None`, exactly as it always did. A story the format itself listed
+            // is opened through `resolve_entry`, whose tiebreak is the format's
+            // own. One that only the Scott scan found (the format lists nothing,
+            // so the tiebreak is empty and `load_mounted_story_from` falls back
+            // to this same single candidate, SQ-1470) is already in hand, and
+            // taking it from here spares a second mount and, on a crunched
+            // Commodore disk, a second 6502 depack (SQ-1691).
+            if found.listed == 0 {
+                let (story, image) = stories.into_iter().next().expect("one story");
+                let Ok(loaded) = crate::hints::extract_story(story.bytes) else { return Vec::new() };
+                return entry_from_loaded(path, None, loaded, Some(image), roots).into_iter().collect();
+            }
+            return resolve_entry(path, roots).into_iter().collect();
         }
-        // Exactly one story: the plain path, no selector — `resolve_entry`
-        // reaches it through `load_mounted_story_from(path, None)`, which
-        // since SQ-1470 falls back to this same single Scott candidate when
-        // the format's own Z-code/Glulx/Blorb tiebreak (`MountedDisk::story`)
-        // finds nothing — see `hints::read_story_file`'s own doc. Nothing
-        // about an ordinary single-story floppy changes: `disk_entry` stays
-        // `None`, exactly as it always did.
-        return resolve_entry(path, data_base).into_iter().collect();
+        // Mounted fine and holds nothing: the one outcome worth remembering. It
+        // would only have gone on to `resolve_entry` and failed the same way,
+        // after a second look.
+        crate::hints::DiskScan::NoStory => {
+            crate::miss_cache::record_miss(roots, path);
+            return Vec::new();
+        }
+        crate::hints::DiskScan::NotADisk => {}
     }
     // A zip is a container too (SQ-1098). Its entries carry no `DiskImage`, so
     // every row's save key is its ENTRY's basename — which is what had to be
@@ -2021,12 +2113,12 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
                 .into_iter()
                 .filter_map(|(name, bytes)| {
                     let loaded = crate::hints::extract_story(bytes).ok()?;
-                    entry_from_loaded(path, Some(&name), loaded, None, data_base)
+                    entry_from_loaded(path, Some(&name), loaded, None, roots)
                 })
                 .collect();
         }
     }
-    resolve_entry(path, data_base).into_iter().collect()
+    resolve_entry(path, roots).into_iter().collect()
 }
 
 /// The body both doors share: build one row out of a story that is already
@@ -2036,7 +2128,7 @@ fn entry_from_loaded(
     disk_entry: Option<&str>,
     loaded: crate::hints::LoadedStory,
     disk_image: Option<crate::hints::DiskImage>,
-    data_base: &Path,
+    roots: &DataRoots,
 ) -> Option<StoryEntry> {
     // Only list stories lanthorn can actually launch: Z-code via the
     // Z-machine loader (accepts v1-v8 since SQ-1422), Glulx via the Glulx
@@ -2102,9 +2194,14 @@ fn entry_from_loaded(
     // Fetched IFDB sidecar: absent (never fetched, unreadable, malformed,
     // wrong IFID) is simply no metadata, never a scan error. The mount is
     // already done, so the disk-image save key (SQ-0850) costs nothing here.
-    let disk_build = disk_image.and_then(|kind| crate::storage::DiskBuild::of(&bytes, kind));
-    let game_dir = crate::storage::game_dir(
-        data_base,
+    // `build_for_key` also unifies a LOOSE known release's key with a disk-
+    // mounted copy's (SQ-1635) — this must stay in step with
+    // `StoryMeta::disk_build`, which computes the same row's key again once
+    // the `StoryEntry` exists, or the scan-time `game_dir` below (used to load
+    // the fetched sidecar) and the row's own later `game_dir()` would name two
+    // different directories for one game.
+    let disk_build = crate::storage::build_for_key(&bytes, disk_image);
+    let game_dir = roots.catalogue_dir(
         &crate::storage::story_key_for(crate::storage::StoryOrigin {
             path,
             // The row does not exist yet, so this is the one site that cannot
@@ -2212,6 +2309,7 @@ fn entry_from_loaded(
         ifdb_rating: resolved.ifdb_rating,
         ifdb_rating_count: resolved.ifdb_rating_count,
         fetch_not_found: resolved.fetch_not_found,
+        ifdb_tuid: resolved.ifdb_tuid,
     };
     Some(StoryEntry { path: path.to_path_buf(), title, filename, meta, hint_sidecar: None, kind: RowKind::Story })
 }
@@ -2548,29 +2646,89 @@ fn sibling_blorb_exists(path: &Path) -> bool {
     blorb::sibling_blorb_by_name(path).is_some()
 }
 
-/// Compute a row's artifact badges. `data_base` is the storage base; the save
-/// badge lights when the story's per-game dir `<data_base>/<story-key>/` exists
+/// Where a story row's hints stand (SQ-1696): the one answer the browser's info
+/// panel, its badge and the download key read, and a host reads the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HintStatus {
+    /// A hint file is in hand: the sidecar beside the story, or a hint program in
+    /// the game's documents folder (where an IFDB-linked game's download lands).
+    File(PathBuf),
+    /// No file, but a matching InvisiClues can be downloaded.
+    Downloadable,
+    None,
+}
+
+/// The game's documents folder when it is linked to IFDB (existing or planned).
+pub fn entry_documents_dir(entry: &StoryEntry, roots: &DataRoots) -> Option<PathBuf> {
+    crate::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title).path().map(Path::to_path_buf)
+}
+
+/// [`HintStatus`] for `entry`. The documents folder is searched with
+/// [`hints::resolve_in_story_documents`] — step 0 of the rule the Hints tab opens
+/// by — so a restart that forgets the in-memory sidecar still sees a download.
+pub fn hint_status(entry: &StoryEntry, roots: &DataRoots, index: &hints::HintIndex) -> HintStatus {
+    if let Some(p) = &entry.hint_sidecar {
+        return HintStatus::File(p.clone());
+    }
+    if let Some(dir) = entry_documents_dir(entry, roots) {
+        let story = hints::HintStory::new(&entry.meta.ifid, &entry.title).with_documents(Some(&dir));
+        match hints::resolve_in_story_documents(&entry.path, story, index) {
+            Some(hints::HintResolution::File(p)) => return HintStatus::File(p),
+            Some(hints::HintResolution::Choose(mut files)) if !files.is_empty() => {
+                return HintStatus::File(files.swap_remove(0));
+            }
+            _ => {}
+        }
+    }
+    if hints::hint_download_for(&entry.meta.ifid).is_some() {
+        HintStatus::Downloadable
+    } else {
+        HintStatus::None
+    }
+}
+
+/// Fold a finished hint download into the row list: on success the row's
+/// `hint_sidecar` becomes the saved file. Returns the row's index (when it
+/// changed, so the caller can recompute that row's badges) and the status line.
+pub fn apply_hint_download(
+    stories: &mut [StoryEntry],
+    r: &crate::hint_download::HintDlResult,
+) -> (Option<usize>, String) {
+    let line = crate::hint_download::download_result_line(r);
+    if r.outcome != crate::hint_download::HintDlOutcome::Done {
+        return (None, line);
+    }
+    let idx = stories.iter().position(|e| e.is(&r.story, r.disk_entry.as_deref()));
+    if let Some(i) = idx {
+        stories[i].hint_sidecar = Some(r.dest.clone());
+    }
+    (idx, line)
+}
+
+/// Compute a row's artifact badges. `roots` is the storage base; the save
+/// badge lights when the story's per-game dir `<roots>/<story-key>/` exists
 /// and holds a `.lanthorn` or `.qzl` (SQ-0284). `hint_index` (IFID-keyed) is
 /// loaded once at picker start. No archive reads.
 pub fn compute_row_badges(
     entry: &StoryEntry,
-    data_base: &Path,
+    roots: &DataRoots,
     hint_index: &hints::HintIndex,
 ) -> RowBadges {
     if entry.is_folder() {
         return RowBadges::default();
     }
     let ifid = &entry.meta.ifid;
-    let game_dir = entry.game_dir(data_base);
-    let hint = if hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some() {
+    // The PLAYER's folder: a catalogue-only folder (metadata, no saves) reads as
+    // unplayed for a player who has never saved here (SQ-1676).
+    let game_dir = entry.game_dir(roots);
+    let status = hint_status(entry, roots, hint_index);
+    let hint = if hint_index.get(ifid).is_some() || matches!(status, HintStatus::File(_)) {
         HintBadge::Present
+    } else if status == HintStatus::Downloadable {
+        // No local hint — light the lowercase glyph.
+        HintBadge::Available
     } else {
-        // No local hint — light the lowercase glyph if one is downloadable.
-        if hints::hint_download_for(&entry.meta.ifid).is_some() {
-            HintBadge::Available
-        } else {
-            HintBadge::None
-        }
+        HintBadge::None
     };
     RowBadges {
         blorb: row_is_blorb(entry),
@@ -2650,7 +2808,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), b"not a story").unwrap();   // wrong ext
         std::fs::write(dir.join("broken.z5"), b"garbage").unwrap();       // bad header
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "only the valid .z5 is listed");
@@ -2719,7 +2877,7 @@ mod tests {
         // A real story beside them, so an empty list cannot pass by accident.
         std::fs::write(dir.join("game.z5"), minimal_v3_story()).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -2746,7 +2904,7 @@ mod tests {
         bogus[0x00] = 9;
         std::fs::write(dir.join("bogus.z5"), &bogus).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(names.iter().any(|n| n == "graphic.z6"), "v6 .z6 story is listed (supported): {names:?}");
@@ -2759,7 +2917,7 @@ mod tests {
         let dir = temp_dir("sort");
         std::fs::write(dir.join("zebra.z5"), minimal_v3_story()).unwrap();
         std::fs::write(dir.join("apple.z5"), minimal_v3_story()).unwrap();
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
         let titles: Vec<&str> = stories.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["apple", "zebra"]);
@@ -2792,7 +2950,7 @@ mod tests {
                 genre: None,
                 language: None,
                 description: None, ifdb_link: None, ifdb_rating: None,
-                ifdb_rating_count: None, fetch_not_found: false,
+                ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
             },
             hint_sidecar: None,
             kind: RowKind::Story,
@@ -3339,7 +3497,7 @@ mod tests {
         b[0x10] = 0x00; b[0x11] = 0x40;                 // colour bit set
         std::fs::write(dir.join("game.z3"), &b).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1);
@@ -3398,8 +3556,8 @@ mod tests {
         std::fs::write(dir.join("bare.z3"), &story).unwrap();
         std::fs::write(dir.join("wrapped.zblorb"), blorb_with_exec(&story)).unwrap();
 
-        let bare = resolve_entry(&dir.join("bare.z3"), &dir).expect("bare story resolves");
-        let blorb = resolve_entry(&dir.join("wrapped.zblorb"), &dir).expect("blorb resolves");
+        let bare = resolve_entry(&dir.join("bare.z3"), &crate::data_roots::DataRoots::single(&dir)).expect("bare story resolves");
+        let blorb = resolve_entry(&dir.join("wrapped.zblorb"), &crate::data_roots::DataRoots::single(&dir)).expect("blorb resolves");
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(bare.meta.story_bytes, story.len() as u64);
@@ -3473,9 +3631,9 @@ mod tests {
             .unwrap();
         std::fs::write(dir.join("without-cover.zblorb"), blorb_with_exec(&story)).unwrap();
 
-        let with_cover = resolve_entry(&dir.join("with-cover.zblorb"), &dir)
+        let with_cover = resolve_entry(&dir.join("with-cover.zblorb"), &crate::data_roots::DataRoots::single(&dir))
             .expect("blorb with an Fspc chunk resolves");
-        let without_cover = resolve_entry(&dir.join("without-cover.zblorb"), &dir)
+        let without_cover = resolve_entry(&dir.join("without-cover.zblorb"), &crate::data_roots::DataRoots::single(&dir))
             .expect("blorb with no Fspc chunk still resolves");
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -3497,7 +3655,7 @@ mod tests {
         std::fs::write(dir.join("Zork I - The Great Underground Empire.z3"), &zork1).unwrap();
         std::fs::write(dir.join("zork1inv.z5"), minimal_v3_story()).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "the sidecar is hidden once associated: {stories:?}");
@@ -3530,9 +3688,9 @@ mod tests {
             if !path.is_file() {
                 continue; // no story media here — skip
             }
-            let entry = resolve_entry(&path, &base).expect("the floppy mounts and is launchable");
+            let entry = resolve_entry(&path, &crate::data_roots::DataRoots::single(&base)).expect("the floppy mounts and is launchable");
             assert_eq!(
-                compute_row_badges(&entry, &base, &index).hint,
+                compute_row_badges(&entry, &crate::data_roots::DataRoots::single(&base), &index).hint,
                 HintBadge::Available,
                 "{name} (IFID {}): pre-fix the container's name matched no catalog key",
                 entry.meta.ifid
@@ -3560,7 +3718,7 @@ mod tests {
             if ext != "adf" {
                 continue;
             }
-            let Some(entry) = resolve_entry(&path, &data_base) else {
+            let Some(entry) = resolve_entry(&path, &crate::data_roots::DataRoots::single(&data_base)) else {
                 continue; // not launchable — the picker wouldn't list it either
             };
             saw_adf = true;
@@ -3704,11 +3862,57 @@ mod tests {
         };
         crate::story_info::save(&game_dir, &info).unwrap();
 
-        let stories = scan_stories(&dir, &data_base);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&data_base));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1);
         assert_eq!(stories[0].title, "Fetched Title");
+    }
+
+    /// SQ-1679: library detection creates documents folders for games that already
+    /// carry an IFDB id, and only for those, and only when the user opted in.
+    #[test]
+    fn scan_creates_documents_folders_for_linked_games_only_when_opted_in() {
+        let dir = temp_dir("scan-docs");
+        let bytes = minimal_v3_story();
+        std::fs::write(dir.join("game.z5"), &bytes).unwrap();
+        std::fs::write(dir.join("unlinked.z5"), &bytes).unwrap();
+        let ifid = crate::ifid::compute_ifid(&bytes);
+        let home = dir.join("home");
+        let roots = |auto_create| {
+            DataRoots::resolve(&home, None, None, &crate::data_roots::DocumentsSettings { dir: None, auto_create })
+        };
+        let on = roots(true);
+        let game_dir = on.catalogue_dir(&crate::storage::story_key_at(&dir.join("game.z5")));
+        let info = crate::story_info::StoryInfo {
+            format_version: crate::story_info::FORMAT_VERSION,
+            ifid,
+            fetched: Some(FetchedMeta {
+                title: Some("Linked Game".into()),
+                ifdb_tuid: Some("tuid123".into()),
+                ..fetched_stub()
+            }),
+            probe: None,
+        };
+        crate::story_info::save(&game_dir, &info).unwrap();
+
+        // Default (off): the scan makes nothing.
+        let stories = scan_stories(&dir, &roots(false));
+        assert_eq!(stories.iter().find(|e| e.filename == "game.z5").unwrap().meta.ifdb_tuid.as_deref(), Some("tuid123"));
+        assert!(!roots(false).documents().exists());
+
+        // Opted in: one folder, for the linked game.
+        scan_stories(&dir, &on);
+        let made: Vec<String> = std::fs::read_dir(on.documents())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(made, ["Linked Game [tuid123]"], "the unlinked game gets none");
+        // A rescan is a no-op.
+        scan_stories(&dir, &on);
+        assert_eq!(std::fs::read_dir(on.documents()).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3727,7 +3931,7 @@ mod tests {
         };
         crate::story_info::save(&game_dir, &info).unwrap();
 
-        let stories = scan_stories(&dir, &data_base);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&data_base));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1);
@@ -3747,7 +3951,7 @@ mod tests {
                 features: Features::default(), self_blorb, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
                 author: None, year: None, genre: None, language: None, description: None,
                 ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
-                fetch_not_found: false,
+                fetch_not_found: false, ifdb_tuid: None,
             },
             hint_sidecar: None,
             kind: RowKind::Story,
@@ -3760,7 +3964,7 @@ mod tests {
         std::fs::write(dir.join("zork1.z3"), minimal_v3_story()).unwrap();
         std::fs::write(dir.join("zork1_hints.z5"), minimal_v3_story()).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         // (a) the game is listed; (b) the sidecar is NOT listed.
@@ -3779,7 +3983,7 @@ mod tests {
         let dir = temp_dir("lone-sidecar");
         std::fs::write(dir.join("deadlineinv.z5"), minimal_v3_story()).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "lone sidecar stays listed");
@@ -3794,7 +3998,7 @@ mod tests {
         let dir = temp_dir("solid-gold");
         std::fs::write(dir.join("zork1-invclues-r52-s871125.z5"), minimal_v3_story()).unwrap();
 
-        let stories = scan_stories(&dir, &dir);
+        let stories = scan_stories(&dir, &crate::data_roots::DataRoots::single(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "Solid Gold game is not dropped");
@@ -3811,7 +4015,7 @@ mod tests {
         let base = dir.join("data");
         let hi = hints::load_hint_index(&dir); // empty index
 
-        let b = compute_row_badges(&e, &base, &hi);
+        let b = compute_row_badges(&e, &crate::data_roots::DataRoots::single(&base), &hi);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(b.hint, HintBadge::Present, "sidecar presence lights the present-hint badge with an empty index");
     }
@@ -3841,9 +4045,9 @@ mod tests {
 
         let hi = hints::load_hint_index(&dir); // empty index (no hints/index.toml)
 
-        let a = compute_row_badges(&e_self, &base, &hi);
-        let b = compute_row_badges(&e_sibling, &base, &hi);
-        let c = compute_row_badges(&e_bare, &base, &hi);
+        let a = compute_row_badges(&e_self, &crate::data_roots::DataRoots::single(&base), &hi);
+        let b = compute_row_badges(&e_sibling, &crate::data_roots::DataRoots::single(&base), &hi);
+        let c = compute_row_badges(&e_bare, &crate::data_roots::DataRoots::single(&base), &hi);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!((a.blorb, a.save, a.hint), (true, true, HintBadge::None));
@@ -3862,11 +4066,11 @@ mod tests {
         // Deadline r18/s820311, an identity the SLAG catalog covers → Available
         // (no local file).
         let e_dl = entry_with("ZCODE-18-820311-0000", dir.join("deadline.z3"), None);
-        assert_eq!(compute_row_badges(&e_dl, &base, &hi).hint, HintBadge::Available);
+        assert_eq!(compute_row_badges(&e_dl, &crate::data_roots::DataRoots::single(&base), &hi).hint, HintBadge::Available);
 
         // An unresolved identity stays None.
         let e_none = entry_with("IFID-N", dir.join("colossal.z5"), None);
-        assert_eq!(compute_row_badges(&e_none, &base, &hi).hint, HintBadge::None);
+        assert_eq!(compute_row_badges(&e_none, &crate::data_roots::DataRoots::single(&base), &hi).hint, HintBadge::None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3886,7 +4090,7 @@ mod tests {
 
         let mut e = entry_with("SCOTT-1234567890ABCDEF", dir.join("adv13.saga"), None);
         e.title = "The Sorcerer of Claymorgue Castle".into();
-        assert_eq!(compute_row_badges(&e, &base, &hi).hint, HintBadge::None);
+        assert_eq!(compute_row_badges(&e, &crate::data_roots::DataRoots::single(&base), &hi).hint, HintBadge::None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3927,7 +4131,7 @@ mod tests {
         let entry = entry_with("IFID-G", dir.join("g.z5"), None);
 
         let hi = hints::load_hint_index(&dir);
-        let aux = resolve_aux(&entry, &dir, &hi); // data_base=dir (no per-game saves)
+        let aux = resolve_aux(&entry, &crate::data_roots::DataRoots::single(&dir), &hi); // data_base=dir (no per-game saves)
         let _ = std::fs::remove_dir_all(&dir);
 
         let (src, chunks) = aux.assoc_blorb.expect("sibling blorb resolved");
@@ -3954,7 +4158,7 @@ mod tests {
         std::fs::write(game_dir.join("default.aux"), b"x").unwrap();
 
         let hi = hints::load_hint_index(&dir);
-        let aux = resolve_aux(&entry, &base, &hi);
+        let aux = resolve_aux(&entry, &crate::data_roots::DataRoots::single(&base), &hi);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(aux.game_dir, game_dir);
@@ -4228,7 +4432,7 @@ mod tests {
         );
         std::fs::write(&path, db).unwrap();
         assert!(scott::Database::parse(db).is_ok(), "premise: the database itself must parse");
-        let entry = resolve_entry(&path, &dir).expect("a minimal Scott database is launchable");
+        let entry = resolve_entry(&path, &crate::data_roots::DataRoots::single(&dir)).expect("a minimal Scott database is launchable");
         assert_eq!(entry.meta.engine, Engine::Scott);
         assert_eq!(entry.title, "unknownscott", "unknown Scott story must fall back to the stem");
         let _ = std::fs::remove_dir_all(&dir);
@@ -4249,12 +4453,12 @@ mod tests {
             return;
         }
         let base = temp_dir("c64-direct-vs-disk");
-        let direct_entry = resolve_entry(&direct, &base).expect("BATON.prg opens directly");
+        let direct_entry = resolve_entry(&direct, &crate::data_roots::DataRoots::single(&base)).expect("BATON.prg opens directly");
         assert_eq!(direct_entry.title, "The Golden Baton", "direct route must not show the stem");
 
         let disk = stories.join("scott-dialects/c64/MYSTADV1.D64");
         if disk.is_file() {
-            let rows = resolve_entries(&disk, &base);
+            let rows = resolve_entries(&disk, &crate::data_roots::DataRoots::single(&base));
             let baton_row = rows
                 .iter()
                 .find(|r| r.meta.disk_entry.as_deref() == Some("BATON"))
@@ -4294,7 +4498,7 @@ mod tests {
             ifdb_link: None,
             ifdb_rating: None,
             ifdb_rating_count: None,
-            fetch_not_found: false,
+            fetch_not_found: false, ifdb_tuid: None,
         };
         assert_eq!(
             type_container(&meta(Some(ScottPictures::NativeZx { pictures: 31 })), false),
@@ -4331,7 +4535,7 @@ mod tests {
             return;
         }
         let base = temp_dir("zx-mysterious-row");
-        let entry = resolve_entry(&baton, &base).expect("m1goldba.z80 opens as a story");
+        let entry = resolve_entry(&baton, &crate::data_roots::DataRoots::single(&base)).expect("m1goldba.z80 opens as a story");
         assert_eq!(entry.meta.engine, Engine::Scott);
         assert_eq!(entry.title, "The Golden Baton", "the row must not show the bare stem");
         assert_eq!(
@@ -4345,7 +4549,7 @@ mod tests {
         let control = stories.join("scott-dialects/spectrum/gremlins.z80");
         if control.is_file() {
             assert!(
-                resolve_entry(&control, &base).is_none(),
+                resolve_entry(&control, &crate::data_roots::DataRoots::single(&base)).is_none(),
                 "a family-A ZX release is refused, not listed"
             );
         }
@@ -4416,7 +4620,7 @@ mod tests {
             return;
         }
         let base = temp_dir("scott-pictures-row");
-        let baton_entry = resolve_entry(&baton, &base).expect("BATON.prg opens directly");
+        let baton_entry = resolve_entry(&baton, &crate::data_roots::DataRoots::single(&base)).expect("BATON.prg opens directly");
         match baton_entry.meta.scott_pictures {
             Some(ScottPictures::NativeC64 { pictures }) => {
                 assert!(pictures > 0, "BATON must report at least one room picture");
@@ -4426,7 +4630,7 @@ mod tests {
 
         let adv01 = stories.join("adv01.dat");
         if adv01.is_file() {
-            let adv01_entry = resolve_entry(&adv01, &base).expect("adv01.dat opens directly");
+            let adv01_entry = resolve_entry(&adv01, &crate::data_roots::DataRoots::single(&base)).expect("adv01.dat opens directly");
             assert_eq!(
                 adv01_entry.meta.scott_pictures, None,
                 "a plain text-only .dat carries no Pictures row"
@@ -4453,7 +4657,7 @@ mod tests {
             return;
         }
         let base = temp_dir("saga-pictures-row");
-        let row = resolve_entry(&hulk, &base).expect("QUESTPR1.D64 opens");
+        let row = resolve_entry(&hulk, &crate::data_roots::DataRoots::single(&base)).expect("QUESTPR1.D64 opens");
         assert_eq!(
             row.meta.scott_pictures,
             Some(ScottPictures::SagaUsStrips {
@@ -4470,7 +4674,7 @@ mod tests {
 
         let atari = stories.join("scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
         if atari.is_file() {
-            let row = resolve_entry(&atari, &base).expect("the Atari side A opens");
+            let row = resolve_entry(&atari, &crate::data_roots::DataRoots::single(&base)).expect("the Atari side A opens");
             // The pictures are on the companion side — paired and counted
             // off its own table now (SQ-1496/SQ-1524/SQ-1525/SQ-1526);
             // `every_atari_saga_title_reports_its_companion_sides_real_picture_count`
@@ -4490,7 +4694,7 @@ mod tests {
         // game reports.
         let extracted = stories.join("scott-dialects/c64/db/hulk.bin");
         if extracted.is_file() {
-            let row = resolve_entry(&extracted, &base).expect("hulk.bin opens");
+            let row = resolve_entry(&extracted, &crate::data_roots::DataRoots::single(&base)).expect("hulk.bin opens");
             assert_eq!(
                 row.meta.scott_pictures,
                 Some(ScottPictures::SagaUsNoPictures {
@@ -4542,7 +4746,7 @@ mod tests {
         if mission_impossible.is_file() {
             let base = temp_dir("atari-mission-impossible-row");
             assert!(
-                resolve_entry(&mission_impossible, &base).is_none(),
+                resolve_entry(&mission_impossible, &crate::data_roots::DataRoots::single(&base)).is_none(),
                 "Mission Impossible's damaged side A must still yield no row at all"
             );
             let _ = std::fs::remove_dir_all(&base);
@@ -4596,7 +4800,7 @@ mod tests {
             };
             assert!(want_pictures > 0, "{side_a_name}: a real release reports a nonzero count");
 
-            let row = resolve_entry(&side_a_path, &base).expect("side A opens");
+            let row = resolve_entry(&side_a_path, &crate::data_roots::DataRoots::single(&base)).expect("side A opens");
             assert_eq!(
                 row.meta.scott_pictures,
                 Some(ScottPictures::SagaAtari { format, pictures: want_pictures }),
@@ -4629,7 +4833,7 @@ mod tests {
             return;
         }
         let base = temp_dir("apple-pictures-row");
-        let row = resolve_entry(&apple, &base).expect("the boot side opens");
+        let row = resolve_entry(&apple, &crate::data_roots::DataRoots::single(&base)).expect("the boot side opens");
         assert_eq!(
             row.meta.scott_pictures,
             Some(ScottPictures::SagaUsStrips {
@@ -4660,7 +4864,7 @@ mod tests {
              (4am crack) side B - boot.dsk",
         );
         if count.is_file() {
-            let row = resolve_entry(&count, &base).expect("The Count's boot side opens");
+            let row = resolve_entry(&count, &crate::data_roots::DataRoots::single(&base)).expect("The Count's boot side opens");
             assert_eq!(
                 row.meta.scott_pictures,
                 Some(ScottPictures::SagaUsStrips {
@@ -4687,7 +4891,7 @@ mod tests {
             return;
         }
         let base = temp_dir("ti99-direct");
-        let entry = resolve_entry(&path, &base).expect("adv01.fiad opens directly");
+        let entry = resolve_entry(&path, &crate::data_roots::DataRoots::single(&base)).expect("adv01.fiad opens directly");
         assert_eq!(entry.meta.engine, Engine::Scott);
         assert_eq!(entry.title, "Adventureland");
         let _ = std::fs::remove_dir_all(&base);
@@ -4726,7 +4930,7 @@ mod tests {
     #[test]
     fn folders_list_before_stories_and_dot_directories_are_skipped() {
         let root = nested_library("folders");
-        let rows = library_rows(&root, &root, &root);
+        let rows = library_rows(&root, &root, &crate::data_roots::DataRoots::single(&root));
         let _ = std::fs::remove_dir_all(&root);
 
         let labels: Vec<&str> = rows.iter().map(|e| e.title.as_str()).collect();
@@ -4742,7 +4946,7 @@ mod tests {
     #[test]
     fn library_rows_offer_the_parent_only_below_the_root() {
         let root = nested_library("parent");
-        let rows = library_rows(&root.join("zcode"), &root, &root);
+        let rows = library_rows(&root.join("zcode"), &root, &crate::data_roots::DataRoots::single(&root));
         let _ = std::fs::remove_dir_all(&root);
 
         let labels: Vec<&str> = rows.iter().map(|e| e.title.as_str()).collect();
@@ -4776,7 +4980,7 @@ mod tests {
         let root = nested_library("index");
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut all: Vec<StoryEntry> = Vec::new();
-        index_library(&root, &root, |b| {
+        index_library(&root, &crate::data_roots::DataRoots::single(&root), |b| {
             dirs.push(b.dir.clone());
             all.extend(b.entries);
         });
@@ -4815,7 +5019,7 @@ mod tests {
     #[test]
     fn fetch_targets_reach_the_stories_in_all_folders_and_no_folder_rows() {
         let root = nested_library("fetch-targets");
-        let targets = fetch_targets(&StorySource::Library(root.clone()), &root);
+        let targets = fetch_targets(&StorySource::Library(root.clone()), &crate::data_roots::DataRoots::single(&root));
         let _ = std::fs::remove_dir_all(&root);
         let mut names: Vec<String> = targets
             .iter()
@@ -4867,7 +5071,7 @@ mod tests {
     fn a_folder_row_carries_no_badges() {
         let dir = temp_dir("folder-badges");
         let row = StoryEntry::folder(dir.clone(), "dir/");
-        let badges = compute_row_badges(&row, &dir, &hints::load_hint_index(&dir));
+        let badges = compute_row_badges(&row, &crate::data_roots::DataRoots::single(&dir), &hints::load_hint_index(&dir));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(badges, RowBadges::default());
     }

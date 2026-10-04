@@ -45,6 +45,7 @@ fn recipe(bytes: &[u8]) -> ShadowRecipe {
 /// what the case below measures.
 fn recipe_in(bytes: &[u8], store: PathBuf, vfs: Vec<u8>) -> ShadowRecipe {
     ShadowRecipe {
+        catalogue: None,
         story_bytes: Arc::new(bytes.to_vec()),
         store,
         vfs_bytes: Arc::new(vfs),
@@ -81,6 +82,21 @@ impl Play {
             bytes.clone(), true, false, None, false, Vec::new(), None, None, Some((25, 80)),
         )
         .expect("zork1-r88-s840726.z3 boots without a ZError");
+        s.set_strip_prompt(false);
+        let mut state = AppState::default();
+        state.assist_preamble_shown = true;
+        state.probe.arm(recipe(&bytes));
+        Some(Play { state, session: Box::new(s) })
+    }
+
+    /// *Spider and Web*, release 4 / serial 980226 — SQ-1642's fixture for the
+    /// grammar-shape source. Opens straight to a line prompt, no keypress gate.
+    fn tangle() -> Option<Play> {
+        let bytes = story("Tangle.z5")?;
+        let mut s = app::session::GameSession::new_with_trace(
+            bytes.clone(), true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+        )
+        .expect("Tangle.z5 boots without a ZError");
         s.set_strip_prompt(false);
         let mut state = AppState::default();
         state.assist_preamble_shown = true;
@@ -132,6 +148,21 @@ impl Play {
         state.assist_preamble_shown = true;
         state.probe.arm(recipe(&bytes));
         Some(Play { state, session: Box::new(s) })
+    }
+
+    /// Dismiss every "[Hit any key.]" gate currently pending, one keypress at
+    /// a time, before the next real command is sent. `GameSession::submit`
+    /// dispatches on `pending_input()` itself, so a plain LINE command sent
+    /// while a gate is still open only consumes its first character as the
+    /// keystroke and silently drops the rest — this is what a caller reaches
+    /// for instead of hand-placing a fixed number of keypresses at a fixed
+    /// position in a command list (SQ-1642: *Spider and Web*'s own
+    /// interrogator interrupt fires on the player's genuine trial and error,
+    /// not on a turn count, so no fixed position is reliable).
+    fn drain_char_gate(&mut self) {
+        while self.session.pending_input() == app::session::InputKind::Char {
+            self.turn(" ");
+        }
     }
 
     fn turn(&mut self, cmd: &str) {
@@ -718,7 +749,7 @@ fn counterfeit_monkeys_shadow_boots_the_way_the_live_game_boots() {
     let live_in = |dir: PathBuf, vfs: &[u8]| {
         let b = blorb::Blorb::parse(bytes.clone()).ok();
         app::glulx_session::GlulxSession::new_in(
-            dir, image.clone(), 80, 24, true, false, false, false, (8, 16), b, vfs,
+            dir, image.clone(), 80, 24, true, false, false, false, (8.0, 16.0), b, vfs,
             [[(None, None); 11]; 2], false, None,
         )
         .expect("Counterfeit Monkey boots")
@@ -841,7 +872,7 @@ fn a_lighter_glulx_story_is_still_probed() {
         panic!("Coloratura is a Glulx story");
     };
     let live =
-        app::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (8, 16), None, &[])
+        app::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (8.0, 16.0), None, &[])
             .expect("Coloratura boots");
     let mut probe = app::probe::ShadowProbe::default();
     probe.arm(recipe(&bytes));
@@ -1167,4 +1198,322 @@ fn a_disambiguation_echo_does_not_survive_vetting_in_the_entrance_hall() {
             "an offer the direction control pair should have vetted survived: {line:?}"
         );
     }
+}
+
+// ── SQ-1642: the grammar-shape source, last resort ──────────────────────────
+
+/// The futile attempts at the black plate and the door, played out in full at
+/// the "End of Alley" flashback: this is what makes the interrogator give up
+/// the lockpick, confirmed live against the story (`i` answers "You are
+/// carrying nothing worthy of attention, except a lockpick" only after this
+/// exact sequence). Nothing shorter reproduces it — the game gates the reveal
+/// on the player having genuinely tried and failed, not on a fixed turn count.
+const TANGLE_FUTILE_ATTEMPTS: &[&str] = &[
+    "push plate",
+    "press plate",
+    "tap plate",
+    "knock on plate",
+    "hit plate",
+    "kick plate",
+    "scan plate",
+    "put hand on plate",
+    "rub plate",
+    "lick plate",
+    "smell plate",
+    "listen to plate",
+    "turn plate",
+    "pull plate",
+    "move plate",
+    "open door",
+    "unlock door",
+    "pick door",
+    "kick door",
+    "push door",
+    "pull door",
+    "knock on door",
+    "search wall",
+    "search bricks",
+    "x bricks",
+];
+
+/// Walk *Spider and Web* from its very opening into the flashback where the
+/// lockpick is in hand and the black plate is in scope, the state the real
+/// puzzle solution (`touch lockpick on plate`, confirmed live) needs to be
+/// vettable at all.
+fn tangle_to_the_lockpick(p: &mut Play) {
+    p.turn("south"); // End of Alley -> Mouth of Alley
+    p.turn("south"); // -> "-- glaring light..." [Hit any key.]
+    p.drain_char_gate(); // -> Interrogation Chamber
+    p.turn("yes"); // -> "...glaring light --" [Hit any key.]
+    p.drain_char_gate(); // -> back in the alley, the flashback replaying
+    for cmd in TANGLE_FUTILE_ATTEMPTS {
+        // The interrogator interrupts with the rod SOMEWHERE in this list —
+        // on the player's genuine trial and error, not a fixed turn count —
+        // and hands it over; draining before every command (not just once at
+        // the end) is what makes this robust to exactly where that lands.
+        p.drain_char_gate();
+        p.turn(cmd);
+    }
+    p.drain_char_gate();
+}
+
+/// **SQ-1642, the case the source exists for.** *Spider and Web* never heard
+/// of `use` (`use lockpick on plate` prints `That's not a verb I recognize.`,
+/// confirmed live), and no near miss, stem or meaning table connects `use` to
+/// anything this story implements — `touch` (dictionary entry `feel`,
+/// synonyms `fondle`, `grope`, `touch`) solves it only because its own
+/// grammar (`feel noun to / on noun`) happens to accept the exact shape `use
+/// lockpick on plate` already has. That is a coincidence of THIS story's verb
+/// table, not a meaning relationship, which is exactly what `by_grammar_shape`
+/// is for.
+///
+/// The assertion is deliberately NOT pinned to the word `feel` (or `touch`):
+/// the point is that the MECHANISM works — a real, vetted, functioning verb
+/// is surfaced for a shape-only match — not which verb the story's grammar
+/// and the ranking tie-break happen to put first. A vetted `try instead` pick
+/// is the strong claim (`crate::probe` actually watched it do something from
+/// exactly here); the unvetted `this story knows` fallback would mean the
+/// probe never confirmed anything and is not enough to pass this test.
+///
+/// `attach lockpick to plate` also solves this puzzle in the real game, but
+/// is not expected to appear here: it pairs with the literal word `to`, not
+/// `on`, so it is not even a raw candidate for the shape `use lockpick on
+/// plate` already has — a different, unrelated preposition is not the same
+/// shape, and `by_grammar_shape` never claims otherwise.
+///
+/// Falsify by turning the grammar-shape source off (temporarily hard-code
+/// `by_grammar_shape` to return immediately): the offer vanishes and this
+/// test fails with no `try instead` line at all, the original reported gap.
+#[test]
+fn a_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
+    let Some(mut p) = Play::tangle() else { return };
+    tangle_to_the_lockpick(&mut p);
+    p.turn("i"); // "You are carrying nothing worthy of attention, except a lockpick."
+    assert!(
+        p.state.transcript.iter().any(|l| l.contains("lockpick")),
+        "the fixture is the walk: the lockpick must be in hand before the case below \
+         means anything:\n{}",
+        p.screen()
+    );
+
+    p.turn("use lockpick on plate");
+    eprintln!("--- Tangle.z5 (Spider and Web r4), `use lockpick on plate` ---\n{}\n", p.screen());
+
+    let offer = p.state.assist_offer.clone().expect("an offer was pushed for `use`");
+    assert_eq!(
+        offer.kind,
+        app::assist::OfferKind::VettedOffer,
+        "a bare `this story knows` fallback means the probe never confirmed the verb \
+         actually does anything here, which is not what this source claims"
+    );
+    assert_eq!(offer.word.as_deref(), Some("use"));
+    assert!(!offer.picks.is_empty(), "at least one vetted pick must have survived");
+
+    let assists = p.assists();
+    assert!(
+        assists.iter().any(|l| l.starts_with("try instead — ")),
+        "a vetted recommendation must be on screen: {assists:?}"
+    );
+
+    // Bonus, not load-bearing: on this exact walk the story's own grammar
+    // table order ranks other shape-only matches (`put`, `empty`, `discard`
+    // — none more related to `use` than `touch` is, all reached the same
+    // coincidental way) ahead of `touch`'s own dictionary entry (`feel`,
+    // synonyms `fondle`, `grope`, `touch`), so `feel` itself is not always
+    // among the three shown — which is exactly the ranking-is-not-pinned
+    // point this test's own doc comment makes. Logged for visibility, not
+    // asserted on.
+    eprintln!("(vetted picks surfaced here: {assists:?})");
+}
+
+// ── SQ-1673: the shape scan after vetting, and the `use A on B` idiom ───────
+
+/// Zork I from West of House to the Troll Room, sword and lit lamp in hand.
+const TO_THE_TROLL_ROOM: &[&str] = &[
+    "north", "east", "open window", "enter window", "west", "take sword", "take lamp",
+    "move rug", "open trap door", "down", "turn on lamp", "north",
+];
+
+/// **SQ-1673.** `use sword on troll` in Zork I's Troll Room: `use` is unknown,
+/// the meaning table's one known neighbour (`apply`) is rejected by vetting, and
+/// the shape scan used to be skipped because an earlier source had spoken. The
+/// vetted fall-through now runs it, and the `use A on B` idiom reaches the
+/// swapped `V B with A` form, so the light shows a command that works.
+///
+/// Falsify: drop the fall-through (a), the `use` swap (b) or the ranking (c) in
+/// `vocab.rs` and this loses its `try instead` line.
+#[test]
+fn use_a_on_b_reaches_a_vetted_attack_with_the_swapped_operands() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_TROLL_ROOM);
+    assert!(
+        p.state.transcript.iter().any(|l| l.contains("Troll Room")),
+        "the fixture is the walk: the player must be in the Troll Room:\n{}",
+        p.screen()
+    );
+    p.turn("use sword on troll");
+    eprintln!("--- Zork I r88, Troll Room, `use sword on troll` ---\n{}\n", p.screen());
+    let offer = p.state.assist_offer.clone().expect("an offer was pushed for `use`");
+    assert_eq!(offer.kind, app::assist::OfferKind::VettedOffer);
+    assert_eq!(
+        offer.picks.first().map(|k| k.command.as_str()),
+        Some("attack troll with sword"),
+        "a vetted attack troll with sword leads: {:?}",
+        offer.picks
+    );
+    assert!(
+        offer.picks.iter().any(|k| k.command == "kill troll with sword"),
+        "kill troll with sword is reachable too: {:?}",
+        offer.picks
+    );
+    assert!(p.assists().iter().any(|l| l.starts_with("try instead — attack troll with sword")), "{:?}", p.assists());
+}
+
+/// SQ-1673: every verb on the generic-tool list gets the swapped idiom, and a
+/// verb that is not on it gets no swapped candidate at all.
+#[test]
+fn the_swap_applies_to_the_generic_tool_verbs_and_no_others() {
+    for verb in ["employ", "utilize"] {
+        let Some(mut p) = Play::zork1() else { return };
+        p.walk(TO_THE_TROLL_ROOM);
+        p.turn(&format!("{verb} sword on troll"));
+        eprintln!("--- Zork I r88, `{verb} sword on troll` ---\n{}\n", p.screen());
+        let offer = p.state.assist_offer.clone().unwrap_or_else(|| panic!("{verb}: an offer"));
+        assert_eq!(
+            offer.picks.first().map(|k| k.command.as_str()),
+            Some("attack troll with sword"),
+            "{verb}: {:?}",
+            offer.picks
+        );
+    }
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_TROLL_ROOM);
+    p.turn("zorble sword on troll");
+    eprintln!("--- Zork I r88, `zorble sword on troll` ---\n{}\n", p.screen());
+    let swapped = p.assists().iter().any(|l| l.contains("troll with sword"));
+    assert!(!swapped, "a verb off the list never reverses its operands: {:?}", p.assists());
+}
+
+/// SQ-1673, the other direction: when an earlier source's candidate DOES survive
+/// vetting, only it is shown — the shape fall-through is for the case where
+/// every one of them failed, not an addition to the ones that worked.
+#[test]
+fn a_surviving_first_round_pick_is_not_joined_by_the_shape_scan() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+    p.turn("illuminate lamp with sword");
+    eprintln!("--- Zork I r88, Living Room, `illuminate lamp with sword` ---\n{}\n", p.screen());
+    assert_eq!(p.assists(), vec!["try instead — light"]);
+}
+
+// ── SQ-1644: the bare-noun grammar-shape source, tier 4 ─────────────────────
+
+/// **SQ-1644, the case the source exists for.** A real report: `pickup
+/// toolcase` (one word, no preposition) reaches none of the five sources
+/// SQ-1642 shipped — it is no near miss or stem of `get`, the synonym
+/// table's key is the two-word `pick up`, a different string from the one
+/// word typed, and tier 3 (`by_grammar_shape`) declines outright because the
+/// command has no literal preposition at all. Tier 4
+/// (`by_bare_grammar_shape`) asks tier 3's own question again for the bare
+/// shape tier 3 excludes, and — unlike tier 3 — may only ever reach the
+/// player once vetted.
+///
+/// Reproduced here against Zork I with a made-up verb (`glorpex`) that this
+/// story's dictionary, and every table the first five sources read, have
+/// never heard of: `glorpex mailbox` at West of House, where the mailbox is
+/// genuinely in scope and several bare-noun verbs (`open`, `take`, `examine`,
+/// …) do something real with it. The assertion is deliberately NOT pinned to
+/// a specific verb, mirroring SQ-1642's own Tangle test: the point is that
+/// the MECHANISM works — a real, vetted, functioning verb is surfaced for a
+/// bare-noun coincidence — not which verb the story's grammar and the
+/// ranking tie-break happen to put first. A vetted `try instead` pick is the
+/// strong claim; the unvetted `this story knows` fallback would mean the
+/// probe never confirmed anything and is not enough to pass this test.
+///
+/// Falsify by turning the bare-noun grammar-shape source off (temporarily
+/// hard-code `by_bare_grammar_shape` to return immediately): the offer
+/// vanishes and this test fails with no `try instead` line at all.
+#[test]
+fn a_bare_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.turn("glorpex mailbox");
+    eprintln!("--- Zork I r88, turn 1, West of House ---\n{}\n", p.screen());
+
+    let offer = p.state.assist_offer.clone().expect("an offer was pushed for `glorpex`");
+    assert_eq!(
+        offer.kind,
+        app::assist::OfferKind::VettedOffer,
+        "a bare `this story knows` fallback means the probe never confirmed the verb \
+         actually does anything here, which tier 4 must never show at all (SQ-1644)"
+    );
+    assert_eq!(offer.word.as_deref(), Some("glorpex"));
+    assert!(!offer.picks.is_empty(), "at least one vetted pick must have survived");
+
+    let assists = p.assists();
+    assert!(
+        assists.iter().any(|l| l.starts_with("try instead — ")),
+        "a vetted recommendation must be on screen: {assists:?}"
+    );
+    eprintln!("(vetted picks surfaced here: {assists:?})");
+}
+
+/// **The other half of SQ-1644 — and the test that would have failed before
+/// `offer_vocabulary`'s `must_vet` check existed.** With `guidance_probe`
+/// off, no vetting can happen at all — exactly
+/// `without_the_probe_the_line_makes_the_weaker_claim` above, except every
+/// pick here comes from tier 4 alone (`glorpex mailbox` has nothing else to
+/// fall back to: no near miss, no meaning, no story synonym, and tier 3
+/// itself declines for lacking a literal preposition). Tier 0-3 fall back to
+/// the unvetted "this story knows" line in that situation; tier 4 must fall
+/// silent instead, because an unvetted claim built on the single commonest
+/// shape in the medium is exactly the noise tier 3's own preposition gate
+/// was written to keep out (see `by_bare_grammar_shape`'s own doc) — and
+/// this source has no preposition to anchor it at all.
+///
+/// Falsify by dropping the `None if must_vet => None` arm from
+/// `offer_vocabulary`: this test then fails with the bare-noun coincidence
+/// named unvetted, e.g. `this story knows — open`.
+#[test]
+fn without_a_probe_a_bare_shape_match_is_silent_not_unvetted() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.state.config.guidance_probe = false;
+    p.turn("glorpex mailbox");
+    eprintln!("--- Zork I r88, turn 1, West of House, no probe ---\n{}\n", p.screen());
+    assert_eq!(
+        p.assists(),
+        Vec::<String>::new(),
+        "a tier-4-only offer must never fall back to the unvetted claim"
+    );
+}
+
+// ── SQ-1705: modern shorthands on older stories ─────────────────────────────
+
+/// Zork I r88 (Version 3) has never heard of `x`: it answers `I don't know the
+/// word "x".` and the light offers the spelled-out verb, keeping the rest of
+/// the command. In the Living Room the lamp is here, so the vetted wording.
+///
+/// Falsify by emptying `vocab::SHORTHANDS`: the assist line disappears.
+#[test]
+fn x_on_an_older_story_offers_examine_and_keeps_the_rest() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+    p.turn("x lamp");
+    eprintln!("--- Zork I r88, turn 6, Living Room ---\n{}\n", p.screen());
+    assert!(p.state.transcript.iter().any(|l| l.contains("know the word")));
+    assert_eq!(p.assists(), vec!["try instead — examine"]);
+    let offer = p.state.assist_offer.as_ref().expect("a structured offer");
+    assert_eq!(offer.picks.len(), 1);
+    assert_eq!(offer.picks[0].command, "examine lamp");
+}
+
+/// A story that already understands `x` never reports it unknown, so nothing
+/// is said: *Spider and Web* is Inform 6 and holds `x`.
+#[test]
+fn x_on_a_story_that_knows_it_is_left_alone() {
+    let Some(mut p) = Play::tangle() else { return };
+    p.drain_char_gate();
+    p.turn("x me");
+    p.drain_char_gate();
+    eprintln!("--- Tangle ---\n{}\n", p.screen());
+    assert_eq!(p.assists(), Vec::<String>::new());
 }

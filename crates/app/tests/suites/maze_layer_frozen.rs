@@ -43,6 +43,8 @@ fn turn(num: RoomId, name: &str) -> TurnResult {
         transcript_elems: Vec::new(),
         prose_retired: None,
         declared_exit: None,
+    description: None,
+    items: Vec::new(),
     }
 }
 

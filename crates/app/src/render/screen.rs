@@ -61,6 +61,12 @@ pub struct StoryPaneMetrics {
     /// the drawing where it put the text" — is the fix (SQ-1203). Empty for the
     /// Z-machine/Scott simple path (no Glk ids to record).
     pub win_rects: Vec<(u32, WinKind, Rect)>,
+    /// Whether this frame is showing a top-anchored post-clear screen in full
+    /// — see `render::transcript::TranscriptRender::top_anchored_fits`, whose
+    /// doc has the reasoning (SQ-1661). `false` on the generic multi-window
+    /// fallback (no primary buffer rendered this frame, so nothing is
+    /// anchored) and whenever the primary buffer isn't currently top-anchored.
+    pub top_anchored_fits: bool,
 }
 
 /// Tally `(grids, buffers, others)` leaf windows in the tree. Used only by tests
@@ -342,6 +348,7 @@ fn render_story_pane_frame(
             links,
             transcript_surface: true,
             win_rects: Vec::new(),
+            top_anchored_fits: t.top_anchored_fits,
         };
     }
 
@@ -359,6 +366,25 @@ fn render_story_pane_frame(
     let mut win_rects: Vec<(u32, WinKind, Rect)> = Vec::new();
     let gc = grid_scheme(state, model);
     let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, inner, buf, gi, &mut grid_links, &mut win_rects, &gc);
+    // SQ-1703 P4: the window mask hides every cell it covers under 50%, over
+    // whatever was drawn there (text, art placeholder, filler). The mask spans
+    // the whole stretched frame, i.e. `inner` (the whole pane in Glulx).
+    if let (true, Some(mask)) = (state.glk_stretch, state.glk_mask.as_ref()) {
+        let outside = state.colors.theme.get("glk_mask_outside").style;
+        // SQ-1707: in aspect mode the mask is the FRAME's shape, so it spans
+        // the frame and not the letterboxed pane.
+        let frame = glk_frame_rect(&model.root, inner);
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                if !mask.cell_visible(x as u32, y as u32, frame.width as u32, frame.height as u32) {
+                    if let Some(c) = buf.cell_mut((frame.x + x, frame.y + y)) {
+                        c.reset();
+                        c.set_symbol(" ").set_style(outside);
+                    }
+                }
+            }
+        }
+    }
     // Keep gvm's snap-margin (the strips of `area` outside `inner`) clean, so no
     // stale cells from a prior frame or the map remain beside the window tree.
     fill_margin(area, inner, model, state, buf);
@@ -385,10 +411,30 @@ fn render_story_pane_frame(
         links: Vec::new(),
         transcript_surface: false,
         win_rects: Vec::new(),
+        top_anchored_fits: false,
     });
     m.links.extend(grid_links);
     m.win_rects.extend(win_rects);
     m
+}
+
+/// The design frame's rect inside `area` (SQ-1707): descends the letterbox
+/// pairs [`crate::glk_backend`] wraps an aspect-fit frame in (a `Pair` with a
+/// [`crate::glk_backend::GLK_LETTERBOX_WIN`] filler child), and is `area`
+/// itself for a stretch frame, which has none.
+fn glk_frame_rect(node: &WinNode, area: Rect) -> Rect {
+    let is_letterbox = |n: &WinNode| matches!(n, WinNode::Buffer(b) if b.win == crate::glk_backend::GLK_LETTERBOX_WIN);
+    match node {
+        WinNode::Pair { vertical, split, first, second, .. } if is_letterbox(first) || is_letterbox(second) => {
+            let (a1, _, a2) = split_area_bordered(area, *vertical, split.fixed, split.rest, 0);
+            if is_letterbox(first) {
+                glk_frame_rect(second, a2)
+            } else {
+                glk_frame_rect(first, a1)
+            }
+        }
+        _ => area,
+    }
 }
 
 /// The sub-rect of the story pane that gvm's window tree actually covers: the
@@ -597,6 +643,123 @@ fn fill_margin(area: Rect, inner: Rect, model: &ScreenModel, state: &AppState, b
     paint(bottom, buf);
 }
 
+/// Whether a v6 `Layered` frame is a painted MENU takeover that must be routed
+/// to the cell path rather than the hybrid ring — `render_node`'s own
+/// `WinNode::Layered` arm calls this instead of recomputing the condition
+/// inline (SQ-1614), and [`hybrid_chrome_layout`] and [`hybrid_painted_menu_layout`]
+/// both read it too, so none of the three can drift from what this arm
+/// actually does for the same frame. A MOVE of the arm's own inline logic,
+/// unchanged — see each comment below for the specimen that pinned it.
+///
+/// A painted MENU screen prints chrome text INSIDE the story window's box,
+/// below the status band — Shogun's boot menu paints rows 21–23 over its story
+/// buffer (rows 21–25). In HYBRID mode such a takeover screen must NOT take the
+/// pixel chrome ring: the ring path splits the menu across the raster ring
+/// (items mapping above the terminal viewport) and the terminal overlay (items
+/// inside it), the exact mixed raster/text defect (SQ-0484). Routing it to the
+/// cell path renders it as one coherent all-text screen.
+/// BOTH conditions matter (SQ-0494): a grid run that is merely deep but sits
+/// OUTSIDE the story box is ordinary gameplay chrome — Arthur paints its status
+/// bar at row 12 above a story buffer starting at row 13, and classing that as
+/// a menu dropped Arthur's whole ring (top image panel + side bars). RASTER
+/// mode deliberately keeps its pixel composite for menus (the reverse-video
+/// selection block is fixed in `build_chrome_canvas` instead, SQ-0487) — a
+/// raster-mode user wants the pixel aesthetic even on menus, which is why
+/// `hybrid` is a real parameter here rather than folded away.
+///
+/// Takes the already-classified [`V6Layout`](crate::render::v6_layout::V6Layout)
+/// rather than the raw `items` slice `render_node`'s own inline logic used to
+/// read directly — `layout.story`/`layout.chrome` is what
+/// [`hybrid_chrome_layout`] and [`hybrid_painted_menu_layout`] both already
+/// hold (a host builds this once via `classify_windows` and hands it to every
+/// one of these functions), and iterating `layout.chrome` finds exactly the
+/// same `Grid`/`Graphics` windows the old `items` walk did: the two entries
+/// [`classify_windows`](crate::render::v6_layout::classify_windows) pulls OUT
+/// of `chrome` — the primary `Buffer` and window 0's own `Graphics` — never
+/// match either match arm below, so their absence from `chrome` changes
+/// nothing this predicate checks. The primary-buffer story box is
+/// `layout.story` filtered to that same `Buffer` shape, for the same reason.
+fn hybrid_painted_menu_takeover_route(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    hybrid: bool,
+    cell: zvm::screen::V6Cell,
+) -> bool {
+    let story_box = layout.story.and_then(|pw| {
+        // The PRIMARY buffer only: a v6 game can publish a second, non-primary
+        // prose window (SQ-0585), and taking its rows as the story box made an
+        // ordinary split look like a menu takeover.
+        matches!(&pw.node, WinNode::Buffer(b) if b.primary).then(|| {
+            let top = cell.row_of_origin0(pw.y_px);
+            (top, top + pw.h_px.max(1).div_ceil(16), pw.x_px as u32, pw.x_px as u32 + pw.w_px as u32)
+        })
+    });
+    let has_menu = layout.chrome.iter().any(|pw| {
+        matches!(&pw.node, WinNode::Grid(g)
+            if g.px_texts.iter().any(|t| {
+                let row = cell.row_of(t.y);
+                // SQ-0742: the run must be inside the story box on BOTH axes. The
+                // row test alone calls any chrome glyph that merely shares a row
+                // with the story a takeover — and a game whose frame is drawn with
+                // LINE-DRAWING characters rather than reverse-video spaces has one
+                // on every row of the box. Journey under the Amiga profile draws
+                // exactly that: `│` rules at native x 0 / 256 / 632, all outside
+                // its story box (264..632), on every one of its rows. That routed a
+                // perfectly ordinary gameplay screen to the cell path, which draws
+                // the game's 80 columns 1:1 into a pane of any width — the frame
+                // stopped short of the pane edge and the click map (proportional
+                // over the whole pane) no longer matched where anything was drawn.
+                // Under the IBM PC profile the same rules are reverse-video SPACES,
+                // which trim to empty and never tripped the gate, which is why only
+                // the Amiga route showed it.
+                let x0 = t.x.max(1) as u32 - 1;
+                let x1 = x0 + cell.run_px(&t.text).max(u32::from(cell.w()));
+                !t.text.trim().is_empty()
+                    && row >= STATUS_BAND_ROWS
+                    && story_box.is_some_and(|(top, bot, left, right)| {
+                        row >= top && row < bot && x1 > left && x0 < right
+                    })
+            }))
+    });
+    // SQ-0886: …but the cell path DRAWS NO ART, so it is the wrong
+    // destination for a takeover screen the game framed with artwork.
+    // Shogun's boot menu is exactly that: its credits and its three items
+    // sit on the machine's own ground between two ornate side panels, and
+    // routing the screen to cells discarded both — no panels anywhere, and
+    // the story window's page flooded across the pane (measured on
+    // `James Clavell's Shogun.adf` release 295 and on the Blorb release 322
+    // alike: `#000000` across 761 of 800 columns where the Amiga's colour 12
+    // ground belongs).
+    //
+    // SQ-0892 RE-POINTED WHERE IT SENDS THEM. It sent them to the COMPOSITE,
+    // because the ring could not lay this screen out — the reason recorded
+    // below at the hybrid branch, and true until now: the ring drew the menu
+    // one CHARACTER per independently rounded cell (`SI(RT th e ga me`). Both
+    // halves of that are gone. SQ-0894 built the ring from content, so the
+    // ornaments are one flank down the whole pane on either press; SQ-0892
+    // groups a row's runs before placing them, so the menu is intact. The
+    // frame now takes the RING, which draws the panels as art and the credits
+    // and menu as CRISP GLYPHS — SQ-0750's rule, which the composite cannot
+    // honour because it rasterises every character on the screen.
+    //
+    // What this predicate still decides, and why it is kept: a menu takeover
+    // with NO art goes to the coherent all-text cell path (SQ-0484), and one
+    // WITH art must not, because the cell path draws no art. That is the
+    // distinction it was always making. Only its destination changed.
+    //
+    // ART, specifically — a chrome GRAPHICS window with opaque pixels in it.
+    // An `erase_window` fill is not art: the cell path draws those itself
+    // (`draw_erase_fills`), which is what keeps advent's boot popup — a
+    // painted panel over a story with no artwork in the game at all — on the
+    // coherent all-text path SQ-0484 put it on.
+    let menu_over_art = has_menu
+        && hybrid
+        && layout.chrome.iter().any(|pw| {
+            matches!(&pw.node, WinNode::Graphics(g)
+                if g.win != 0 && g.canvas.pixels().any(|p| p[3] >= 128))
+        });
+    has_menu && hybrid && !menu_over_art
+}
+
 /// Recursively render a tree node into `area`. Returns the primary buffer's
 /// metrics when this subtree contains it. Grid-window hyperlink cells are pushed
 /// into `links` (the primary buffer's own links ride on its returned metrics).
@@ -623,7 +786,7 @@ fn render_node(
             // reserves no gutter either — no line, no gap (SQ-0821).
             let sep_style = border.then(|| separator_style(*vertical, grid_colors)).flatten();
             let (a1, sep, a2) =
-                split_area_bordered(area, *vertical, split.fixed, u16::from(sep_style.is_some()));
+                split_area_bordered(area, *vertical, split.fixed, split.rest, u16::from(sep_style.is_some()));
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, win_rects, grid_colors);
             // Only rule between two VISIBLE siblings. A border before a collapsed
             // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
@@ -669,9 +832,29 @@ fn render_node(
             }
             None
         }
+        // SQ-1707: the strip around an aspect-fit design frame is painted like
+        // the outside of the window mask, and holds nothing.
+        WinNode::Buffer(b) if b.win == crate::glk_backend::GLK_LETTERBOX_WIN => {
+            let outside = state.colors.theme.get("glk_mask_outside").style;
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(c) = buf.cell_mut((x, y)) {
+                        c.reset();
+                        c.set_symbol(" ").set_style(outside);
+                    }
+                }
+            }
+            None
+        }
         WinNode::Buffer(b) => {
             if b.primary {
-                let area = reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf);
+                // Stretch design mode (SQ-1703 P3): the text window is exactly
+                // the cells the story was told, so no margin is carved out of it.
+                let area = if state.glk_stretch {
+                    area
+                } else {
+                    reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf)
+                };
                 if b.win != 0 {
                     win_rects.push((b.win, WinKind::Buffer, area));
                 }
@@ -685,6 +868,7 @@ fn render_node(
                     links: t.links,
                     transcript_surface: true,
                     win_rects: Vec::new(),
+                    top_anchored_fits: t.top_anchored_fits,
                 })
             } else {
                 render_inline_buffer(b, state, area, buf, links);
@@ -706,7 +890,13 @@ fn render_node(
             if state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, false) {
                 // painted as cells
             } else if let Some(picker) = state.game_picker.as_ref() {
-                state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.theme.get("graphics").style, buf);
+                let letterbox = state.colors.theme.get("graphics").style;
+                if state.glk_stretch {
+                    // Design mode: fill exactly the window's cell rect (SQ-1703 P3).
+                    state.graphics_render.borrow_mut().render_stretched(picker, gw, area, letterbox, buf);
+                } else {
+                    state.graphics_render.borrow_mut().render(picker, gw, area, letterbox, buf);
+                }
             } else {
                 // No image protocol: approximate the detailed canvas as colour
                 // cells rather than blanking it (SQ-0520).
@@ -747,79 +937,16 @@ fn render_node(
             // SQ-0487) — a raster-mode user wants the pixel aesthetic even
             // on menus.
             let hybrid = state.config.v6_render == crate::config::V6RenderMode::Hybrid;
-            let story_box = items.iter().find_map(|pw| {
-                // The PRIMARY buffer only: a v6 game can publish a second, non-primary
-                // prose window (SQ-0585), and taking its rows as the story box made an
-                // ordinary split look like a menu takeover.
-                matches!(&pw.node, WinNode::Buffer(b) if b.primary).then(|| {
-                    let top = state.v6_text.cell().row_of_origin0(pw.y_px);
-                    (top, top + pw.h_px.max(1).div_ceil(16), pw.x_px as u32, pw.x_px as u32 + pw.w_px as u32)
-                })
-            });
-            let has_menu = items.iter().any(|pw| {
-                matches!(&pw.node, WinNode::Grid(g)
-                    if g.px_texts.iter().any(|t| {
-                        let row = state.v6_text.cell().row_of(t.y);
-                        // SQ-0742: the run must be inside the story box on BOTH axes. The
-                        // row test alone calls any chrome glyph that merely shares a row
-                        // with the story a takeover — and a game whose frame is drawn with
-                        // LINE-DRAWING characters rather than reverse-video spaces has one
-                        // on every row of the box. Journey under the Amiga profile draws
-                        // exactly that: `│` rules at native x 0 / 256 / 632, all outside
-                        // its story box (264..632), on every one of its rows. That routed a
-                        // perfectly ordinary gameplay screen to the cell path, which draws
-                        // the game's 80 columns 1:1 into a pane of any width — the frame
-                        // stopped short of the pane edge and the click map (proportional
-                        // over the whole pane) no longer matched where anything was drawn.
-                        // Under the IBM PC profile the same rules are reverse-video SPACES,
-                        // which trim to empty and never tripped the gate, which is why only
-                        // the Amiga route showed it.
-                        let x0 = t.x.max(1) as u32 - 1;
-                        let x1 = x0 + state.v6_text.cell().run_px(&t.text).max(u32::from(state.v6_text.cell().w()));
-                        !t.text.trim().is_empty()
-                            && row >= STATUS_BAND_ROWS
-                            && story_box.is_some_and(|(top, bot, left, right)| {
-                                row >= top && row < bot && x1 > left && x0 < right
-                            })
-                    }))
-            });
-            // SQ-0886: …but the cell path DRAWS NO ART, so it is the wrong
-            // destination for a takeover screen the game framed with artwork.
-            // Shogun's boot menu is exactly that: its credits and its three items
-            // sit on the machine's own ground between two ornate side panels, and
-            // routing the screen to cells discarded both — no panels anywhere, and
-            // the story window's page flooded across the pane (measured on
-            // `James Clavell's Shogun.adf` release 295 and on the Blorb release 322
-            // alike: `#000000` across 761 of 800 columns where the Amiga's colour 12
-            // ground belongs).
-            //
-            // SQ-0892 RE-POINTED WHERE IT SENDS THEM. It sent them to the COMPOSITE,
-            // because the ring could not lay this screen out — the reason recorded
-            // below at the hybrid branch, and true until now: the ring drew the menu
-            // one CHARACTER per independently rounded cell (`SI(RT th e ga me`). Both
-            // halves of that are gone. SQ-0894 built the ring from content, so the
-            // ornaments are one flank down the whole pane on either press; SQ-0892
-            // groups a row's runs before placing them, so the menu is intact. The
-            // frame now takes the RING, which draws the panels as art and the credits
-            // and menu as CRISP GLYPHS — SQ-0750's rule, which the composite cannot
-            // honour because it rasterises every character on the screen.
-            //
-            // What this predicate still decides, and why it is kept: a menu takeover
-            // with NO art goes to the coherent all-text cell path (SQ-0484), and one
-            // WITH art must not, because the cell path draws no art. That is the
-            // distinction it was always making. Only its destination changed.
-            //
-            // ART, specifically — a chrome GRAPHICS window with opaque pixels in it.
-            // An `erase_window` fill is not art: the cell path draws those itself
-            // (`draw_erase_fills`), which is what keeps advent's boot popup — a
-            // painted panel over a story with no artwork in the game at all — on the
-            // coherent all-text path SQ-0484 put it on.
-            let menu_over_art = has_menu
-                && hybrid
-                && items.iter().any(|pw| {
-                    matches!(&pw.node, WinNode::Graphics(g)
-                        if g.win != 0 && g.canvas.pixels().any(|p| p[3] >= 128))
-                });
+            // SQ-1614: a single call, never recomputed inline — see
+            // `hybrid_painted_menu_takeover_route`'s own doc for the full
+            // reasoning (moved here verbatim). `hybrid_chrome_layout`'s `None`
+            // and `hybrid_painted_menu_layout`'s `Some` for this same frame both
+            // read this exact predicate, so neither can drift from what this
+            // arm actually does. Classified once, up front, purely so this
+            // predicate's own input matches the shape a host already holds —
+            // both branches below still classify their own copy, unchanged.
+            let takeover_layout = crate::render::v6_layout::classify_windows(items, state.v6_text.cell());
+            let takeover_route = hybrid_painted_menu_takeover_route(&takeover_layout, hybrid, state.v6_text.cell());
             // MODAL overlays only (SQ-0587). The fall-through exists because image
             // placements draw above terminal cells in classic protocols, so a
             // menu/dialog over the story pane would be invisible under the v6 image.
@@ -829,7 +956,7 @@ fn render_node(
             // move — which re-tidies the map and starts its animation — dropped the
             // whole v6 pixel path for the duration, and Arthur's header art vanished
             // with it.
-            if !state.any_modal_overlay_open() && !(has_menu && hybrid && !menu_over_art) {
+            if !state.any_modal_overlay_open() && !takeover_route {
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
@@ -856,6 +983,13 @@ fn render_node(
                 // is what SQ-0750 asks for and what the composite structurally cannot
                 // do — it rasterises every character on the screen.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
+                    // Hoisted above the takeover decision below (SQ-1620): that
+                    // decision now needs the host's own font metrics too, to ask
+                    // `story_slot_grid_wider_than_viewport` whether a story-slot
+                    // GRID fits the viewport at this pane. Reused at its old spot
+                    // further down instead of recomputed.
+                    let fs = picker.font_size();
+                    let cell_px = (fs.width, fs.height);
                     // WHICH arm decided this frame's route, published for
                     // `/dump-terminal` (SQ-0994). The routing test already computes
                     // it and used to throw it away, so a `Cell` store costs the
@@ -863,9 +997,22 @@ fn render_node(
                     // because by the time a command runs the live frame is the
                     // palette's. `None` with no story window at all: that is a
                     // fall-through the hatch never got to judge.
-                    let takeover = layout
-                        .story
-                        .and_then(|s| picture_takeover_reason(s, &layout.chrome, layout.story_gfx, native));
+                    //
+                    // SQ-1620: `story_slot_grid_wider_than_viewport` ORs in — cheaply,
+                    // it bails before building anything unless the story slot is
+                    // actually a `Grid` — the one shape `picture_takeover_reason`
+                    // itself cannot see (it has no pane/cell_px to size a viewport
+                    // with at all): a story-slot GRID whose own columns outrun the
+                    // terminal viewport this pane's font would give it. Without this,
+                    // the ring below draws the grid 1:1 via `draw_grid_transparent`,
+                    // which clips silently to the viewport width exactly as
+                    // `hybrid_story_slot_grid` does — see that function and
+                    // `story_slot_grid_wider_than_viewport`'s own doc for the full
+                    // reasoning and the InvisiClues specimen this fixes.
+                    let takeover = layout.story.and_then(|s| {
+                        picture_takeover_reason(s, &layout.chrome, layout.story_gfx, native)
+                            .or_else(|| story_slot_grid_wider_than_viewport(&layout, s, native, area, cell_px, state))
+                    });
                     state.v6_takeover_reason.set(takeover);
                     if let Some(story) = layout.story.filter(|_| takeover.is_none()) {
                         // The op log's frame boundary (SQ-0590) opens HERE, not at
@@ -926,8 +1073,6 @@ fn render_node(
                         // cost 3-8 ms per redraw on a 640x400 press and was paid per
                         // keystroke and per frame of any animation.
                         let hkey = v6_hybrid_gen(items, state, area, picker, story);
-                        let fs = picker.font_size();
-                        let cell_px = (fs.width, fs.height);
                         let cached = state.graphics_render.borrow_mut().hybrid.take().filter(|f| f.key == hkey);
                         let replayed = cached.is_some();
                         let frame = match cached {
@@ -1834,6 +1979,7 @@ fn render_node(
                         links: Vec::new(),
                         transcript_surface: true,
                         win_rects: Vec::new(),
+                        top_anchored_fits: rm.top_anchored_fits,
                     });
                 }
                 return None;
@@ -1869,7 +2015,7 @@ fn render_node(
                 // Amiga Zork Zero's DEFINE menu is the frame that showed it (release 366,
                 // serial 890323). Reached by keys until a line read, `define`, then one
                 // character to clear "[Hit any key to continue.]", it is routed here
-                // rather than to the hybrid ring by `has_menu && hybrid && !menu_over_art`.
+                // rather than to the hybrid ring by `hybrid_painted_menu_takeover_route`.
                 // Its story window is black on `Standard(10)`, light grey; all 526 of its
                 // single-character runs name a foreground of black and no background at
                 // all; and its window carries an `ErasedFill`. So the fill and every run
@@ -2044,7 +2190,7 @@ fn render_node(
                                 format!("modal overlay open: {}", modals.join(", "))
                             } else if state.game_picker.is_none() {
                                 "no image protocol".to_string()
-                            } else if has_menu && hybrid && !menu_over_art {
+                            } else if takeover_route {
                                 "painted menu takeover routed here".to_string()
                             } else {
                                 "no story window, or a full-screen picture takeover".to_string()
@@ -2242,7 +2388,7 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, state
             // since SQ-0821 means asking the THEME, not the game's border flag.
             let sep = border.then(|| separator_style(*vertical, &state.colors)).flatten();
             let (a1, _sep, a2) =
-                split_area_bordered(area, *vertical, split.fixed, u16::from(sep.is_some()));
+                split_area_bordered(area, *vertical, split.fixed, split.rest, u16::from(sep.is_some()));
             collect_graphics_rects(first, a1, out, state);
             collect_graphics_rects(second, a2, out, state);
         }
@@ -2379,23 +2525,71 @@ fn edge_touches_painted_graphics(node: &WinNode, vertical: bool, high: bool) -> 
 }
 
 /// Split `area` for a pair, reserving `border` cells (0 or 1) between the children
-/// for the separator rule. `first` gets `fixed` cells; the separator gets `border`;
-/// `second` gets the rest. gvm already reserved this 1-cell gutter between bordered
-/// siblings, so the two child areas never include it — the rule is drawn in `sep`.
-fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (Rect, Rect, Rect) {
+/// for the separator rule. `first` gets `fixed` cells; the separator gets `border`.
+/// `second` gets its own real `rest` cells when known (gvm's independently-floored
+/// count for it — NOT "whatever's left") — a proportional split's independent
+/// per-child flooring can leave a one-cell remainder that belongs to neither child
+/// (see the doc comment on gvm's `layout_window`), and since `second` is sized from
+/// `rest` rather than "extent minus fixed minus border", that slack cell shows up
+/// as unclaimed gutter between `sep` and `second` instead of being silently
+/// absorbed into `second`'s canvas (SQ-1605) — matching gvm's own `split_rect`,
+/// which anchors each child to its own outer edge and leaves the slack beside the
+/// border.
+///
+/// `rest: Some(_)` reclaims up to one cell of that gutter back into `second`
+/// whenever the caller passes `border: 0` (no separator actually drawn there) —
+/// same as the no-`rest` path below, so a theme with no separator style (the
+/// shipped default, SQ-0821) still abuts as before on an ordinary
+/// (non-proportional) bordered split, AND on a `winmethod_NoBorder` split
+/// (`render_node`/`collect_graphics_rects` always pass `border: 0` for one,
+/// regardless of theme, since there's no border to veto in the first place —
+/// so this reclaims that pair's whole one-cell gutter, reproducing the
+/// borderless-abut guarantee, SQ-0341). Only a GENUINE proportional-rounding
+/// remainder — the second cell of a gutter that already got its one reclaimable
+/// cell back — stays withheld either way, which is the one thing this function
+/// cannot tell apart from a border reservation on its own; it doesn't need to,
+/// since gvm's "at most one cell" invariant means a bordered split's gutter never
+/// exceeds two cells and a borderless one's never exceeds one.
+///
+/// `rest: None` (a `WinNode::Pair` not built from a real gvm split) keeps the
+/// old behaviour: `second` fills exactly whatever's left after `fixed` and the
+/// drawn separator.
+fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, rest: Option<u16>, border: u16) -> (Rect, Rect, Rect) {
     if vertical {
         let f = fixed.min(area.height);
-        let b = border.min(area.height - f);
+        let (r, b) = match rest {
+            Some(r) => {
+                let r = r.min(area.height - f);
+                let reclaim = 1u16.saturating_sub(border).min(area.height - f - r);
+                let r = r + reclaim;
+                (r, border.min(area.height - f - r))
+            }
+            None => {
+                let b = border.min(area.height - f);
+                (area.height - f - b, b)
+            }
+        };
         let first = Rect::new(area.x, area.y, area.width, f);
         let sep = Rect::new(area.x, area.y + f, area.width, b);
-        let second = Rect::new(area.x, area.y + f + b, area.width, area.height - f - b);
+        let second = Rect::new(area.x, area.y + area.height - r, area.width, r);
         (first, sep, second)
     } else {
         let f = fixed.min(area.width);
-        let b = border.min(area.width - f);
+        let (r, b) = match rest {
+            Some(r) => {
+                let r = r.min(area.width - f);
+                let reclaim = 1u16.saturating_sub(border).min(area.width - f - r);
+                let r = r + reclaim;
+                (r, border.min(area.width - f - r))
+            }
+            None => {
+                let b = border.min(area.width - f);
+                (area.width - f - b, b)
+            }
+        };
         let first = Rect::new(area.x, area.y, f, area.height);
         let sep = Rect::new(area.x + f, area.y, b, area.height);
-        let second = Rect::new(area.x + f + b, area.y, area.width - f - b, area.height);
+        let second = Rect::new(area.x + area.width - r, area.y, r, area.height);
         (first, sep, second)
     }
 }
@@ -2877,6 +3071,52 @@ pub struct V6FrameInputs<'a> {
     /// beside it, and the story's prose box fills the gap above. No effect on a
     /// frame that is not Journey's shape ([`menu_strip_below_story`]).
     pub bottom_anchor_menu: bool,
+    /// Native-pixel row TOPS a Hybrid host already lays out itself in terminal
+    /// cells — [`hybrid_chrome_layout`]'s own [`V6HybridChromeLayout::text_rows`]
+    /// (`runs` AND `story_overlay` alike, SQ-1611 — a host that derives this by
+    /// hand from `runs` only misses any row `story_overlay` owns) — published
+    /// for a host that draws its own chrome
+    /// under [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly)
+    /// and so cannot reach the terminal's private glyph-row set itself
+    /// (SQ-1609 Gap 2). Empty (every constructor's default) reproduces
+    /// today's behaviour exactly: [`compose_v6_frame_into`]'s three
+    /// `TextLayer` sites all read `TextLayer::All`, and
+    /// `fill_reverse_row_gaps` (`crate::render::v6_layout`) bakes its
+    /// reversed-gap fill into every row it finds — right for a host that
+    /// rasterises the whole composite itself, wrong for one whose OWN
+    /// cell-based layout already owns that row. Arthur's status bar is the
+    /// specimen: `fill_reverse_row_gaps` bakes an opaque `#dcdcdc` block into
+    /// the bare cell before "St Anne's Day" at native y 192-208, and a
+    /// Hybrid-drawing host's own cell-laid bar overlaps that pixel range at a
+    /// different scale, so the composite's baked-in copy shows as a stray
+    /// reversed block above or below the real bar depending on pane size.
+    /// Populate this only with rows the host's OWN Hybrid-style layout
+    /// already draws — a plain `RecordOnly` host with no cell layout of its
+    /// own (a GUI or web client rasterising everything itself) must leave it
+    /// empty, or it silently loses this fill with nothing recorded to
+    /// replace it, since `fill_reverse_row_gaps` paints straight onto the
+    /// canvas rather than through [`GlyphSink`](crate::render::v6_layout::GlyphSink).
+    pub hybrid_text_rows: std::collections::HashSet<u16>,
+    /// Extend the side flanks down the pane even when the story slot is a
+    /// `Grid` (InvisiClues topic menus — Zork Zero, Shogun) rather than a
+    /// `Buffer` (SQ-1618). `false` (every constructor's default) reproduces
+    /// today's behaviour exactly: the `ext` block declines the whole frame on
+    /// the SQ-1026 `!matches!(&story.node, WinNode::Buffer(_))` guard, so
+    /// `extension` stays 0 and the canvas never grows past `native` — a
+    /// truncated `V6Frame.frame.canvas_h` on any pane taller than the game's
+    /// own screen, even though the terminal's own Hybrid renderer tiles the
+    /// flank art down the WHOLE pane regardless of the story slot's node type
+    /// (`build_hybrid_frame_with`'s `tiled_flanks`, which excludes only
+    /// `BottomPlan::Menu`, Journey's shape). `extend_raster_flanks` itself
+    /// never inspects `story.node` — it only reads `story.x_px`/`story.w_px`
+    /// and `frame.canvas_h` — so it already works correctly under a `Grid`
+    /// story slot; the only reason it never gets a tall `frame` to work with
+    /// is this upstream guard forcing `extension = 0`. Set this to let a
+    /// `Grid` story slot extend anyway: the SQ-1026 guard in the main body
+    /// (declining to draw a transcript into the `Grid`'s rect) is untouched
+    /// and still applies at every extension level — only the flank sizing
+    /// changes.
+    pub extend_flanks_under_story_grid: bool,
 }
 
 impl<'a> V6FrameInputs<'a> {
@@ -2936,6 +3176,8 @@ impl<'a> V6FrameInputs<'a> {
             more_prompt_pair: v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg),
             text: crate::render::v6_layout::V6TextMode::Rasterise,
             bottom_anchor_menu: false,
+            hybrid_text_rows: std::collections::HashSet::new(),
+            extend_flanks_under_story_grid: false,
         }
     }
 }
@@ -3266,6 +3508,23 @@ fn compose_v6_frame_into(
         // A `Grid` in the story slot contributes its rect and nothing else
         // (SQ-1026) — again no transcript. scopa and Amiga Shogun's InvisiClues.
         if !matches!(&story.node, WinNode::Buffer(_)) {
+            // SQ-1618: a `Grid` story slot (unlike `scopa`'s `Layered`/other
+            // non-Buffer shapes) still wants the FLANK art extended down the
+            // pane, even though it has no transcript to grow — the terminal's
+            // own Hybrid `tiled_flanks` already does this for every non-Menu
+            // shape regardless of node type (see
+            // `V6FrameInputs::extend_flanks_under_story_grid`'s doc). A host
+            // opts in explicitly; every other non-Buffer shape (and every
+            // existing caller, which defaults the flag off) still declines
+            // here exactly as before. Skip straight past the `story_clear`/
+            // `story_prose_box` checks below — they size PROSE growth, which
+            // does not apply to a `Grid`'s bare rect — and hand back the
+            // anchored-band list computed above unchanged (empty on every
+            // known `Grid` specimen: neither Zork Zero's nor Shogun's
+            // InvisiClues screen has a chrome band below the story slot).
+            if matches!(&story.node, WinNode::Grid(_)) && inputs.extend_flanks_under_story_grid {
+                break 'ext Some(anchored);
+            }
             break 'ext None;
         }
         // The picture owns the screen (SQ-0578), or an absolutely-placed plate is
@@ -3331,14 +3590,25 @@ fn compose_v6_frame_into(
     let canvas_native =
         if moved.is_empty() { native } else { (native.0, frame.canvas_h as u16) };
     // Raster has no cells to draw text with, so it needs every run imaged: the
-    // empty set is not a default here, it is this path's answer (SQ-0903).
+    // empty set is this path's own default answer (SQ-0903) — UNLESS the host
+    // has opted in via `hybrid_text_rows` (SQ-1609 Gap 2), because it is drawing
+    // those exact rows itself in cells and does not want this canvas's copy.
+    // Computed once and reused at all three `TextLayer` sites below, mirroring
+    // how the terminal's own Hybrid draw computes `glyph_rows` once and threads
+    // one `TextLayer::SkipGlyphRows(&glyph_rows)` through its three analogous
+    // calls.
+    let text_layer = if inputs.hybrid_text_rows.is_empty() {
+        v6::TextLayer::All
+    } else {
+        v6::TextLayer::SkipGlyphRows(&inputs.hybrid_text_rows)
+    };
     let mut canvas = v6::build_chrome_canvas_into(
         &chrome,
         canvas_native,
         default_fg,
         default_bg,
         inputs.colors,
-        v6::TextLayer::All,
+        text_layer,
         inputs.face,
         glyphs,
     );
@@ -3357,14 +3627,14 @@ fn compose_v6_frame_into(
     // what is left, because a fill is the oldest thing on the screen: the game
     // filled its rectangle, then printed the label on top of it.
     let grounds = |c: &mut image::RgbaImage| {
-        v6::blit_paint_ground(c, inputs.paint, v6::TextLayer::All, inputs.face.cell());
+        v6::blit_paint_ground(c, inputs.paint, text_layer, inputs.face.cell());
         if honor {
             v6::fill_window_pages(
                 c,
                 &chrome,
                 layout.story,
                 inputs.colors,
-                v6::TextLayer::All,
+                text_layer,
                 inputs.face.cell(),
             );
         } else {
@@ -3585,7 +3855,7 @@ fn compose_v6_frame_into(
                 let adv = inputs.face.advance(ch);
                 glyphs.blit(
                     &mut canvas, ch, pen, sy + last_row * u32::from(cell.h()), adv, u32::from(cell.h()), prompt_ink, Some(block), 0, inputs.face,
-                    v6::V6RunSource::Pager, false, false,
+                    v6::V6RunSource::Pager, false, false, false,
                 );
                 pen += adv;
             }
@@ -5283,6 +5553,22 @@ pub struct V6HybridChromeRun {
     /// menu, [`V6HybridChromeLayout::menu_band`]) rather than the main chrome
     /// ring.
     pub in_menu_band: bool,
+    /// SQ-1599: where `draw_chrome_text_strip` ACTUALLY draws this run, after
+    /// its own post-origin resolution — SQ-0747's rule stretch (a rule
+    /// fragment's span grows to close the seam to its neighbours), the
+    /// claimed-word collision guard (a lone divider/frame glyph is dropped
+    /// entirely where a multi-character WORD run already owns its column),
+    /// and the strip's own left-edge clip (SQ-0949). `(start, end)` terminal
+    /// columns on `row`, half-open, or `None` when the real render draws
+    /// nothing for this run at all.
+    ///
+    /// `col` above is this run's own ORIGIN and never moves; `resolved` is the
+    /// separate, later, neighbour-relative answer `col`'s own doc disclaims.
+    /// Always `Some((col, col + run.text.chars().count() as i32))` for an
+    /// over-art run (`over_art == true`) — `stamp_runs_over_art` applies none
+    /// of this strip-level resolution, so there is nothing to stretch, claim
+    /// or clip.
+    pub resolved: Option<(i32, i32)>,
 }
 
 /// The SAME cell layout the terminal Hybrid renderer uses for a v6 frame's
@@ -5298,13 +5584,12 @@ pub struct V6HybridChromeRun {
 /// [`build_hybrid_frame`] itself calls for the terminal render) — so a host's
 /// answer cannot drift from what actually gets drawn for the SAME frame.
 ///
-/// Deliberately scoped to a run's own ORIGIN, not `draw_chrome_text_strip`'s
-/// later neighbour-relative span adjustments (SQ-0747's rule-stretch, its
-/// claimed-word overwrite guard): both only ever move where a RULE fragment's
-/// edge sits relative to whatever else is on its row, which is a draw-time
-/// refinement of where a strip's own ground is painted, never of where a run's
-/// own first character lands — and it is that origin a host asks a `PxText`'s
-/// position for.
+/// `runs`' `col`/`row` are each run's own ORIGIN — unaffected by
+/// `draw_chrome_text_strip`'s later neighbour-relative span adjustments
+/// (SQ-0747's rule-stretch, its claimed-word overwrite guard, SQ-0949's strip
+/// clip) — while each run's separate `resolved` field (SQ-1599) publishes
+/// exactly that later resolution, so a host can draw either the run's own
+/// first-character position or what the real terminal actually paints for it.
 pub struct V6HybridChromeLayout {
     /// The story viewport — the region a host should leave to prose (its own or
     /// the game's) rather than chrome — in the HOST's terminal cells.
@@ -5327,6 +5612,177 @@ pub struct V6HybridChromeLayout {
     /// mapping [`GraphicsRender::record_hybrid_click_map`] itself calls for the
     /// TUI's own click handling, so the two cannot disagree.
     pub click_map: crate::render::graphics::V6ClickMap,
+    /// The main ring's own letterbox [`Scale`](crate::render::v6_layout::Scale)
+    /// (SQ-1599) — `frame.scale`, ALWAYS, regardless of plan. On every plan but
+    /// Menu this is recoverable (awkwardly) from `click_map`'s own
+    /// `img_x`/`img_y`/`img_w`/`img_h`; on the Menu plan (Journey)
+    /// `click_map`'s scale is the MENU BAND's, and there is no other way to
+    /// learn where the main picture itself belongs. A host places the ring's
+    /// own artwork with this, never with `click_map`'s scale.
+    pub scale: crate::render::v6_layout::Scale,
+    /// Ground fills `draw_chrome_text_strip` paints BEFORE it stamps any run
+    /// (SQ-0508(a)/SQ-0512/SQ-0946, published SQ-1599): one entry per strip
+    /// (main ring and menu band alike) flooding the strip's own width, then —
+    /// for any row whose own colour differs from the strip's or that is a
+    /// pure reverse-video bar — that row's own flood on top of it. Order
+    /// matters and matches the real draw: paint these in order, each one
+    /// overwriting whatever the previous entries left in its own cells,
+    /// BEFORE drawing `runs`. Arthur's status bar is the corpus's own report
+    /// for what is missing without this: one-cell gaps between its fields,
+    /// because nothing ever floods the ground between them.
+    pub ground: Vec<V6HybridGroundFill>,
+    /// A flank's inner divider and outer border columns, carried down the
+    /// letterbox gap reclaimed below a Menu-plan side flank (SQ-0742/SQ-0750,
+    /// published SQ-1599) — copied straight through from
+    /// [`HybridFrame::flank_borders`], the exact data the real draw itself
+    /// reads: one entry per flank strip, `(strip_rect, inner, outer)`, either
+    /// extension `None` where that flank carries none. A host draws each
+    /// `Some` extension exactly as the real render does — [`BorderInk::Band`]
+    /// stretched from the native crop, [`BorderInk::Glyph`] stamped in its own
+    /// column with the rest of the extension as blank padding in the same
+    /// style.
+    pub flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)>,
+    /// `flank_borders`' extensions flattened to one list (copied straight
+    /// through from [`HybridFrame::divider_exts`]) — the same data, in the
+    /// shape a host that does not care which flank an extension belongs to
+    /// can draw directly.
+    pub divider_exts: Vec<FlankBorderExt>,
+    /// SQ-0508(b)'s continuous divider bridge, published SQ-1609: one entry
+    /// `(col, first_row, last_row)` per divider column `draw_chrome_text_strip`
+    /// paints continuously from `first_row` to `last_row` inclusive (both in
+    /// the HOST's terminal cells, like `runs`' own `row`) — a reversed
+    /// whitespace run is a solid vertical rule, and the letterbox scale maps
+    /// some GAME rows onto terminal rows with no run of their own at all, so a
+    /// bare walk over `runs`/`ground` (which only ever visits a row that
+    /// already carries one) misses those bridged rows entirely; Arthur's F3
+    /// inventory screen is the specimen (see `draw_chrome_text_strip`'s own
+    /// SQ-0508(b) comment). Bounded to first-painted..last-painted for that
+    /// column, not the whole strip (SQ-1035): Arthur's two inventory dividers
+    /// belong to window 2, which ends at the score bar below it, and a host
+    /// that ran them to the strip's bottom would draw rule through the bar and
+    /// on down the story window. A host paints a reversed blank cell at `col`
+    /// on every row `first_row..=last_row`, the same style `runs`' own reversed
+    /// entries use.
+    pub divider_fills: Vec<(u16, i32, i32)>,
+    /// Chrome runs printed ON TOP of the story slot itself, in the SAME cell
+    /// coordinates the story box uses (SQ-1608) — Shogun's boot menu
+    /// ("START the game" and its two siblings, the reverse-video selection
+    /// bar) is the specimen: window 0 stays an ordinary `Buffer` there, so
+    /// [`hybrid_story_slot_grid`] never answers for it, and until this field
+    /// existed a host had no published data for this overlay at all and could
+    /// only place these runs at their raw native pixel position — which
+    /// overlaps the story's own printed text at a narrow pane width. A host
+    /// draws each entry over its own rendered story prose, in the SAME cell
+    /// coordinates the story text itself occupies, exactly as
+    /// [`render_node`]'s own `WinNode::Layered` in-box pass draws them here.
+    pub story_overlay: Vec<V6HybridStoryOverlayRun>,
+    /// Native-pixel row TOPS (already mapped through `.y.max(1) - 1`, [`Self::
+    /// text_rows`]'s own key) of the story slot's own `Grid` runs — the
+    /// InvisiClues topic list (SQ-1618) — when [`hybrid_story_slot_grid`]
+    /// would answer `Some` for this exact frame (same `WinNode::Grid` and
+    /// non-empty-viewport tests it makes; not recomputed by a second call,
+    /// since `frame.viewport` is already this frame's own answer to that
+    /// question). Empty on every other frame, including Shogun's boot menu
+    /// (an ordinary `Buffer`, so [`Self::story_overlay`] carries its runs
+    /// instead). Purely additive: a host that draws a story-slot `Grid`
+    /// itself in cells (via [`hybrid_story_slot_grid`]) had no way to tell
+    /// [`V6FrameInputs::hybrid_text_rows`] about those rows before this
+    /// field existed, so `compose_v6_frame_into`'s raster copy and the
+    /// host's own cell draw could disagree over the Grid's own text.
+    pub story_slot_grid_rows: Vec<u16>,
+}
+
+/// SQ-1599: one ground-fill `draw_chrome_text_strip` paints before it stamps a
+/// strip's own runs — either the whole-strip flood (SQ-0508(a)/SQ-0512) or one
+/// row's own flood over it (SQ-0512/SQ-1035's reverse-bar case) — published so
+/// a host closes the same gaps the real render closes rather than leaving the
+/// cells between and around runs showing its own backdrop.
+///
+/// `fg`/`bg` are packed game colour codes, exactly like a [`V6HybridChromeRun`]'s
+/// own `run.fg`/`run.bg` — `0` (or [`crate::render::v6_layout::packed_explicit`]
+/// false) means "no explicit colour here; use the host's own themed default for
+/// this ring", never literal black. `reverse` swaps them, the same as a run's
+/// own style bit 0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct V6HybridGroundFill {
+    /// The cells to flood, already clipped to the game screen's own columns
+    /// (SQ-0946) exactly as the real flood is.
+    pub rect: Rect,
+    pub fg: u32,
+    pub bg: u32,
+    pub reverse: bool,
+}
+
+/// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
+/// same way [`draw_chrome_text_strip`] positions it (SQ-1591): SQ-0543's
+/// consecutive-row packing (one game text row per terminal row, from the
+/// strip's own top), SQ-0509/SQ-0742's rule collapsing (reused via
+/// [`collapse_row_rules`] rather than restated — see that call's own doc for why
+/// a raw, uncollapsed run count would answer the SQ-0892 block-placement
+/// question wrong on exactly the screens that need it, Arthur's and Shogun's
+/// glyph-at-a-time status bars), SQ-0892's block placement
+/// ([`strip_native_origin`]), and SQ-1009/SQ-0783's lone box-glyph edge
+/// alignment ([`edge_glyph_col`]).
+/// SQ-1599: row-bucket + collapse a strip's runs exactly as the real Hybrid
+/// draw does (SQ-0543's consecutive-row packing, SQ-0509/SQ-0742's rule
+/// collapsing via [`collapse_row_rules`]) — the ONE row-bucketing computation
+/// every chrome-text pass in this module needs (`strip_run_positions`,
+/// `strip_ground_fills`, `strip_run_resolution`), factored out so the three
+/// cannot quietly diverge on how a strip's runs are grouped into terminal
+/// rows. `draw_chrome_text_strip` keeps its own copy (it additionally builds
+/// `divider_rows` from the same `raw` map, before collapsing) — see that
+/// function's own doc for the reasoning this mirrors.
+fn chrome_by_row(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    cell: zvm::screen::V6Cell,
+) -> std::collections::BTreeMap<i32, Vec<(crate::engine::PxText, bool)>> {
+    use std::collections::BTreeMap;
+    let font_h = i32::from(cell.h());
+    let game_row = |t: &crate::engine::PxText| (t.y.max(1) as i32 - 1) / font_h;
+    let first_row = runs.iter().map(game_row).min().unwrap_or(0);
+    let mut raw: BTreeMap<i32, Vec<&crate::engine::PxText>> = BTreeMap::new();
+    for t in runs {
+        raw.entry(rect.y as i32 + game_row(t) - first_row).or_default().push(t);
+    }
+    let mut by_row: BTreeMap<i32, Vec<(crate::engine::PxText, bool)>> = BTreeMap::new();
+    for (row, mut rr) in raw {
+        rr.sort_by_key(|t| t.x);
+        by_row.insert(row, collapse_row_rules(&rr, scale, cell_px, pane, cell));
+    }
+    by_row
+}
+
+/// SQ-1599: a run's own column origin — SQ-0892's block placement
+/// (`native_origin`, when the strip is a block the game composed in its own
+/// text grid) or [`run_cell`]'s scale-mapped answer, then SQ-1009/SQ-0783's
+/// lone box-glyph edge alignment ([`edge_glyph_col`]) — factored out of
+/// `strip_run_positions` and `draw_chrome_text_strip`'s own `base_span` so the
+/// two (and `strip_run_resolution`, SQ-1599's own new pass) share one formula
+/// rather than three copies of it.
+fn chrome_run_origin(
+    t: &crate::engine::PxText,
+    native_origin: Option<i32>,
+    native_x0: i32,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    native_w: u16,
+    cell: zvm::screen::V6Cell,
+) -> i32 {
+    let c = match native_origin {
+        Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
+        None => run_cell(t, scale, cell_px, pane, cell).0,
+    };
+    match t.text.chars().next() {
+        Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
+            edge_glyph_col(t.x.max(1) as u32 - 1, native_w as u32, scale, cell_px, pane, cell).unwrap_or(c)
+        }
+        _ => c,
+    }
 }
 
 /// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
@@ -5348,49 +5804,202 @@ fn strip_run_positions(
     native: (u16, u16),
     cell: zvm::screen::V6Cell,
 ) -> Vec<(crate::engine::PxText, i32, i32)> {
-    use std::collections::BTreeMap;
-    let font_h = i32::from(cell.h());
-    let game_row = |t: &crate::engine::PxText| (t.y.max(1) as i32 - 1) / font_h;
-    let first_row = runs.iter().map(game_row).min().unwrap_or(0);
-    let mut raw: BTreeMap<i32, Vec<&crate::engine::PxText>> = BTreeMap::new();
-    for t in runs {
-        raw.entry(rect.y as i32 + game_row(t) - first_row).or_default().push(t);
-    }
-    let mut by_row: BTreeMap<i32, Vec<(crate::engine::PxText, bool)>> = BTreeMap::new();
-    for (row, mut rr) in raw {
-        rr.sort_by_key(|t| t.x);
-        by_row.insert(row, collapse_row_rules(&rr, scale, cell_px, pane, cell));
-    }
+    let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
     let mut out = Vec::new();
     for (row, row_runs) in &by_row {
         for (t, _rule) in row_runs {
-            let c = match native_origin {
-                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
-                None => run_cell(t, scale, cell_px, pane, cell).0,
-            };
-            let c = match t.text.chars().next() {
-                Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
-                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane, cell).unwrap_or(c)
-                }
-                _ => c,
-            };
+            let c = chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
             out.push((t.clone(), c, *row));
         }
     }
     out
 }
 
+/// SQ-1599: `draw_chrome_text_strip`'s own strip/row ground-fill pass
+/// (SQ-0508(a)/SQ-0512/SQ-0946), computed without a `Buffer` to paint into —
+/// see [`V6HybridChromeLayout::ground`] for the shape and how a host uses it.
+/// Deliberately does NOT share `chrome_by_row`'s caller with
+/// `strip_run_positions`/`strip_run_resolution` beyond the row-bucketing
+/// itself: the flood decision only ever asks "is there an explicit colour, or
+/// is this row a reverse bar", never a run's own position.
+fn strip_ground_fills(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    native: (u16, u16),
+    cell: zvm::screen::V6Cell,
+) -> Vec<V6HybridGroundFill> {
+    use crate::render::v6_layout::packed_explicit;
+    let mut out = Vec::new();
+    let (screen_lo, screen_hi) = crate::render::v6_layout::screen_cols(scale, native.0, cell_px, pane);
+    let lo = rect.x.max(screen_lo);
+    let hi = rect.right().min(screen_hi);
+    if hi > lo {
+        let strip_fg = runs.iter().map(|t| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        let strip_bg = runs.iter().map(|t| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        out.push(V6HybridGroundFill { rect: Rect::new(lo, rect.y, hi - lo, rect.height), fg: strip_fg, bg: strip_bg, reverse: false });
+    }
+    let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
+    for (row, row_runs) in &by_row {
+        if *row < rect.y as i32 || *row >= rect.bottom() as i32 {
+            continue;
+        }
+        let all_rev = row_is_reverse_bar(row_runs.iter().map(|(t, _)| t));
+        let row_fg = row_runs.iter().map(|(t, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        let row_bg = row_runs.iter().map(|(t, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        if (all_rev || packed_explicit(row_fg) || packed_explicit(row_bg)) && hi > lo {
+            out.push(V6HybridGroundFill { rect: Rect::new(lo, *row as u16, hi - lo, 1), fg: row_fg, bg: row_bg, reverse: all_rev });
+        }
+    }
+    out
+}
+
+/// SQ-1609: `draw_chrome_text_strip`'s own SQ-0508(b)/SQ-1035 continuous
+/// divider-fill pass, computed without a `Buffer` to paint into — see
+/// [`V6HybridChromeLayout::divider_fills`] for the shape and how a host uses
+/// it. Deliberately does NOT reuse `strip_ground_fills`'s row iteration: that
+/// walk (via `chrome_by_row`'s `by_row`) only ever visits a row that already
+/// carries a run, and a row the letterbox scale bridges in as blank has none
+/// by construction — this instead records, per divider column, the first and
+/// last row a reversed-whitespace run actually painted it on (skipping a
+/// reverse-BAR row exactly as the real pass does — its own edge-to-edge flood
+/// subsumes any rule), then hands back only the columns that still paint
+/// something once that span is clamped to the strip's own rows (SQ-1035).
+fn strip_divider_fills(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    cell: zvm::screen::V6Cell,
+) -> Vec<(u16, i32, i32)> {
+    let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
+    let mut divider_rows: std::collections::BTreeMap<u16, (i32, i32)> = std::collections::BTreeMap::new();
+    for (row, row_runs) in &by_row {
+        if row_is_reverse_bar(row_runs.iter().map(|(t, _)| t)) {
+            continue;
+        }
+        for (t, _) in row_runs {
+            if t.style & 1 != 0 && t.text.trim().is_empty() {
+                let (c, _) = run_cell(t, scale, cell_px, pane, cell);
+                if c >= rect.x as i32 && c < rect.right() as i32 {
+                    let span = divider_rows.entry(c as u16).or_insert((*row, *row));
+                    span.0 = span.0.min(*row);
+                    span.1 = span.1.max(*row);
+                }
+            }
+        }
+    }
+    divider_rows
+        .into_iter()
+        .filter_map(|(c, (first, last))| {
+            let lo = first.max(rect.y as i32);
+            let hi = last.min(rect.bottom() as i32 - 1);
+            (lo <= hi).then_some((c, lo, hi))
+        })
+        .collect()
+}
+
+/// SQ-1599: `draw_chrome_text_strip`'s own post-origin resolution — SQ-0747's
+/// rule stretch, its claimed-word collision guard, and the strip's own
+/// left-edge clip (SQ-0949) — computed per run without a `Buffer` to paint
+/// into. Returns one entry per run, in the SAME order `strip_run_positions`
+/// returns its own `(run, col, row)` triples for the identical inputs (both
+/// walk `chrome_by_row`'s `BTreeMap` the same way), so a caller may zip the
+/// two outputs positionally.
+fn strip_run_resolution(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    native: (u16, u16),
+    cell: zvm::screen::V6Cell,
+) -> Vec<Option<(i32, i32)>> {
+    let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
+    let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
+    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
+    let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
+    let base_span = |t: &crate::engine::PxText| -> (i32, i32) {
+        let c = chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+        (c, c + t.text.chars().count() as i32)
+    };
+    let mut out = Vec::new();
+    for row_runs in by_row.values() {
+        let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
+        for (i, (t, rule)) in row_runs.iter().enumerate() {
+            let (c0, c1) = base_span(t);
+            let span = if *rule {
+                let prev = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
+                let left = row_runs[..i]
+                    .iter()
+                    .zip(&spans)
+                    .filter(|((p, _), _)| !p.text.trim().is_empty())
+                    .map(|(_, &(_, e))| e)
+                    .max()
+                    .map_or(prev, |ink| prev.max(ink));
+                let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
+                (left, right.max(left))
+            } else {
+                (c0, c1)
+            };
+            spans.push(span);
+        }
+        let claimed: Vec<(usize, (i32, i32), bool)> = row_runs
+            .iter()
+            .zip(&spans)
+            .enumerate()
+            .filter(|(_, ((t, _), _))| !t.text.trim().is_empty())
+            .map(|(i, ((t, _), &s))| (i, s, t.text.chars().count() > 1))
+            .collect();
+        let over_word = |i: usize, c: i32| claimed.iter().any(|&(j, (lo, hi), word)| word && j != i && c >= lo && c < hi);
+        for (i, ((t, rule), &(col, end))) in row_runs.iter().zip(&spans).enumerate() {
+            let resolved = if col >= rect.right() as i32 || end <= rect.x as i32 {
+                None
+            } else {
+                let clip = (rect.x as i32 - col).max(0);
+                let c2 = col + clip;
+                let max_w = (rect.right() as i32 - c2).max(0);
+                if !*rule && t.text.chars().count() == 1 && !t.text.trim().is_empty() && over_word(i, c2) {
+                    None
+                } else {
+                    let raw_len = if *rule { (end - c2).max(0) } else { (t.text.chars().count() as i32 - clip).max(0) };
+                    let len = raw_len.min(max_w);
+                    (len > 0).then_some((c2, c2 + len))
+                }
+            };
+            out.push(resolved);
+        }
+    }
+    out
+}
+
 impl V6HybridChromeLayout {
-    fn from_frame(frame: &HybridFrame, pane: Rect, native: (u16, u16), cell_px: (u16, u16), cell: zvm::screen::V6Cell) -> Self {
+    fn from_frame(
+        frame: &HybridFrame,
+        layout: &crate::render::v6_layout::V6Layout<'_>,
+        pane: Rect,
+        native: (u16, u16),
+        cell_px: (u16, u16),
+        cell: zvm::screen::V6Cell,
+    ) -> Self {
         let mut runs = Vec::new();
+        let mut ground = Vec::new();
+        let mut divider_fills = Vec::new();
         for s in &frame.strips {
             if let ChromeStrip::Text(rect, text_runs) = s {
-                for (run, col, row) in strip_run_positions(text_runs, *rect, &frame.scale, cell_px, pane, native, cell) {
-                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: false });
+                let positions = strip_run_positions(text_runs, *rect, &frame.scale, cell_px, pane, native, cell);
+                let resolved = strip_run_resolution(text_runs, *rect, &frame.scale, cell_px, pane, native, cell);
+                for ((run, col, row), r) in positions.into_iter().zip(resolved) {
+                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: false, resolved: r });
                 }
+                ground.extend(strip_ground_fills(text_runs, *rect, &frame.scale, cell_px, pane, native, cell));
+                divider_fills.extend(strip_divider_fills(text_runs, *rect, &frame.scale, cell_px, pane, cell));
             }
         }
         let menu_band: Vec<Rect> = frame
@@ -5403,9 +6012,13 @@ impl V6HybridChromeLayout {
         let menu_scale = frame.menu.as_ref().unwrap_or(&frame.scale);
         for s in &frame.menu_strips {
             if let ChromeStrip::Text(rect, text_runs) = s {
-                for (run, col, row) in strip_run_positions(text_runs, *rect, menu_scale, cell_px, pane, native, cell) {
-                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: true });
+                let positions = strip_run_positions(text_runs, *rect, menu_scale, cell_px, pane, native, cell);
+                let resolved = strip_run_resolution(text_runs, *rect, menu_scale, cell_px, pane, native, cell);
+                for ((run, col, row), r) in positions.into_iter().zip(resolved) {
+                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: true, resolved: r });
                 }
+                ground.extend(strip_ground_fills(text_runs, *rect, menu_scale, cell_px, pane, native, cell));
+                divider_fills.extend(strip_divider_fills(text_runs, *rect, menu_scale, cell_px, pane, cell));
             }
         }
         // SQ-0944: text the game printed ON its own artwork, positioned exactly
@@ -5414,11 +6027,73 @@ impl V6HybridChromeLayout {
         // row layout, since the art strip they sit on carries no text band).
         for t in &frame.over_art_runs {
             let (col, row) = run_cell(t, &frame.scale, cell_px, pane, cell);
-            runs.push(V6HybridChromeRun { run: t.clone(), col, row, over_art: true, in_menu_band: false });
+            let resolved = Some((col, col + t.text.chars().count() as i32));
+            runs.push(V6HybridChromeRun { run: t.clone(), col, row, over_art: true, in_menu_band: false, resolved });
         }
         let click_scale = if frame.plan_is_menu { frame.menu.as_ref().unwrap_or(&frame.scale) } else { &frame.scale };
         let click_map = crate::render::graphics::build_hybrid_click_map(pane, click_scale, native, cell_px, frame.packed_text.clone());
-        V6HybridChromeLayout { viewport: frame.viewport, viewport_native: frame.vp_native, menu_band, runs, click_map }
+        let story_overlay = story_slot_overlay_runs(layout, frame.vp_native, frame.viewport, cell);
+        // SQ-1618: `hybrid_story_slot_grid`'s own two extra tests beyond what
+        // this frame has already passed by construction (`WinNode::Grid`,
+        // and a non-empty `frame.viewport` — the same `viewport` that
+        // function would itself compute from the identical
+        // `build_hybrid_frame_with` call, so this is not a second call).
+        let story_slot_grid_rows: Vec<u16> = match layout.story.map(|s| &s.node) {
+            Some(WinNode::Grid(g)) if frame.viewport.width > 0 && frame.viewport.height > 0 => {
+                g.px_texts.iter().map(|t| t.y.max(1) - 1).collect()
+            }
+            _ => Vec::new(),
+        };
+        V6HybridChromeLayout {
+            viewport: frame.viewport,
+            viewport_native: frame.vp_native,
+            menu_band,
+            runs,
+            click_map,
+            scale: frame.scale,
+            ground,
+            flank_borders: frame.flank_borders.clone(),
+            divider_exts: frame.divider_exts.clone(),
+            divider_fills,
+            story_overlay,
+            story_slot_grid_rows,
+        }
+    }
+
+    /// The native-pixel row-top set [`V6FrameInputs::hybrid_text_rows`] wants
+    /// from a Hybrid-drawing host (SQ-1609 Gap 2, widened SQ-1611): every
+    /// [`runs`](Self::runs) entry's own `run.y`, mapped through
+    /// `run.y.max(1) - 1` — [`compose_v6_frame_into`]'s own `glyph_rows` key —
+    /// folded together with [`story_overlay`](Self::story_overlay)'s entries
+    /// through the SAME mapping.
+    ///
+    /// Both `Vec`s are chrome the host lays out itself in terminal cells —
+    /// `runs` is the ring's own text, `story_overlay` is chrome printed OVER
+    /// the story slot (Shogun's boot menu: "START the game" and its selection
+    /// bar) — so both need protecting from `compose_v6_frame_into`'s
+    /// reversed-gap fill the same way, or the composite bakes a stray block
+    /// under whichever one a host omitted. SQ-1609's own fix only walked
+    /// `runs`, which happened to be every chrome run on its one specimen
+    /// (Arthur, which never populates `story_overlay`); a host that copied
+    /// that walk verbatim for a frame that DOES populate `story_overlay`
+    /// (Shogun's boot menu) would silently miss those rows.
+    ///
+    /// Deliberately reads `.run.y` on both types, never either one's own
+    /// published `row` field: `V6HybridChromeRun::row` and
+    /// `V6HybridStoryOverlayRun::row` are two DIFFERENT terminal-cell spaces
+    /// (the chrome ring's own cells and the story box's own cells
+    /// respectively, via two different scale/offset computations), and
+    /// neither equals `run.y.max(1) - 1` — only `.run.y`, the shared
+    /// native-pixel value both types carry unchanged from the game's own
+    /// [`PxText`](crate::engine::PxText), is the key `TextLayer::SkipGlyphRows`
+    /// (`crate::render::v6_layout`) needs.
+    pub fn text_rows(&self) -> std::collections::HashSet<u16> {
+        self.runs
+            .iter()
+            .map(|r| r.run.y.max(1) - 1)
+            .chain(self.story_overlay.iter().map(|r| r.run.y.max(1) - 1))
+            .chain(self.story_slot_grid_rows.iter().copied())
+            .collect()
     }
 }
 
@@ -5435,9 +6110,11 @@ impl V6HybridChromeLayout {
 ///
 /// `None` wherever the terminal Hybrid renderer itself would draw no chrome
 /// ring for this frame at all: no story window [`V6Layout::classify_windows`]
-/// could find, or a full-picture takeover
-/// ([`picture_takeover_reason`] — a host should fall back to its raster answer,
-/// [`compose_v6_frame`], on either).
+/// could find, a full-picture takeover
+/// ([`picture_takeover_reason`]), or a painted MENU takeover with no artwork
+/// framing it ([`hybrid_painted_menu_takeover_route`], SQ-1614) — a host
+/// should fall back to [`hybrid_painted_menu_layout`] on the third and to its
+/// raster answer, [`compose_v6_frame`], on either of the first two.
 ///
 /// Two picker-derived decisions [`build_hybrid_frame`] would otherwise ask a
 /// real `Picker` about have no host equivalent, so this decides them outright
@@ -5469,13 +6146,612 @@ pub fn hybrid_chrome_layout(
     if picture_takeover_reason(story, &layout.chrome, layout.story_gfx, native).is_some() {
         return None;
     }
+    // SQ-1614: closes this function's own promised gap above — a painted MENU
+    // takeover with no artwork framing it never reaches the terminal ring
+    // either. `render_node`'s own `WinNode::Layered` arm routes exactly this
+    // frame to the cell path instead
+    // ([`hybrid_painted_menu_takeover_route`]), so answering `Some` here for it
+    // published a ring the real renderer never draws. `hybrid` is unconditionally
+    // `true`: this function's whole premise is "what would the Hybrid renderer
+    // draw", never gated on the live `state.config.v6_render`, the same way
+    // `picture_takeover_reason` above is checked regardless of it.
+    // [`hybrid_painted_menu_layout`] is the answer for this frame instead —
+    // Zork Zero's Amiga DEFINE menu is the specimen.
+    if hybrid_painted_menu_takeover_route(layout, true, state.v6_text.cell()) {
+        return None;
+    }
     let (default_fg, default_bg) = v6_host_pair(state);
     // `hkey` is a cache key for the TUI's per-frame replay (`v6_hybrid_gen`) and
     // plays no part in the computation itself — this call is pure and always
     // recomputes, exactly like `compose_v6_frame` does for the raster path, so
     // any value here is fine; 0 is simplest.
     let frame = build_hybrid_frame_with(0, layout, story, native, pane, cell_px, true, true, 0, default_fg, default_bg, state);
-    Some(V6HybridChromeLayout::from_frame(&frame, pane, native, cell_px, state.v6_text.cell()))
+    // SQ-1620: a story-slot GRID wider (in its own native columns) than the
+    // viewport just built for it has no ring to draw either — see
+    // [`story_slot_grid_wider_than_viewport`], the same check the terminal's
+    // own draw and [`hybrid_story_slot_grid`] make, reusing the frame already
+    // built here instead of a second one.
+    //
+    // SQ-1623: `state.host_shrinks_story_grid_text` opts a host OUT of this
+    // guard — see that field's own doc. The terminal's own draw
+    // (`render_story_pane_frame`) never reads this field and keeps falling
+    // back to raster regardless, exactly as SQ-1620 left it.
+    if let WinNode::Grid(g) = &story.node {
+        if frame.scale.s >= 1.0 && g.cols > frame.viewport.width && !state.host_shrinks_story_grid_text {
+            return None;
+        }
+    }
+    Some(V6HybridChromeLayout::from_frame(&frame, layout, pane, native, cell_px, state.v6_text.cell()))
+}
+
+/// One flood [`draw_erase_fills`] paints (SQ-1614) — the resolved twin,
+/// published without a `Buffer` to paint into. `rect` is already clipped to
+/// the pane, exactly as the real draw's own loop bounds are. `modifier` is
+/// the bold/italic/reverse bits [`v6_run_style`] resolved into the `Style`
+/// this fill paints, patched onto an empty base exactly as
+/// [`ratatui::buffer::Cell::set_style`] resolves them onto a freshly-cleared
+/// cell (SQ-1617) — a real `draw_erase_fills` cell carries the same bits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct V6PaintedMenuFill {
+    pub rect: Rect,
+    pub fg: ratatui::style::Color,
+    pub bg: ratatui::style::Color,
+    pub modifier: ratatui::style::Modifier,
+}
+
+/// One stamp [`draw_painted_screen`] paints (SQ-1614) — either its row-FLOOD
+/// pass (`text` empty, `rect` spanning the full pane width — a status/title
+/// bar `full_width_flood_rows` recognised) or its per-run STAMP pass (`text`
+/// the run's own printable text, `rect` one cell tall at the run's own placed
+/// column). `rect`'s width is a plain character count, not a display width —
+/// every specimen this route's own corpus carries prints ASCII, so the two
+/// never differ here; a host measuring a run with combining or wide
+/// characters should re-measure `text` itself rather than trust the count.
+/// `modifier` is the bold/italic/reverse bits [`v6_run_style`] resolved into
+/// the `Style` this stamp paints, patched onto an empty base exactly as
+/// [`ratatui::buffer::Cell::set_style`]/[`ratatui::buffer::Buffer::set_stringn`]
+/// resolve them onto a freshly-cleared cell (SQ-1617) — a real
+/// `draw_painted_screen` cell carries the same bits.
+///
+/// Order matters and matches the real draw: apply every entry in this list in
+/// sequence, each one overwriting whatever an earlier entry left in its own
+/// cells — every flood row before any run stamp, exactly as
+/// [`draw_painted_screen`]'s own two loops run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V6PaintedMenuStamp {
+    pub rect: Rect,
+    pub text: String,
+    pub fg: ratatui::style::Color,
+    pub bg: ratatui::style::Color,
+    pub modifier: ratatui::style::Modifier,
+}
+
+/// The cell path's OWN layout for a painted MENU takeover with no artwork
+/// framing it (SQ-1614) — the pure-data twin of [`hybrid_chrome_layout`] for
+/// the route that function's own `None` now excludes
+/// ([`hybrid_painted_menu_takeover_route`]). Published so a host that draws
+/// its own text can reproduce this route's entirely different layout MODEL —
+/// a native row plus one signed shift, no scale/strip/flank whatsoever — from
+/// data, rather than by re-deriving `render_node`'s own arithmetic for it.
+/// `base_fg`/`base_bg`, `fills` and `stamps` are resolved through
+/// `status_style`, [`draw_erase_fills`] and [`draw_painted_screen`]'s own two
+/// passes respectively — the same functions and the same
+/// [`v6_run_style`]/[`full_width_flood_rows`] calls the real draw makes — so a
+/// host's answer cannot drift from what actually gets drawn for the SAME
+/// frame.
+///
+/// A host tries [`hybrid_chrome_layout`] first; if that answers `None` too,
+/// this is the next thing to try, before falling back to
+/// [`compose_v6_frame`]'s raster path — exactly the sequence
+/// [`hybrid_chrome_layout`]'s own doc names.
+///
+/// Each [`V6PaintedMenuFill`]/[`V6PaintedMenuStamp`] also carries a
+/// `modifier` — the bold/italic/reverse bits [`v6_run_style`] resolved into
+/// the `Style` the real draw applies, so a host that only read `fg`/`bg`
+/// used to draw Zork Zero's DEFINE (Function Keys) screen with no reverse
+/// video on its definition fields or its selected key label (SQ-1617).
+///
+/// **Out of scope, deliberately, for now**: this layout mirrors only the
+/// primary story buffer's fill/stamp passes. It has no equivalent for the
+/// cell path's side columns (`render_node`'s recursive call over
+/// [`crate::render::v6_layout::cell_path_side_columns`] for secondary chrome
+/// windows), for secondary prose buffers ([`draw_secondary_buffers`]), or for
+/// the anchored status band ([`draw_anchored_status_band`]) — fine for the
+/// DEFINE menu, which uses none of the three, but not a general promise that
+/// every painted-menu frame is fully covered.
+pub struct V6PaintedMenuLayout {
+    /// Where this route draws the story's own transcript — in the HOST's
+    /// terminal cells. Unlike [`V6HybridChromeLayout::viewport`], never scaled
+    /// or letterboxed: this route places everything 1:1 in native rows plus
+    /// one signed shift (`render_node`'s own `story_shift`).
+    pub viewport: Rect,
+    /// `status_style`'s own resolved base, before any fill or run overrides
+    /// it per channel (SQ-0906) — the story window's own page when the game
+    /// dressed one and colours are honoured, the theme's `upper_window`
+    /// otherwise.
+    pub base_fg: ratatui::style::Color,
+    pub base_bg: ratatui::style::Color,
+    /// [`draw_erase_fills`]'s own fills, resolved, in the game's own paint
+    /// order (`ErasedFill::seq`).
+    pub fills: Vec<V6PaintedMenuFill>,
+    /// [`draw_painted_screen`]'s own two passes, resolved, for both the
+    /// in-story-box call (`render_node`'s `story_top..story_bot`) and — when
+    /// the frame carries a below-story command band — the second call for
+    /// it, in the same order `render_node` itself makes them.
+    pub stamps: Vec<V6PaintedMenuStamp>,
+}
+
+/// See [`V6PaintedMenuLayout`] for the full reasoning. `native` and `pane`
+/// match [`hybrid_chrome_layout`]'s own — the v6 screen's native pixel extent
+/// and the story pane's cell rect.
+pub fn hybrid_painted_menu_layout(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+    pane: Rect,
+    state: &AppState,
+) -> Option<V6PaintedMenuLayout> {
+    let cell = state.v6_text.cell();
+    if !hybrid_painted_menu_takeover_route(layout, true, cell) {
+        return None;
+    }
+    // Every specimen this route reaches keeps a primary buffer (Zork Zero's
+    // Amiga DEFINE menu included — see `hybrid_painted_menu_takeover_route`'s
+    // own doc); a frame that withdrew it instead is the OTHER cell-path arm
+    // (`render_node`'s own "no streaming story window" branch), which this
+    // type does not cover.
+    let story = layout.story.filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if b.primary))?;
+    let ink = TextInk::of(state);
+    // SQ-0906, moved verbatim from `render_node`'s own cell-path arm — see
+    // that arm's comment for the specimen (Zork Zero's Amiga DEFINE menu)
+    // that pinned this exact resolution.
+    let status_style = {
+        let s = state.colors.theme.get("upper_window").style;
+        match state
+            .config
+            .honor_game_colours
+            .then(|| crate::render::v6_layout::story_bg_rgba(layout.story, &state.colors))
+        {
+            Some(Some(p)) => s.bg(ratatui::style::Color::Rgb(p[0], p[1], p[2])),
+            _ => s,
+        }
+    };
+    let base_fg = status_style.fg.unwrap_or(ratatui::style::Color::Reset);
+    let base_bg = status_style.bg.unwrap_or(ratatui::style::Color::Reset);
+    let native_w = native.0;
+    let runs: Vec<&crate::engine::PxText> = layout
+        .chrome
+        .iter()
+        .filter_map(|it| match &it.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // The same geometry `render_node`'s own cell-path arm derives — see that
+    // arm's own comments for why each step is what it is; this is a MOVE of
+    // that arithmetic, not a new derivation of it.
+    let story_top = cell.row_of_origin0(story.y_px);
+    let story_bot = ((story.y_px as u32 + story.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16;
+    let top_used = anchored_band_rows(&runs, story_top, pane.height);
+    let chrome_bot = layout
+        .chrome
+        .iter()
+        .filter(|pw| pw.y_px.saturating_add(pw.h_px) <= story.y_px)
+        .map(|pw| ((pw.y_px as u32 + pw.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16)
+        .max()
+        .unwrap_or(story_top);
+    let story_row = (top_used + story_top.saturating_sub(chrome_bot)).min(pane.height.saturating_sub(1));
+    let story_shift = story_row as i32 - story_top as i32;
+    let below: Vec<u16> = runs
+        .iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .map(|t| cell.row_of(t.y))
+        .filter(|&r| r >= story_bot)
+        .collect();
+    let bottom_span = match (below.iter().min(), below.iter().max()) {
+        (Some(&f), Some(&l)) => Some((f, l - f + 1)),
+        _ => None,
+    };
+    let bottom_used = bottom_span.map(|(_, n)| n).unwrap_or(0).min(pane.height.saturating_sub(story_row));
+    let col_of = |px: u16| (pane.width as u32 * px as u32 / native_w.max(1) as u32) as u16;
+    let story_l = story.x_px;
+    let story_r = story.x_px.saturating_add(story.w_px);
+    let sides = crate::render::v6_layout::cell_path_side_columns(layout, pane, native_w);
+    let mut story_x = pane.x;
+    let mut story_right = pane.right();
+    for s in &sides {
+        if s.left {
+            story_x = story_x.max(pane.x + col_of(story_l));
+        } else {
+            story_right = story_right.min(pane.x + col_of(story_r));
+        }
+    }
+    let mid_y = pane.y + story_row;
+    let mid_h = pane.height.saturating_sub(story_row + bottom_used);
+    let viewport = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
+
+    let fills = painted_menu_erase_fills(&layout.chrome, status_style, ink, pane, story_shift);
+    let mut stamps =
+        painted_menu_screen_stamps(&runs, story_top..story_bot, story_shift, pane, status_style, ink, &layout.chrome, native_w, cell);
+    if let Some((first, n)) = bottom_span {
+        let shift = pane.height as i32 - n as i32 - first as i32;
+        stamps.extend(painted_menu_screen_stamps(
+            &runs,
+            story_bot..u16::MAX,
+            shift,
+            pane,
+            status_style,
+            ink,
+            &layout.chrome,
+            native_w,
+            cell,
+        ));
+    }
+
+    Some(V6PaintedMenuLayout { viewport, base_fg, base_bg, fills, stamps })
+}
+
+/// The resolved twin of [`draw_erase_fills`]'s own loop — see
+/// [`V6PaintedMenuFill`] and [`hybrid_painted_menu_layout`] for why this
+/// exists rather than a refactor of `draw_erase_fills` itself.
+fn painted_menu_erase_fills(
+    chrome: &[&PositionedWindow],
+    base: ratatui::style::Style,
+    ink: TextInk,
+    area: Rect,
+    shift: i32,
+) -> Vec<V6PaintedMenuFill> {
+    let mut fills: Vec<(&PositionedWindow, crate::engine::ErasedFill)> = chrome
+        .iter()
+        .filter_map(|pw| match &pw.node {
+            WinNode::Grid(g) => g.fill.map(|f| (*pw, f)),
+            _ => None,
+        })
+        .collect();
+    fills.sort_by_key(|(_, f)| f.seq);
+    fills
+        .into_iter()
+        .filter_map(|(pw, f)| {
+            let style = v6_run_style(base, 0, f.bg, 0, ink);
+            // `px_rect_to_cells` already clamps to `area` on every edge, the
+            // same clamp `draw_erase_fills`'s own loop bounds apply at draw
+            // time — nothing left to clip here.
+            let rect = px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area, shift);
+            (rect.width > 0 && rect.height > 0).then(|| V6PaintedMenuFill {
+                rect,
+                fg: style.fg.unwrap_or_else(|| base.fg.unwrap_or(ratatui::style::Color::Reset)),
+                bg: style.bg.unwrap_or_else(|| base.bg.unwrap_or(ratatui::style::Color::Reset)),
+                modifier: ratatui::style::Style::default().patch(style).add_modifier,
+            })
+        })
+        .collect()
+}
+
+/// The resolved twin of [`draw_painted_screen`]'s own two passes — see
+/// [`V6PaintedMenuStamp`] and [`hybrid_painted_menu_layout`] for why this
+/// exists rather than a refactor of `draw_painted_screen` itself. Reads
+/// [`full_width_flood_rows`] directly (already pure data, no `Buffer`
+/// involved) for the row-flood pass, and mirrors `draw_painted_screen`'s own
+/// per-run loop, unchanged, for the stamp pass.
+fn painted_menu_screen_stamps(
+    runs: &[&crate::engine::PxText],
+    rows: std::ops::Range<u16>,
+    shift: i32,
+    area: Rect,
+    base: ratatui::style::Style,
+    ink: TextInk,
+    chrome: &[&PositionedWindow],
+    native_w: u16,
+    cell: zvm::screen::V6Cell,
+) -> Vec<V6PaintedMenuStamp> {
+    let place = |row: u16| -> Option<u16> {
+        if !rows.contains(&row) {
+            return None;
+        }
+        let y = area.y as i32 + row as i32 + shift;
+        (y >= area.y as i32 && y < area.bottom() as i32).then_some(y as u16)
+    };
+    let mut out = Vec::new();
+    let flood = full_width_flood_rows(chrome, native_w, base, ink, cell);
+    // `HashMap` iteration order is not the real draw's own order (each flood
+    // row paints the whole pane width independently, so the real draw does
+    // not care either) — sorted here only so two calls on the same frame
+    // publish the same list.
+    let mut flood_rows: Vec<u16> = flood.keys().copied().collect();
+    flood_rows.sort_unstable();
+    for row in flood_rows {
+        let style = flood[&row];
+        let Some(y) = place(row) else { continue };
+        out.push(V6PaintedMenuStamp {
+            rect: Rect::new(area.x, y, area.width, 1),
+            text: String::new(),
+            fg: style.fg.unwrap_or_else(|| base.fg.unwrap_or(ratatui::style::Color::Reset)),
+            bg: style.bg.unwrap_or_else(|| base.bg.unwrap_or(ratatui::style::Color::Reset)),
+            modifier: ratatui::style::Style::default().patch(style).add_modifier,
+        });
+    }
+    for t in runs {
+        let row = t.grow;
+        let Some(y) = place(row) else { continue };
+        let col = t.gcol;
+        if area.x + col >= area.right() {
+            continue;
+        }
+        let style = v6_run_style(base, t.fg, t.bg, t.style, ink);
+        let max_w = (area.right() - (area.x + col)) as usize;
+        let text = crate::render::blank_control_chars(&t.text);
+        let width = text.chars().count().min(max_w) as u16;
+        out.push(V6PaintedMenuStamp {
+            rect: Rect::new(area.x + col, y, width, 1),
+            text: text.into_owned(),
+            fg: style.fg.unwrap_or_else(|| base.fg.unwrap_or(ratatui::style::Color::Reset)),
+            bg: style.bg.unwrap_or_else(|| base.bg.unwrap_or(ratatui::style::Color::Reset)),
+            modifier: ratatui::style::Style::default().patch(style).add_modifier,
+        });
+    }
+    out
+}
+
+/// Where a v6 STORY-SLOT `Grid` belongs on a host's own screen (SQ-1599) —
+/// Shogun's InvisiClues hint screen (`hint`, then `y`) is the corpus's own
+/// specimen, the only v6 frame here that puts a `Grid` rather than a `Buffer`
+/// in the story window (Shogun's BOOT menu, "START the game", looks similar
+/// but keeps window 0 as an ordinary `Buffer` and paints its menu as chrome
+/// runs over it — it never exercises this function; see
+/// `shogun_hint_menu_story_slot_grid_matches_the_real_render`'s own doc
+/// comment in `v6_hybrid_chrome_layout.rs` for how that was confirmed).
+/// A SEPARATE function from [`hybrid_chrome_layout`] rather than a
+/// field on [`V6HybridChromeLayout`], deliberately: that type is the chrome
+/// RING's own classification — everything OUTSIDE the story slot — and a
+/// story-slot grid is the game's own PRIMARY content, never chrome; folding it
+/// in would blur what the type means. Call both for the same frame when the
+/// story slot might be either shape.
+///
+/// Mirrors `render_node`'s own v6-hybrid arm exactly (see the comment on its
+/// `WinNode::Grid` case): a v6 story-slot grid is placed 1:1 in native cells
+/// at the ring's own viewport, never centred — [`draw_grid_transparent`]'s
+/// rule, which is NOT [`draw_grid`]'s (the ordinary ZWK/Glulx grid-window
+/// renderer, which centres by column count and floods the theme's own page —
+/// right for every other engine's grid window, wrong here). An ordinary grid
+/// window elsewhere in the frame still wants `draw_grid`'s rule; this exists
+/// only for the one shape `draw_grid_transparent` exists for.
+///
+/// `viewport` is placement geometry ONLY, sized to the grid's own
+/// `rows`/`cols` clipped to the ring's viewport exactly as
+/// `draw_grid_transparent` clips them (`rows.min(grid.rows)`,
+/// `cols.min(grid.cols)`) — a host already holds the `GridWindow` itself off
+/// [`crate::engine::Engine::screen`]'s `WinNode::Grid` and reads its cells
+/// (`GridWindow::cell`) the same way the terminal renderer does, including
+/// [`draw_grid_transparent`]'s own blank-cell rule (a plain, non-reversed
+/// blank leaves the layer beneath showing through; a REVERSED blank is ink,
+/// SQ-1074) — this function answers only WHERE to put them, not what they are.
+///
+/// `None` wherever [`hybrid_chrome_layout`] itself would answer `None` (see
+/// that function's own doc), or where the story slot does not actually hold a
+/// `Grid` — a host should draw an ordinary Buffer/Grid window through its own
+/// existing paths in every other case.
+pub fn hybrid_story_slot_grid(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+    pane: Rect,
+    cell_px: (u16, u16),
+    state: &AppState,
+) -> Option<V6HybridStorySlotGrid> {
+    let story = layout.story?;
+    if picture_takeover_reason(story, &layout.chrome, layout.story_gfx, native).is_some() {
+        return None;
+    }
+    let WinNode::Grid(g) = &story.node else { return None };
+    let (default_fg, default_bg) = v6_host_pair(state);
+    let frame = build_hybrid_frame_with(0, layout, story, native, pane, cell_px, true, true, 0, default_fg, default_bg, state);
+    let viewport = frame.viewport;
+    if viewport.width == 0 || viewport.height == 0 {
+        return None;
+    }
+    // SQ-1620: the grid's own columns outrun what this pane's viewport can
+    // show at all, AND this pane is upscaling the native screen (not just too
+    // small to show it all — see [`story_slot_grid_wider_than_viewport`]'s own
+    // doc for why that second condition matters) — clipping to
+    // `viewport.width` below would silently drop the grid's right-hand column
+    // (the InvisiClues menu at a narrow pane / large font).
+    // `picture_takeover_reason` cannot see this itself (it has no pane/cell_px
+    // to compute a viewport with); this is the same check
+    // [`story_slot_grid_wider_than_viewport`] makes for the terminal's own
+    // draw and [`hybrid_chrome_layout`], reusing the frame already built here
+    // instead of building a second one.
+    //
+    // SQ-1623: `state.host_shrinks_story_grid_text` opts a host OUT of this
+    // guard — see that field's own doc, and [`V6HybridStorySlotGrid::grid_cols`]/
+    // [`V6HybridStorySlotGrid::grid_rows`] below for what such a host reads
+    // instead. The terminal's own draw never reads this field.
+    let wider_than_viewport = frame.scale.s >= 1.0 && g.cols > viewport.width;
+    if wider_than_viewport && !state.host_shrinks_story_grid_text {
+        return None;
+    }
+    let rows = viewport.height.min(g.rows);
+    let cols = viewport.width.min(g.cols);
+    Some(V6HybridStorySlotGrid {
+        viewport: Rect::new(viewport.x, viewport.y, cols, rows),
+        grid_cols: g.cols,
+        grid_rows: g.rows,
+    })
+}
+
+/// See [`hybrid_story_slot_grid`] for the full reasoning.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct V6HybridStorySlotGrid {
+    /// Place the grid's own cells 1:1 here — `(dx, dy)` in `GridWindow::cell`
+    /// terms lands at `(viewport.x + dx, viewport.y + dy)`, exactly as
+    /// [`draw_grid_transparent`] places them.
+    pub viewport: Rect,
+    /// The story-slot grid's own native column/row count (SQ-1623), always
+    /// populated — not only when wider than `viewport`. This is the
+    /// STORY's fact, from `GridWindow::cols`/`GridWindow::rows`, never
+    /// clipped the way `viewport.width`/`viewport.height` are above.
+    ///
+    /// Compare against `viewport.width`/`viewport.height` to detect a
+    /// mismatch and by how much — `grid_cols as f32 / viewport.width as f32`
+    /// is roughly the per-glyph shrink ratio a host taking
+    /// [`AppState::host_shrinks_story_grid_text`] should apply so the whole
+    /// grid fits in the space `viewport.width` describes. Equal to
+    /// `viewport.width`/`viewport.height` (once clipped) whenever the grid
+    /// already fits — this pair only tells you something new in the
+    /// opted-in wider-than-viewport case that field exists for.
+    ///
+    /// A host that shrinks this grid's glyphs to fit must also remap a
+    /// click's device pixel back to a grid column using its OWN per-glyph
+    /// width, not lanthorn's `V6ClickMap::map_click` — that function assumes
+    /// a fixed native 8px-per-column grid and does not know about a host
+    /// drawing this grid smaller than native size. There is no published
+    /// click-map for a shrunk grid; the host owns that arithmetic itself.
+    pub grid_cols: u16,
+    /// See [`Self::grid_cols`].
+    pub grid_rows: u16,
+}
+
+/// A chrome run [`render_node`]'s own `WinNode::Layered` in-box pass paints ON
+/// TOP of the story slot's own transcript, published on
+/// [`V6HybridChromeLayout::story_overlay`] (SQ-1608) — Shogun's boot menu is
+/// the specimen (`START the game`, `RESTORE a saved game`, `QUIT the game` and
+/// the reverse-video selection bar that moves between them), and it does NOT
+/// go through [`hybrid_story_slot_grid`]: window 0 there stays an ordinary
+/// `Buffer`, not a `Grid`, so that function's `None` is the whole reason this
+/// exists.
+///
+/// Deliberately its own leaner type rather than a reuse of
+/// [`V6HybridChromeRun`]: that type's `over_art`/`in_menu_band` have no
+/// meaning here (this run is never ring art or menu band, it is over the
+/// STORY), and its `resolved` field's own doc is written about
+/// `draw_chrome_text_strip`'s strip-relative resolution (SQ-0747's rule
+/// stretch, the claimed-word guard, a STRIP's own clip) — none of which
+/// applies to a run positioned against the story box instead of a chrome
+/// strip.
+///
+/// `row`/the columns inside `spans` are counted from the story box's own top
+/// and left edge — one terminal cell per the run's own declared grid cell
+/// ([`crate::engine::PxText::gcol`]/`grow`) — and deliberately NEVER routed
+/// through [`V6HybridChromeLayout::scale`]: the story box is placed 1:1,
+/// unscaled, in every hybrid frame, and mapping through the ring's scale here
+/// was the actual historical bug this mirrors the fix for (SQ-0937/SQ-1009).
+///
+/// `spans` is what the real render ACTUALLY paints on `row`, after SQ-0898's
+/// ink-masking: a blank (space) run may not overwrite a cell any glyph run on
+/// the same row already inked, so a reverse-video selection bar can extend
+/// past its own label's text without erasing it — which means a blank run's
+/// own span can come out split around the label it must not touch. A
+/// non-blank run always resolves to exactly one span. This type never
+/// appears for a run whose own origin lands outside the viewport (the real
+/// render skips it too); a run that IS in-viewport but paints nothing (a
+/// blank run entirely masked by ink) still appears, with `spans` empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V6HybridStoryOverlayRun {
+    /// The run as the game painted it — text (before masking), style, packed
+    /// colours, exactly as [`V6HybridChromeRun::run`].
+    pub run: crate::engine::PxText,
+    pub row: i32,
+    /// Half-open terminal-column ranges on `row` this run actually paints,
+    /// already clipped to the viewport's right edge and split around any
+    /// ink a blank run must not overwrite. See the type's own doc for why
+    /// this can hold more than one range.
+    pub spans: Vec<(i32, i32)>,
+}
+
+/// [`render_node`]'s own `WinNode::Layered` in-box pass (SQ-0892/SQ-0937/
+/// SQ-1009/SQ-0898), computed without a `Buffer` to paint into — see
+/// [`V6HybridStoryOverlayRun`] for the shape and
+/// [`V6HybridChromeLayout::story_overlay`] for how a host uses it. Mirrors
+/// that block's row-grouping, its [`merge_strip_fragments`] call, its
+/// scale-free `gcol`-based column/row computation, and its blank-vs-ink
+/// masking pass exactly; see the real block's own comments (in `render_node`)
+/// for the specimens that pinned each rule.
+fn story_slot_overlay_runs(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    vp_native: (u32, u32, u32, u32),
+    viewport: Rect,
+    cell: zvm::screen::V6Cell,
+) -> Vec<V6HybridStoryOverlayRun> {
+    use std::collections::BTreeMap;
+    let mut in_box: BTreeMap<u16, Vec<&crate::engine::PxText>> = BTreeMap::new();
+    for it in &layout.chrome {
+        // Same guard as `render_node`'s own pass: the promoted story grid
+        // (SQ-0934) is already drawn as the story surface, so stamping it
+        // again here would draw every glyph twice.
+        if layout.story.is_some_and(|st| std::ptr::eq(*it, st)) {
+            continue;
+        }
+        if let WinNode::Grid(g) = &it.node {
+            for t in &g.px_texts {
+                let px = t.x.max(1) as f32 - 1.0;
+                let py = t.y.max(1) as f32 - 1.0;
+                if px < vp_native.0 as f32
+                    || px >= (vp_native.0 + vp_native.2) as f32
+                    || py < vp_native.1 as f32
+                    || py >= (vp_native.1 + vp_native.3) as f32
+                {
+                    continue; // outside the story region → already in the ring
+                }
+                in_box.entry(t.y).or_default().push(t);
+            }
+        }
+    }
+    let vp_col = (vp_native.0 / u32::from(cell.w())) as i32;
+    let mut out = Vec::new();
+    for row_runs in in_box.values_mut() {
+        row_runs.sort_by_key(|t| t.x);
+        let run_col = |t: &crate::engine::PxText| viewport.x as i32 + i32::from(t.gcol) - vp_col;
+        let merged = merge_strip_fragments(row_runs);
+        let ink: Vec<(i32, i32)> = merged
+            .iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .map(|t| {
+                let c = run_col(t);
+                (c, c + t.text.chars().count() as i32)
+            })
+            .collect();
+        for t in &merged {
+            let col = run_col(t);
+            let row = viewport.y as i32 + (t.y.max(1) as i32 - 1) / i32::from(cell.h())
+                - (vp_native.1 as i32) / i32::from(cell.h());
+            if row < viewport.y as i32
+                || row >= viewport.bottom() as i32
+                || col < viewport.x as i32
+                || col >= viewport.right() as i32
+            {
+                continue;
+            }
+            let max_w = viewport.right() as usize - col as usize;
+            let mut spans: Vec<(i32, i32)> = Vec::new();
+            if max_w > 0 {
+                let text = crate::render::blank_control_chars(&t.text);
+                if t.text.trim().is_empty() {
+                    let mut open: Option<i32> = None;
+                    for (n, _ch) in text.chars().take(max_w).enumerate() {
+                        let c = col + n as i32;
+                        if ink.iter().any(|&(lo, hi)| c >= lo && c < hi) {
+                            if let Some(s) = open.take() {
+                                spans.push((s, c));
+                            }
+                            continue;
+                        }
+                        if open.is_none() {
+                            open = Some(c);
+                        }
+                    }
+                    if let Some(s) = open {
+                        let end = col + text.chars().take(max_w).count() as i32;
+                        spans.push((s, end));
+                    }
+                } else {
+                    let len = text.chars().count().min(max_w);
+                    if len > 0 {
+                        spans.push((col, col + len as i32));
+                    }
+                }
+            }
+            out.push(V6HybridStoryOverlayRun { run: t.clone(), row, spans });
+        }
+    }
+    out
 }
 
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
@@ -5639,35 +6915,45 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // scroll keybindings measure against.
     let budget = rows.saturating_sub(1) as usize;
     let total = wrapped.len();
-    let max_scroll = total.saturating_sub(budget);
+    // anchor_row must be known regardless of scroll now that scrolling through
+    // it is continuous (SQ-1666) — it used to be looked up only behind a
+    // `scroll == 0` gate, back when the anchor only ever mattered there;
+    // `anchored_window_bounds`/`anchored_max_scroll` below now decide that
+    // per scroll value internally instead.
+    let anchor_row = crate::render::transcript::anchor_row_at(line_starts, total, state.top_anchor);
+    // Anchor-aware (SQ-1666): shared with the cell path
+    // (`render::transcript::anchored_max_scroll`) so scrolling through a
+    // standing top-anchor whose content still fits has somewhere to go — the
+    // plain `total - budget` cuts the reachable range short by the anchor's
+    // own "growth" padding (see that function's doc for why).
+    let max_scroll = crate::render::transcript::anchored_max_scroll(total, anchor_row, budget);
     // Rows-from-bottom scroll offset (0 = newest at the bottom), clamped so it
     // never scrolls past the oldest row. Same scroll model as the terminal
     // transcript (`effective_transcript_scroll`), so the shared scroll keys and
     // the [more] pager (SQ-0404) drive the raster and terminal paths identically:
     // when the user scrolls back the visible slice shifts up in lockstep. (SQ-0455)
     let scroll = (state.effective_transcript_scroll() as usize).min(max_scroll);
-    let mut end = total.saturating_sub(scroll);
-    let mut start = end.saturating_sub(budget);
+    // Shares `window_wrapped_rows`'s own fits-check (SQ-1661) rather than
+    // re-deriving it, so the pager's follow-ease (`pager::apply_frame`) can
+    // skip arming one on this path exactly as it does on the cell path.
+    let top_anchored_fits =
+        crate::render::transcript::top_anchor_fits(anchor_row, total, budget, scroll.min(u16::MAX as usize) as u16);
     // Top-anchor the post-clear screen, exactly as the cell path does
-    // (`window_wrapped_rows`, SQ-0305/0640): at the bottom of the scrollback, a
-    // game screen-clear pins its output to the TOP of the box with blanks below,
-    // instead of bottom-sticking and dragging pre-clear history back into view.
-    // Shogun's title needs it (SQ-0728): the SQ-0697 freeze retires nine banner
-    // lines as paint and marks the clear, and window 0's new box is four rows —
-    // bottom-sticking redrew the tail of the banner it had just frozen up top,
-    // across the menu, instead of the one line the game printed into the new box.
-    // Only while the post-clear content still fits; once it overflows, the box
-    // scrolls normally.
-    // Shared with the cell path so an anchor at the very end of the transcript —
-    // cleared, nothing printed since — reads as an EMPTY screen on both, rather
-    // than as an absent anchor that bottom-sticks the erased scrollback (SQ-0748).
-    let anchor_row = (scroll == 0)
-        .then(|| crate::render::transcript::anchor_row_at(line_starts, total, state.clear_anchor))
-        .flatten();
-    if let Some(a) = anchor_row.filter(|&a| total - a <= budget) {
-        start = a;
-        end = total;
-    }
+    // (`render::transcript::anchored_window_bounds`, SQ-0305/0640/1666): at the
+    // bottom of the scrollback, a game screen-clear pins its output to the TOP
+    // of the box with blanks below, instead of bottom-sticking and dragging
+    // pre-clear history back into view — and scrolling UP through that pin now
+    // grows the window backward one row at a time instead of jumping straight
+    // to an unrelated slice the moment scroll leaves 0 (SQ-1666). Shogun's
+    // title needs the pin itself (SQ-0728): the SQ-0697 freeze retires nine
+    // banner lines as paint and marks the clear, and window 0's new box is
+    // four rows — bottom-sticking redrew the tail of the banner it had just
+    // frozen up top, across the menu, instead of the one line the game printed
+    // into the new box. Shared with the cell path so an anchor at the very end
+    // of the transcript — cleared, nothing printed since — reads as an EMPTY
+    // screen on both, rather than as an absent anchor that bottom-sticks the
+    // erased scrollback (SQ-0748).
+    let (start, end) = crate::render::transcript::anchored_window_bounds(total, anchor_row, budget, scroll);
     let visible_len = end - start;
     let lines = wrapped[start..end].to_vec();
     // Emphasis travels with the visible slice. `wrapped_styles` self-pads — it
@@ -5711,6 +6997,7 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
         viewport_rows: budget.min(u16::MAX as usize) as u16,
         max_scroll: max_scroll.min(u16::MAX as usize) as u16,
         first_visible_row: start.min(u16::MAX as usize) as u16,
+        top_anchored_fits,
     };
     (main, metrics)
 }
@@ -5731,10 +7018,13 @@ pub struct RasterMetrics {
     /// Absolute wrapped-row index drawn at the top of the visible slice (for the
     /// published `TranscriptGeom`).
     pub first_visible_row: u16,
+    /// Whether this frame is showing a top-anchored post-clear screen in full
+    /// — see `render::transcript::TranscriptRender::top_anchored_fits` (SQ-1661).
+    pub top_anchored_fits: bool,
 }
 
 /// How deep a chrome run must sit before the HYBRID path will treat a screen as a
-/// painted MENU takeover (see the `has_menu` gate in the `Layered` arm). A run
+/// painted MENU takeover (see [`hybrid_painted_menu_takeover_route`]). A run
 /// this shallow is ordinary top-of-screen status chrome even when it happens to
 /// land inside a story box that starts at row 0. (SQ-0478/SQ-0494)
 const STATUS_BAND_ROWS: u16 = 4;
@@ -6267,6 +7557,22 @@ fn hybrid_raster_fallback_reason(
     if story_present && takeover.is_none() {
         return None; // the chrome ring draws this frame
     }
+    // SQ-1620: the painted-screen path below walks CHROME runs only
+    // (`paint_runs(&layout.chrome)`) — right for every OTHER reason this
+    // function fires, because each of those means the story window's own
+    // content is either a full-screen PICTURE (nothing to lose by skipping
+    // straight to the composite) or altogether absent (`"no_story_window"`,
+    // SQ-0711's own Scopa/hint case, where the whole screen genuinely IS
+    // chrome). A story-slot GRID too wide for its viewport is neither: the
+    // story window is real, on-screen, and carries its own topic list that
+    // the painted-screen path never looks at — so unlike every other reason
+    // here, taking that shortcut for THIS one would draw the header banner
+    // and silently drop the whole grid instead of the one clipped column the
+    // ring itself would have dropped. Skip the shortcut and fall straight to
+    // the raster composite, which draws the grid's own text like any other.
+    if takeover == Some("grid_wider_than_viewport") {
+        return takeover;
+    }
     if !painted_ground && runs_have_text {
         return None; // the coherent all-text painted-screen path draws it
     }
@@ -6441,6 +7747,86 @@ pub fn picture_takeover_reason(
         }
     }
     None
+}
+
+/// SQ-1620: does a story-slot GRID's own column count outrun the terminal
+/// viewport Hybrid would actually place it in, at THIS pane?
+///
+/// A sibling to [`picture_takeover_reason`] rather than a fourth arm inside
+/// it, because it asks a different kind of question: every arm in that
+/// function reasons over native PIXELS alone (is there art, does it fill or
+/// enclose the screen) and needs no pane or font metrics at all — which is
+/// why `hybrid_bottom_plan_for` (SQ-1574) can call it with nothing but
+/// `native`. This check is the opposite shape: the story window carries no
+/// art of its own and is exactly where the game put it, but the GRID inside
+/// it is wider, in its own native columns, than the TERMINAL cells
+/// `build_hybrid_frame_with`'s own viewport — the same one
+/// [`hybrid_story_slot_grid`] publishes to a host and the real hybrid-ring
+/// draw places the grid's cells at — would give it at this pane's font size.
+/// Zork Zero's Amiga InvisiClues topic list (58 native columns) at a 59-column
+/// pane with a 20x44px cell computes a 43-column viewport (measured;
+/// `sq1620_grid_wider_than_viewport.rs`'s
+/// `narrow_pane_falls_to_raster_and_shows_the_whole_grid` pins it), and
+/// [`draw_grid_transparent`](crate::render::upper_window::draw_grid_transparent)'s
+/// `cols.min(grid.cols)` clip (identical to `hybrid_story_slot_grid`'s own)
+/// then silently drops the right-hand column of topics — "AS A LAST RESORT",
+/// "FOR YOUR AMUSEMENT" — with no ring geometry anywhere on the frame able to
+/// show it.
+///
+/// Needing `pane`/`cell_px`/`state` to answer this is exactly why it cannot
+/// live inside `picture_takeover_reason` itself without forcing every one of
+/// that function's callers to acquire them — `hybrid_bottom_plan_for` has
+/// neither and answers a question ("which bottom plan") that does not need
+/// them for its other three callers. The three callers that DO already carry
+/// this geometry (the terminal's own hybrid-ring dispatch, [`hybrid_chrome_layout`],
+/// [`hybrid_story_slot_grid`]) each OR this into their own
+/// `picture_takeover_reason` call instead, so a host reading either published
+/// function and the terminal's real draw cannot disagree.
+///
+/// Deliberately builds the same [`HybridFrame`] `hybrid_story_slot_grid`
+/// builds to answer this — not a cheaper approximation from the story
+/// window's own declared box — because the viewport it must match is that
+/// exact one: `story_text_native`'s art inset can narrow it further than the
+/// window's raw `w_px`, and a narrower approximation could pass a grid this
+/// check would have caught.
+///
+/// **Only fires when this pane is UPSCALING the native screen
+/// (`frame.scale.s >= 1.0`)** — measured, this is what tells the reported
+/// defect apart from `v6_hint_menu_mouse.rs`'s own pinned 50-column pane
+/// (8x16 cell), which ALSO clips this same grid (58/62 native columns into a
+/// viewport nowhere near that wide) and must NOT change route: at 50 columns
+/// the pane's own device-pixel width is smaller than the native 640px screen
+/// (`scale.s` measures 0.625 there), so nothing — raster included — can show
+/// more of the grid without shrinking it past legibility; the clip is the
+/// pane genuinely not having the room, exactly like any other terminal too
+/// small for the content it is asked to show, and today's ring still answers
+/// mouse clicks on it (`v6_hint_menu_mouse.rs`'s whole premise). At the
+/// reported 59-column pane with its 20x44px cell, `scale.s` measures 1.84 —
+/// the native screen is being ENLARGED into a pane that already has more
+/// device pixels than the game's own picture — so the story window's 58/62
+/// native columns, once scaled, occupy far more device-pixel width than the
+/// viewport's cell-quantized answer credits them with; the shortfall is
+/// `native_viewport_box`'s inward-rounding throwing away real resolution the
+/// pane already has, not the pane being too small. Raster does not round to
+/// whole terminal cells at all, so it recovers exactly that thrown-away
+/// resolution.
+///
+/// `None` whenever the story slot is not a `Grid` at all (every ordinary
+/// gameplay screen, checked first and cheaply — the frame is built only for
+/// the rare Grid-story-slot case), this pane is downscaling, or the grid's
+/// columns fit anyway.
+fn story_slot_grid_wider_than_viewport(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    pane: Rect,
+    cell_px: (u16, u16),
+    state: &AppState,
+) -> Option<&'static str> {
+    let WinNode::Grid(g) = &story.node else { return None };
+    let (default_fg, default_bg) = v6_host_pair(state);
+    let frame = build_hybrid_frame_with(0, layout, story, native, pane, cell_px, true, true, 0, default_fg, default_bg, state);
+    (frame.scale.s >= 1.0 && g.cols > frame.viewport.width).then_some("grid_wider_than_viewport")
 }
 
 /// Does the story window's own plate paint anything at all (SQ-0725)?
@@ -7014,15 +8400,25 @@ fn extend_raster_flanks(
 }
 
 /// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.
-type BandCrop = (u32, u32, u32, u32);
+///
+/// `pub` (SQ-1599): a host reading [`V6HybridChromeLayout::flank_borders`]/
+/// [`V6HybridChromeLayout::divider_exts`] needs the crop's own type reachable —
+/// the crop itself is a native-pixel rect into the SAME full-frame artwork a
+/// host must already be able to render to draw its own copy of the chrome ring.
+pub type BandCrop = (u32, u32, u32, u32);
 
 /// How a flank's border column reaches the screen (SQ-0750).
 ///
 /// In hybrid, never rasterise what the game printed as a character: a border made
 /// of the game's own characters is stamped as those characters, and only pixels the
 /// paint runs cannot account for — genuine artwork — are carried as a bitmap.
+///
+/// `pub` (SQ-1599): published on [`V6HybridChromeLayout::flank_borders`]/
+/// `divider_exts` so a host can draw these columns exactly as
+/// `draw_chrome_text_strip`'s caller does — a `Band` crop stretched down the
+/// gap, or the game's own character stamped in its one column.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum BorderInk {
+pub enum BorderInk {
     /// Artwork: a one-native-row crop of the chrome canvas, replicated down the band.
     Band(BandCrop),
     /// The game's own character, with its Z-machine style bits and packed colours.
@@ -7040,7 +8436,7 @@ enum BorderInk {
 
 /// One of a flank's border columns carried down the reclaimed gap: where it is
 /// drawn, and what it is drawn WITH.
-type FlankBorderExt = (Rect, BorderInk);
+pub type FlankBorderExt = (Rect, BorderInk);
 
 /// What [`menu_flank_panel`] resolves for a side flank: the panel background, the
 /// rect to flood with it, the destination rect for the vertically centred art,
@@ -8219,6 +9615,7 @@ fn fill_menu_flank_extension(
                                 v6::V6RunSource::Chrome,
                                 opaque,
                                 bar,
+                                false,
                             );
                             y += cell_h;
                         }
@@ -8274,7 +9671,7 @@ fn fill_menu_flank_extension(
                             while y < avail_h.min(canvas.height()) {
                                 let h = cell_h.min(avail_h - y).min(canvas.height() - y);
                                 let opaque = v6::region_has_opaque(gfx, gnx0, y, cw, h);
-                                glyphs.blit(canvas, glyph, gnx0, y, cw, h, fg, None, t.style, face, v6::V6RunSource::Chrome, opaque, bar);
+                                glyphs.blit(canvas, glyph, gnx0, y, cw, h, fg, None, t.style, face, v6::V6RunSource::Chrome, opaque, bar, false);
                                 y += cell_h;
                             }
                         }
@@ -11063,6 +12460,70 @@ mod tests {
         assert_eq!(m.first_visible_row, 0);
     }
 
+    /// SQ-1666: the raster path duplicated `window_wrapped_rows`'s own
+    /// two-formula cutover (anchor pin exactly at `scroll == 0`, generic
+    /// anchor-blind slice at any other scroll) by hand — this is that same fix
+    /// (`render::transcript::anchored_window_bounds`/`anchored_max_scroll`,
+    /// now shared rather than re-derived) proven on THIS path. 20 pre-clear
+    /// lines, a screen clear, then 2 short post-clear lines into a 5-row body
+    /// (`rows: 6` minus the reserved input row): `anchored_len = 22 - 20 = 2`
+    /// fits the 5-row budget, so `pad = 5 - 2 = 3` — scroll 1..=3 grows the
+    /// pinned window backward one row at a time (bottom edge pinned at the
+    /// total), and scroll 4 is the first step of the ordinary backward slide.
+    #[test]
+    fn build_main_text_scrolls_continuously_through_a_short_top_anchor() {
+        let mut state = crate::state::AppState::default();
+        for k in 0..20 {
+            state.push_transcript_kind(&format!("L{k}"), crate::state::TranscriptKind::Story);
+        }
+        state.mark_screen_clear();
+        for k in 0..2 {
+            state.push_transcript_kind(&format!("X{k}"), crate::state::TranscriptKind::Story);
+        }
+        state.transcript_scroll = 0;
+
+        // scroll == 0: today's correct pinned view, unaffected by this fix.
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(m.total_rows, 22);
+        assert_eq!(m.viewport_rows, 5);
+        assert_eq!(main.lines, vec!["X0", "X1"], "pinned to the top, fewer than 5 rows returned");
+        assert!(m.top_anchored_fits);
+        // `anchored_max_scroll`: pad (3) + the ordinary 22-row/5-row max_scroll
+        // (17) — the anchor-blind `total - budget` would cut this short by 3,
+        // stranding the oldest 3 pre-clear rows unreachable by scroll.
+        assert_eq!(m.max_scroll, 20, "pad (3) + 17 (22 total - 5 body)");
+
+        // scroll 1..=3: continuous anchor-growth, one more row of pre-clear
+        // history each step, X0/X1 staying pinned to the bottom of the window
+        // (never jumping to an unrelated slice — the bug this quest fixes).
+        state.transcript_scroll = 1;
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L19", "X0", "X1"]);
+        assert!(!m.top_anchored_fits, "no longer showing the anchor in full once scrolled");
+
+        state.transcript_scroll = 2;
+        let (main, _m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L18", "L19", "X0", "X1"]);
+
+        state.transcript_scroll = 3;
+        let (main, _m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L17", "L18", "L19", "X0", "X1"], "window now full (5 rows)");
+
+        // scroll == 4: the hand-off to the ordinary backward slide, continuing
+        // from exactly where the growth phase left off — X1 recedes off the
+        // bottom rather than the window jumping elsewhere.
+        state.transcript_scroll = 4;
+        let (main, _m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L16", "L17", "L18", "L19", "X0"]);
+
+        // Over-scroll clamps at the true top of the transcript (L0), not 3
+        // rows short of it.
+        state.transcript_scroll = 999;
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L0", "L1", "L2", "L3", "L4"]);
+        assert_eq!(m.first_visible_row, 0);
+    }
+
     /// Build a `Theme` with the given selectors' bg overridden (like a
     /// `style.toml` decl), so tests exercising render code migrated to
     /// `theme.get("<selector>")` (SQ-0309) can still inject a custom colour
@@ -11205,11 +12666,11 @@ mod tests {
         let mut state = frameless_state();
 
         state.layout = crate::state::Layout::Split;
-        let split = crate::layout::compute_pane_layout(frame, &state, 0);
+        let split = crate::layout::compute_pane_layout(frame, &state);
         let (_, with_map) = story_screen_dims(split.story, &state).expect("a split pane");
 
         state.layout = crate::state::Layout::TranscriptFull;
-        let full = crate::layout::compute_pane_layout(frame, &state, 0);
+        let full = crate::layout::compute_pane_layout(frame, &state);
         let (_, without_map) = story_screen_dims(full.story, &state).expect("a full pane");
 
         assert!(
@@ -11651,7 +13112,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -11823,7 +13284,7 @@ mod tests {
             WinNode::Grid(g)
         }
         fn pair(vertical: bool, split: u16, first: WinNode, second: WinNode) -> WinNode {
-            WinNode::Pair { vertical, split: Split { fixed: split , fixed_px: None }, border: true, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
+            WinNode::Pair { vertical, split: Split { fixed: split , fixed_px: None, rest: None }, border: true, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
         }
         let root =
             pair(false, 123,
@@ -11920,7 +13381,7 @@ mod tests {
         panel.panel = true;
         let root = WinNode::Pair {
             vertical: true,
-            split: Split { fixed: 1 , fixed_px: None },
+            split: Split { fixed: 1 , fixed_px: None, rest: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -11953,7 +13414,7 @@ mod tests {
         let zm = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -11979,7 +13440,7 @@ mod tests {
         let two = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 10 , fixed_px: None },
+                split: Split { fixed: 10 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12005,7 +13466,7 @@ mod tests {
         let side = ScreenModel {
             root: WinNode::Pair {
                 vertical: false, // horizontal pair = Left/Right split
-                split: Split { fixed: 20 , fixed_px: None },
+                split: Split { fixed: 20 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12028,7 +13489,7 @@ mod tests {
         let below = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 22 , fixed_px: None },
+                split: Split { fixed: 22 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12059,7 +13520,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 6 , fixed_px: None },
+                split: Split { fixed: 6 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12092,28 +13553,80 @@ mod tests {
     fn split_area_bordered_vertical_and_horizontal() {
         let area = Rect::new(0, 0, 20, 10);
         // Borderless (b=0): the gutter is empty, children abut.
-        let (top, sep, bottom) = split_area_bordered(area, true, 3, 0);
+        let (top, sep, bottom) = split_area_bordered(area, true, 3, None, 0);
         assert_eq!(top, Rect::new(0, 0, 20, 3));
         assert_eq!(sep, Rect::new(0, 3, 20, 0));
         assert_eq!(bottom, Rect::new(0, 3, 20, 7));
-        let (left, sep, right) = split_area_bordered(area, false, 8, 0);
+        let (left, sep, right) = split_area_bordered(area, false, 8, None, 0);
         assert_eq!(left, Rect::new(0, 0, 8, 10));
         assert_eq!(sep, Rect::new(8, 0, 0, 10));
         assert_eq!(right, Rect::new(8, 0, 12, 10));
         // Bordered (b=1): a 1-cell gutter is carved out between the children.
-        let (top, sep, bottom) = split_area_bordered(area, true, 3, 1);
+        let (top, sep, bottom) = split_area_bordered(area, true, 3, None, 1);
         assert_eq!(top, Rect::new(0, 0, 20, 3));
         assert_eq!(sep, Rect::new(0, 3, 20, 1));
         assert_eq!(bottom, Rect::new(0, 4, 20, 6));
-        let (left, sep, right) = split_area_bordered(area, false, 8, 1);
+        let (left, sep, right) = split_area_bordered(area, false, 8, None, 1);
         assert_eq!(left, Rect::new(0, 0, 8, 10));
         assert_eq!(sep, Rect::new(8, 0, 1, 10));
         assert_eq!(right, Rect::new(9, 0, 11, 10));
         // Oversized fixed clamps to the extent; the border can't overflow either.
-        let (l2, sep, r2) = split_area_bordered(area, true, 99, 1);
+        let (l2, sep, r2) = split_area_bordered(area, true, 99, None, 1);
         assert_eq!(l2.height, 10);
         assert_eq!(sep.height, 0);
         assert_eq!(r2.height, 0);
+    }
+
+    /// SQ-1605: when `rest` carries the second child's OWN real cell count
+    /// (a genuine gvm proportional-split fact), `second` is sized from it —
+    /// not from "whatever's left" — and any slack the independent per-child
+    /// flooring left over lands as unclaimed gutter beside the separator,
+    /// never inside `second`'s canvas.
+    #[test]
+    fn split_area_bordered_second_child_uses_its_own_rest_not_the_remainder() {
+        // Content 79 (extent 80, border 1) at a 50/50 proportional split floors
+        // both halves to 39, one cell short of the content — gvm's documented
+        // at-most-one-cell remainder (see `layout_window`'s doc comment).
+        let area = Rect::new(0, 0, 80, 5);
+        let (first, sep, second) = split_area_bordered(area, false, 39, Some(39), 1);
+        assert_eq!(first, Rect::new(0, 0, 39, 5), "first keeps its own fixed cells");
+        assert_eq!(second.width, 39, "second is sized from `rest`, not the remainder");
+        assert_eq!(second, Rect::new(41, 0, 39, 5), "second anchors to the far edge, past the slack");
+        // The separator still gets exactly its `border` cell, right after `first`.
+        assert_eq!(sep, Rect::new(39, 0, 1, 5));
+        // The buggy old formula (`area.width - fixed - border` = 80-39-1 = 40)
+        // must NOT be what `second` reports — that's the one-cell-too-large bug.
+        assert_ne!(second.width, area.width - 39 - 1, "must not fall back to the old all-remainder formula");
+        // The slack cell (80 - 39 - 1 - 39 = 1) is unclaimed gutter between `sep`
+        // and `second`, not part of either child.
+        assert_eq!(sep.x + sep.width, 40);
+        assert_eq!(second.x, 41);
+    }
+
+    /// SQ-1605 follow-up: `rest: Some(_)` is only produced for a pair where gvm
+    /// itself reserved a border cell (see `AppGlk::convert_tree`), so the one
+    /// cell of slop that ISN'T the genuine proportional-rounding remainder is
+    /// exactly that reservation — and `second` must still reclaim it when the
+    /// THEME draws no rule (`border` param 0), the shipped default (SQ-0821).
+    /// Only the real rounding slack stays withheld either way, unlike the
+    /// `border` param 1 case above where the drawn separator already accounts
+    /// for that reserved cell.
+    #[test]
+    fn split_area_bordered_reclaims_the_border_cell_but_not_the_slack_when_no_rule_is_drawn() {
+        // Same 50/50-at-80 proportional split as above, but the theme draws no
+        // separator at all (border param 0).
+        let area = Rect::new(0, 0, 80, 5);
+        let (first, sep, second) = split_area_bordered(area, false, 39, Some(39), 0);
+        assert_eq!(first, Rect::new(0, 0, 39, 5), "first keeps its own fixed cells");
+        assert_eq!(sep.width, 0, "no rule drawn ⇒ no separator cell");
+        // The reserved border cell is reclaimed (second grows from its raw `rest`
+        // of 39 to 40) — but the genuine rounding slack is not, so second does
+        // NOT reach the old all-remainder formula's 41.
+        assert_eq!(second.width, 40, "the border reservation is reclaimed, the slack is not");
+        assert_ne!(second.width, area.width - 39, "must not reclaim the slack cell too (old all-remainder formula)");
+        // The withheld slack cell sits right after `first`, exactly where the
+        // (undrawn) separator would have been — `second` starts one cell later.
+        assert_eq!(second, Rect::new(40, 0, 40, 5));
     }
 
     #[test]
@@ -12122,7 +13635,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12131,7 +13644,7 @@ mod tests {
                 first: Box::new(WinNode::Grid(grid_with("STATUS"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 10 , fixed_px: None },
+                    split: Split { fixed: 10 , fixed_px: None, rest: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -12184,13 +13697,13 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 8 , fixed_px: None },
+                split: Split { fixed: 8 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
                 first: Box::new(WinNode::Pair {
                     vertical: true,
-                    split: Split { fixed: 1 , fixed_px: None },
+                    split: Split { fixed: 1 , fixed_px: None, rest: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -12199,7 +13712,7 @@ mod tests {
                 }),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 1 , fixed_px: None },
+                    split: Split { fixed: 1 , fixed_px: None, rest: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -12265,7 +13778,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -12307,14 +13820,14 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
                 first: Box::new(WinNode::Grid(grid_with("ST"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 4 , fixed_px: None },
+                    split: Split { fixed: 4 , fixed_px: None, rest: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -12597,7 +14110,7 @@ mod tests {
         // region must be everything right of the graphics — text + map.
         let model = model_with(WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 , fixed_px: None },
+            split: Split { fixed: 10 , fixed_px: None, rest: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -12614,7 +14127,7 @@ mod tests {
         // Graphics banner (rows 0..3) over the text buffer; no map (TranscriptFull).
         let model = model_with(WinNode::Pair {
             vertical: true,
-            split: Split { fixed: 3 , fixed_px: None },
+            split: Split { fixed: 3 , fixed_px: None, rest: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -12631,7 +14144,7 @@ mod tests {
         // and the dialog centers over the whole frame.
         let model = model_with(WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 , fixed_px: None },
+            split: Split { fixed: 10 , fixed_px: None, rest: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -12790,7 +14303,7 @@ mod tests {
         }
         let blorb = blorb::Blorb::parse(std::fs::read(&path).unwrap()).expect("parse gblorb");
         let image = blorb.executable().expect("exec chunk").1.to_vec();
-        let sess = crate::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[])
+        let sess = crate::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[])
             .expect("boot CM");
         let model = sess.screen();
         let (grids, buffers, others) = count_leaves(&model.root);
@@ -12836,7 +14349,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -12876,7 +14389,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 6 , fixed_px: None },
+                split: Split { fixed: 6 , fixed_px: None, rest: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -12916,7 +14429,7 @@ mod tests {
             let model = ScreenModel {
                 root: WinNode::Pair {
                     vertical,
-                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
+                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None, rest: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -12960,7 +14473,7 @@ mod tests {
             let model = ScreenModel {
                 root: WinNode::Pair {
                     vertical,
-                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
+                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None, rest: None },
                     // The game asks for a border, the way almost every Glk game does
                     // simply by not asking for `winmethod_NoBorder`.
                     border: true,
@@ -13011,7 +14524,7 @@ mod tests {
         let model = |vertical: bool| ScreenModel {
             root: WinNode::Pair {
                 vertical,
-                split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
+                split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None, rest: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -13063,7 +14576,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 , fixed_px: None },
+                split: Split { fixed: 1 , fixed_px: None, rest: None },
                 border: true,
                 key_bg: Some(0x0000_00FF),
                 key_fg: Some(0x00FF_0000),
@@ -13104,7 +14617,7 @@ mod tests {
         let make = |second: WinNode| ScreenModel {
             root: WinNode::Pair {
                 vertical: false, // left/right split → a │ separator
-                split: Split { fixed: 10 , fixed_px: None },
+                split: Split { fixed: 10 , fixed_px: None, rest: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -13138,7 +14651,7 @@ mod tests {
         });
         let tree = WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 , fixed_px: None },
+            split: Split { fixed: 10 , fixed_px: None, rest: None },
             border: false,
             key_bg: None,
             key_fg: None,

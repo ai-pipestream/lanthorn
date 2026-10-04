@@ -3835,6 +3835,12 @@ pub(crate) fn cleanup_overlaps_observed(
 
     let mut stats = mapper::layout::TidyStats::default();
     let locks = reciprocal_axis_locks(graph);
+    // SQ-1637 Part 4: every candidate (room, offset) actually evaluated (i.e. that reached
+    // `graph.set_pos` below, past the lock/occupied/up-down-side skips) counts as one "trial",
+    // whether or not it ends up the pass's winner. `stats.overlaps_resolved` already counts the
+    // committed ones, so the difference is what silently got rejected — a move that was tried,
+    // scored, and discarded left NO trace at all before this (SQ-1636's root cause).
+    let mut trials_tried: u32 = 0;
 
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
@@ -3869,6 +3875,7 @@ pub(crate) fn cleanup_overlaps_observed(
                 if !move_keeps_updown_sides(graph, id, trial) {
                     continue;
                 }
+                trials_tried += 1;
                 graph.set_pos(id, trial);
                 let s = render_overlap_stats(graph);
                 let score_trial = mapper::layout::room_side_score(graph, id);
@@ -3905,6 +3912,91 @@ pub(crate) fn cleanup_overlaps_observed(
             None => break,
         }
     }
+
+    // SQ-1637 Part 4: a trailing summary frame naming how many candidate moves this call
+    // evaluated versus how many it actually committed — the only trace a REJECTED trial leaves
+    // at all. Fires even when nothing committed (every trial rejected), which is exactly the
+    // case SQ-1636 investigated: a genuinely improving move scored as a net loss under the old
+    // (buggy) scoring and was silently discarded with zero visibility.
+    if trials_tried > 0 {
+        if let Some(ref mut cb) = obs {
+            let rejected = trials_tried - stats.overlaps_resolved;
+            let desc = format!(
+                "Overlap cleanup summary: {trials_tried} trials tried, {} committed, {rejected} rejected.",
+                stats.overlaps_resolved,
+            );
+            cb(graph, "cleanup_overlaps", &desc, &stats);
+        }
+    }
+}
+
+/// SQ-1672: the Up/Down stack `id` belongs to — every placed room reachable through Up/Down
+/// connections, however the stairwell bends on the grid — sorted by id. A lone room returns just itself.
+fn updown_stack(graph: &mapper::graph::MapGraph, id: mapper::graph::RoomId) -> Vec<mapper::graph::RoomId> {
+    let placed = |r: mapper::graph::RoomId| graph.room(r).is_some_and(|r| r.pos.is_some());
+    let mut seen = vec![id];
+    let mut i = 0;
+    while i < seen.len() {
+        let cur = seen[i];
+        i += 1;
+        for c in graph.connections() {
+            if !matches!(c.dir, Direction::Up | Direction::Down) || c.is_self_loop() {
+                continue;
+            }
+            let other = if c.origin == cur {
+                c.dest
+            } else if c.dest == cur {
+                c.origin
+            } else {
+                continue;
+            };
+            if !seen.contains(&other) && placed(other) {
+                seen.push(other);
+            }
+        }
+    }
+    seen.sort_unstable();
+    seen
+}
+
+/// SQ-1693: the rooms at either end of a clean `┼` crossing in which at least one of the two
+/// connectors is an Up/Down passage — the only rooms a crossing-driven repair move is tried on.
+fn updown_crossing_rooms(
+    graph: &mapper::graph::MapGraph,
+) -> std::collections::BTreeSet<mapper::graph::RoomId> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let rm = mapper::render::render(graph);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let plan = &rm.plan;
+    let mut owners: BTreeMap<(i32, i32), BTreeMap<usize, u8>> = BTreeMap::new();
+    for (ci, conn) in plan.connectors.iter().enumerate() {
+        if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+            for (c, mask) in &plot.cells {
+                *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
+            }
+        }
+    }
+    let is_updown = |a: mapper::graph::RoomId, b: mapper::graph::RoomId| {
+        graph.connections().iter().any(|c| {
+            matches!(c.dir, Direction::Up | Direction::Down)
+                && ((c.origin == a && c.dest == b) || (c.origin == b && c.dest == a))
+        })
+    };
+    let mut out = BTreeSet::new();
+    for per_conn in owners.values() {
+        if per_conn.len() != 2 {
+            continue;
+        }
+        let cs: Vec<&mapper::route::RoutedConnector> =
+            per_conn.keys().map(|&ci| &plan.connectors[ci]).collect();
+        if cs.iter().any(|c| is_updown(c.origin, c.dest)) {
+            for c in cs {
+                out.insert(c.origin);
+                out.insert(c.dest);
+            }
+        }
+    }
+    out
 }
 
 /// Nudge rooms to satisfy currently-VIOLATED directional hints — e.g. a one-way `W` edge whose dest
@@ -3916,6 +4008,11 @@ pub(crate) fn cleanup_overlaps_observed(
 /// (a) not introducing any illegal connector overlap and (b) not breaking any exact row/column
 /// alignment the moved room currently holds (`room_alignment_score`, so it never undoes the chain
 /// alignment relayout/cleanup established). Only strict improvements are taken, so it converges.
+///
+/// SQ-1693: the order is lexicographic — hint score, then bent edges, then connector crossings.
+/// A move that changes neither of the first two but strictly removes a crossing (and adds no
+/// overlap) is also taken, for rooms at either end of a crossing that involves an Up/Down
+/// connector. Every accepted move strictly improves that triple, which is bounded, so it ends.
 pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
     repair_directional_hints_observed(graph, radius, max_passes, None);
 }
@@ -3940,62 +4037,349 @@ pub(crate) fn repair_directional_hints_observed(
     };
 
     let mut stats = mapper::layout::TidyStats::default();
-    let locks = reciprocal_axis_locks(graph);
+    let chains = mapper::layout::detect_chains(graph);
+    let unreliable = mapper::layout::positionally_unreliable(graph);
+    // SQ-1637 Part 4: same accounting as `cleanup_overlaps_observed` — every candidate actually
+    // evaluated counts as a trial, whether or not it wins its pass.
+    let mut trials_tried: u32 = 0;
+    // SQ-1669: longest line slide / group translation considered; also bounded per pass by the
+    // map's own extent (past which every sign-based hint reads the same), and it stops at the
+    // first occupied cell anyway.
+    const MAX_SLIDE: i32 = 64;
+
+    type Cell = (i32, i32);
+    type Move = Vec<(mapper::graph::RoomId, Cell)>;
+    /// (moved positions, overlap stats, hint score, bent compass edges, alignment before,
+    /// alignment after).
+    type Trial = (Move, (usize, usize), usize, usize, usize, usize);
+
+    /// SQ-1672: compass edges whose bearing is not drawn exactly (a cardinal off its line, a
+    /// diagonal on the wrong quadrant) — the secondary objective, checked when the hint score ties.
+    fn bent_edges(graph: &mapper::graph::MapGraph) -> usize {
+        graph
+            .connections()
+            .iter()
+            .filter(|c| {
+                mapper::direction::grid_offset(c.dir).is_some()
+                    && !mapper::layout::edge_is_satisfied(graph, c)
+            })
+            .count()
+    }
+
+    /// Hint score and bent-edge count over every connection that does NOT touch a positionally
+    /// unreliable room. A group move is judged by this, so a room whose own claims contradict
+    /// each other (SQ-1289) can never drag reliable rooms around for the sake of its hints.
+    fn reliable_scores(
+        graph: &mapper::graph::MapGraph,
+        unreliable: &std::collections::BTreeSet<mapper::graph::RoomId>,
+    ) -> (usize, usize) {
+        let compass_weight = graph.connections().len() + 1;
+        let (mut score, mut bent) = (0, 0);
+        for c in graph.connections() {
+            if unreliable.contains(&c.origin) || unreliable.contains(&c.dest) {
+                continue;
+            }
+            let compass = mapper::direction::grid_offset(c.dir).is_some();
+            if compass && !mapper::layout::edge_is_satisfied(graph, c) {
+                bent += 1;
+            }
+            let Some(delta) = mapper::direction::layout_offset(c.dir) else { continue };
+            let (Some(op), Some(dp)) =
+                (graph.room(c.origin).and_then(|r| r.pos), graph.room(c.dest).and_then(|r| r.pos))
+            else {
+                continue;
+            };
+            let side = |actual: i32, expected: i32| match expected.cmp(&0) {
+                std::cmp::Ordering::Equal => true,
+                std::cmp::Ordering::Greater => actual > 0,
+                std::cmp::Ordering::Less => actual < 0,
+            };
+            if side(dp.0 - op.0, delta.0) && side(dp.1 - op.1, delta.1) {
+                score += if compass { compass_weight } else { 1 };
+            }
+        }
+        (score, bent)
+    }
+
+    /// Try translating `members` rigidly by `(dx, dy)`. `None` when a locked member would leave
+    /// its axis or a target cell is taken by a non-member; otherwise the moved positions, the
+    /// resulting `(overlaps, crossings)`, hint score and alignment sums before and after. The
+    /// graph is always left as it was found.
+    fn trial_group(
+        graph: &mut mapper::graph::MapGraph,
+        chains: &mapper::layout::Chains,
+        group_view: Option<&std::collections::BTreeSet<mapper::graph::RoomId>>,
+        base: (usize, usize),
+        members: &[mapper::graph::RoomId],
+        dx: i32,
+        dy: i32,
+        crossing_candidate: bool,
+    ) -> Option<Trial> {
+        // A reciprocal N/S room is column-locked (X fixed), an E/W room row-locked (Y fixed) —
+        // unless its whole run travels with it, which keeps the run aligned.
+        let pinned = |map: &std::collections::BTreeMap<mapper::graph::RoomId, usize>,
+                      all: &[Vec<mapper::graph::RoomId>],
+                      m: &mapper::graph::RoomId| {
+            map.get(m).is_some_and(|&c| !all[c].iter().all(|r| members.contains(r)))
+        };
+        if members.iter().any(|m| {
+            (dx != 0 && pinned(&chains.ns, &chains.ns_members, m))
+                || (dy != 0 && pinned(&chains.ew, &chains.ew_members, m))
+        }) {
+            return None;
+        }
+        let origs: Move = members
+            .iter()
+            .filter_map(|&m| graph.room(m).and_then(|r| r.pos).map(|p| (m, p)))
+            .collect();
+        if origs.len() != members.len() {
+            return None;
+        }
+        let moved: Move = origs.iter().map(|&(m, p)| (m, (p.0 + dx, p.1 + dy))).collect();
+        if graph.rooms().any(|r| {
+            !members.contains(&r.id) && r.pos.is_some_and(|rp| moved.iter().any(|&(_, t)| t == rp))
+        }) {
+            return None;
+        }
+        let align_orig: usize =
+            members.iter().map(|&m| mapper::layout::room_alignment_score(graph, m)).sum();
+        for &(m, t) in &moved {
+            graph.set_pos(m, t);
+        }
+        let (score, bent) = match group_view {
+            Some(unreliable) => reliable_scores(graph, unreliable),
+            None => (mapper::layout::directional_hint_score(graph), bent_edges(graph)),
+        };
+        let align_trial: usize =
+            members.iter().map(|&m| mapper::layout::room_alignment_score(graph, m)).sum();
+        // The render is the expensive part, and most trials are rejected on these cheap numbers
+        // alone — so only a candidate that is already a hint/straightness win without losing
+        // alignment gets one. A skipped render is reported as "unboundedly many overlaps", which
+        // the caller's acceptance test rejects exactly as the real answer would have been.
+        // SQ-1693: a crossing candidate that ties on both is rendered too, to read its crossings.
+        let viable = (score > base.0
+            || (score == base.0 && (bent < base.1 || (bent == base.1 && crossing_candidate))))
+            && align_trial >= align_orig;
+        let s = if viable { render_overlap_stats(graph) } else { (usize::MAX, usize::MAX) };
+        for &(m, p) in &origs {
+            graph.set_pos(m, p);
+        }
+        Some((moved, s, score, bent, align_orig, align_trial))
+    }
 
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
         let base_score = mapper::layout::directional_hint_score(graph);
+        let base_bent = bent_edges(graph);
+        let (group_base_score, group_base_bent) = reliable_scores(graph, &unreliable);
+        // SQ-1693: rooms a crossing-only move may be tried on (empty when nothing crosses).
+        let crossing_rooms = if base.1 > 0 {
+            updown_crossing_rooms(graph)
+        } else {
+            std::collections::BTreeSet::new()
+        };
 
         let room_ids: Vec<mapper::graph::RoomId> =
             graph.rooms().filter(|r| r.pos.is_some()).map(|r| r.id).collect();
+        let extent = {
+            let ps: Vec<Cell> = graph.rooms().filter_map(|r| r.pos).collect();
+            let xs = ps.iter().map(|p| p.0);
+            let ys = ps.iter().map(|p| p.1);
+            let w = xs.clone().max().unwrap_or(0) - xs.min().unwrap_or(0);
+            let h = ys.clone().max().unwrap_or(0) - ys.min().unwrap_or(0);
+            (w.max(h) + 2).min(MAX_SLIDE)
+        };
 
-        type Key = (std::cmp::Reverse<usize>, usize, usize, usize, mapper::graph::RoomId, usize);
-        let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
+        type Key = (
+            std::cmp::Reverse<usize>,
+            std::cmp::Reverse<usize>,
+            usize,
+            usize,
+            usize,
+            mapper::graph::RoomId,
+            usize,
+        );
+        let mut best: Option<(Key, Move)> = None;
+        let consider = |best: &mut Option<(Key, Move)>,
+                            res: Option<Trial>,
+                            id: mapper::graph::RoomId,
+                            degree: usize,
+                            move_idx: usize,
+                            group: bool| {
+            let (base_score, base_bent) =
+                if group { (group_base_score, group_base_bent) } else { (base_score, base_bent) };
+            let Some((moved, s, score, bent, align_orig, align_trial)) = res else { return };
+            // Lexicographic (SQ-1672): a strict hint gain, or — at an equal hint score — strictly
+            // fewer bent compass edges. Both strictly improve a bounded pair, so the loop ends.
+            // SQ-1693: or, at equal score and bent count, strictly fewer crossings (an unrendered
+            // candidate reads `usize::MAX` crossings and so never qualifies).
+            let better = score > base_score
+                || (score == base_score && (bent < base_bent || s.1 < base.1));
+            if better && s.0 <= base.0 && align_trial >= align_orig {
+                let gain = score - base_score;
+                let straightened = base_bent.saturating_sub(bent);
+                let key: Key = (
+                    std::cmp::Reverse(gain),
+                    std::cmp::Reverse(straightened),
+                    s.0,
+                    s.1,
+                    degree,
+                    id,
+                    move_idx,
+                );
+                if best.as_ref().is_none_or(|(bk, _)| key < *bk) {
+                    *best = Some((key, moved));
+                }
+            }
+        };
+
+        // Single-room candidates: the radius ring, then (SQ-1669) line slides — any distance
+        // along the row/column the room shares with a reciprocal partner, through free cells.
         for &id in &room_ids {
             let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
-            // Reciprocal N/S rooms are column-locked (X fixed), E/W rooms row-locked (Y fixed).
-            let (x_locked, y_locked) = locks.get(&id).copied().unwrap_or((false, false));
-            let align_orig = mapper::layout::room_alignment_score(graph, id);
             let degree = mapper::layout::room_compass_degree(graph, id);
             for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
-                // Skip any candidate that would slide a reciprocal-locked room off its shared axis.
-                if (x_locked && dx != 0) || (y_locked && dy != 0) {
+                let cell = (orig.0 + dx, orig.1 + dy);
+                if graph.rooms().any(|r| r.id != id && r.pos == Some(cell)) {
                     continue;
                 }
-                let trial = (orig.0 + dx, orig.1 + dy);
-                if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
-                    continue;
+                trials_tried += 1;
+                let res = trial_group(graph, &chains, None, (base_score, base_bent), &[id], dx, dy, crossing_rooms.contains(&id));
+                consider(&mut best, res, id, degree, move_idx, false);
+            }
+            let mut slide_idx = moves.len();
+            let mut slides: Vec<(i32, i32)> = Vec::new();
+            if chains.ew.contains_key(&id) {
+                slides.extend([(-1, 0), (1, 0)]);
+            }
+            if chains.ns.contains_key(&id) {
+                slides.extend([(0, -1), (0, 1)]);
+            }
+            for (sx, sy) in slides {
+                for dist in 1..=extent {
+                    let cell = (orig.0 + sx * dist, orig.1 + sy * dist);
+                    if graph.rooms().any(|r| r.id != id && r.pos == Some(cell)) {
+                        break;
+                    }
+                    if dist > radius {
+                        trials_tried += 1;
+                        let res = trial_group(graph, &chains, None, (base_score, base_bent), &[id], sx * dist, sy * dist, crossing_rooms.contains(&id));
+                        consider(&mut best, res, id, degree, slide_idx, false);
+                        slide_idx += 1;
+                    }
                 }
-                graph.set_pos(id, trial);
-                let s = render_overlap_stats(graph);
-                let score = mapper::layout::directional_hint_score(graph);
-                let align_trial = mapper::layout::room_alignment_score(graph, id);
-                graph.set_pos(id, orig);
-                if score > base_score && s.0 <= base.0 && align_trial >= align_orig {
-                    let gain = score - base_score;
-                    let key: Key = (std::cmp::Reverse(gain), s.0, s.1, degree, id, move_idx);
-                    if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
-                        best = Some((key, id, trial));
+            }
+        }
+
+        // SQ-1672: whole-group candidates. A group is a room's Up/Down stack, its E/W reciprocal
+        // run, or its N/S reciprocal run (the layout's own `detect_chains` runs). Each distinct
+        // group (id-sorted) is translated rigidly one or more cells up, down, left or right —
+        // perpendicular to its own axis as well as along it — stopping at the first blocked
+        // distance. Iteration order is fixed: groups in ascending lowest-id order, then
+        // (up, down, left, right) by distance.
+        let mut groups: std::collections::BTreeSet<Vec<mapper::graph::RoomId>> =
+            std::collections::BTreeSet::new();
+        for &id in &room_ids {
+            let stack = updown_stack(graph, id);
+            if stack.len() > 1 {
+                groups.insert(stack);
+            }
+            for (map, members) in [(&chains.ew, &chains.ew_members), (&chains.ns, &chains.ns_members)] {
+                if let Some(&cid) = map.get(&id) {
+                    let mut m = members[cid].clone();
+                    m.sort_unstable();
+                    groups.insert(m);
+                }
+            }
+        }
+        // A win needs a violated hint or a bent compass edge to improve, which needs exactly one
+        // of its two endpoints to move — so a group with no such edge crossing its boundary
+        // cannot win, and is not worth a render.
+        let violated: Vec<(mapper::graph::RoomId, mapper::graph::RoomId)> = graph
+            .connections()
+            .iter()
+            .filter(|c| {
+                if mapper::direction::grid_offset(c.dir).is_some() && !mapper::layout::edge_is_satisfied(graph, c) {
+                    return true;
+                }
+                // The score's own side-only test, spelled out: violated when dest sits on the
+                // wrong side of origin along either axis the bearing names.
+                let Some(delta) = mapper::direction::layout_offset(c.dir) else { return false };
+                let (Some(op), Some(dp)) = (
+                    graph.room(c.origin).and_then(|r| r.pos),
+                    graph.room(c.dest).and_then(|r| r.pos),
+                ) else {
+                    return false;
+                };
+                let (ax, ay) = (dp.0 - op.0, dp.1 - op.1);
+                (delta.0 != 0 && (ax > 0) != (delta.0 > 0)) || (delta.1 != 0 && (ay > 0) != (delta.1 > 0))
+                    || (delta.0 != 0 && ax == 0) || (delta.1 != 0 && ay == 0)
+            })
+            .map(|c| (c.origin, c.dest))
+            .collect();
+        for members in groups {
+            // A hint between two group members cannot change under a rigid move either.
+            let crossing_group = members.iter().any(|m| crossing_rooms.contains(m));
+            if !crossing_group && !violated.iter().any(|(a, b)| members.contains(a) != members.contains(b)) {
+                continue;
+            }
+            let id = members[0];
+            let degree = members
+                .iter()
+                .map(|&m| mapper::layout::room_compass_degree(graph, m))
+                .sum::<usize>();
+            let mut move_idx = moves.len() + 4 * MAX_SLIDE as usize * 2;
+            for (sx, sy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                for dist in 1..=extent {
+                    let res = trial_group(graph, &chains, Some(&unreliable), (group_base_score, group_base_bent), &members, sx * dist, sy * dist, crossing_group);
+                    let blocked = res.is_none();
+                    if !blocked {
+                        trials_tried += 1;
+                    }
+                    consider(&mut best, res, id, degree, move_idx, true);
+                    move_idx += 1;
+                    if blocked {
+                        break;
                     }
                 }
             }
         }
 
         match best {
-            Some((_, id, trial)) => {
-                let orig = graph.room(id).and_then(|r| r.pos).unwrap_or(trial);
-                graph.set_pos(id, trial);
+            Some((_, moved)) => {
+                let descs: Vec<String> = moved
+                    .iter()
+                    .map(|&(id, trial)| {
+                        let orig = graph.room(id).and_then(|r| r.pos).unwrap_or(trial);
+                        let name = graph.room(id).map(|r| r.name.as_str()).unwrap_or("?").to_owned();
+                        format!("room {} ({}) from {:?} to {:?}", id, name, orig, trial)
+                    })
+                    .collect();
+                for &(id, trial) in &moved {
+                    graph.set_pos(id, trial);
+                }
                 if let Some(ref mut cb) = obs {
                     stats.hints_repaired += 1;
-                    let name = graph.room(id).map(|r| r.name.as_str()).unwrap_or("?").to_owned();
                     let desc = format!(
-                        "Repair hint: moved room {} ({}) from {:?} to {:?} to restore directional edge.",
-                        id, name, orig, trial
+                        "Repair hint: moved {} to restore directional edge.",
+                        descs.join(", ")
                     );
                     cb(graph, "repair_hints", &desc, &stats);
                 }
             }
             None => break,
+        }
+    }
+
+    // SQ-1637 Part 4: trailing summary frame — see `cleanup_overlaps_observed`'s twin.
+    if trials_tried > 0 {
+        if let Some(ref mut cb) = obs {
+            let rejected = trials_tried - stats.hints_repaired;
+            let desc = format!(
+                "Repair hints summary: {trials_tried} trials tried, {} committed, {rejected} rejected.",
+                stats.hints_repaired,
+            );
+            cb(graph, "repair_hints", &desc, &stats);
         }
     }
 }
@@ -4018,6 +4402,11 @@ pub(crate) fn compact_empty_lines_observed(
     mut obs: Option<TidyObserver>,
 ) {
     let stats = mapper::layout::TidyStats::default();
+    // SQ-1637 Part 4: a candidate empty-line collapse is a trial exactly like cleanup/repair's
+    // room moves — tried, then either committed (a frame already fires for that) or rejected
+    // and silently reverted (the `floor = empty;` branch below), with no trace before this.
+    let mut lines_tried: u32 = 0;
+    let mut lines_committed: u32 = 0;
 
     for is_x in [true, false] {
         let mut floor = i32::MIN;
@@ -4035,6 +4424,7 @@ pub(crate) fn compact_empty_lines_observed(
             let rooms: Vec<(mapper::graph::RoomId, (i32, i32))> =
                 graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
             let before = render_overlap_stats(graph).0;
+            lines_tried += 1;
             for &(id, p) in &rooms {
                 let c = if is_x { p.0 } else { p.1 };
                 if c > empty {
@@ -4047,6 +4437,7 @@ pub(crate) fn compact_empty_lines_observed(
                 }
                 floor = empty;
             } else {
+                lines_committed += 1;
                 if let Some(ref mut cb) = obs {
                     let axis = if is_x { "column" } else { "row" };
                     let desc = format!(
@@ -4056,6 +4447,19 @@ pub(crate) fn compact_empty_lines_observed(
                     cb(graph, "compact", &desc, &stats);
                 }
             }
+        }
+    }
+
+    // SQ-1637 Part 4: trailing summary frame — see `cleanup_overlaps_observed`'s twin. Fires
+    // even when every candidate collapse was rejected (would have raised an overlap), which
+    // otherwise left no trace at all.
+    if lines_tried > 0 {
+        if let Some(ref mut cb) = obs {
+            let rejected = lines_tried - lines_committed;
+            let desc = format!(
+                "Compact summary: {lines_tried} candidates tried, {lines_committed} committed, {rejected} rejected.",
+            );
+            cb(graph, "compact", &desc, &stats);
         }
     }
 }
@@ -6556,6 +6960,71 @@ mod tests {
             "repair must keep the reciprocal N/S pair 74<->76 column-locked: 74={:?} 76={:?}", p(&g,74), p(&g,76));
     }
 
+    /// SQ-1636: `repair_directional_hints` end-to-end, reproducing the Forest/#76 shape from a
+    /// real Zork I Amiga r88 save — a room (F) with one incoming one-way edge (from A) and one
+    /// outgoing one-way edge (to B), neither with a real return edge. F starts positioned so
+    /// A's incoming edge is satisfied and B's outgoing edge is not; the only improving move
+    /// available moves F to satisfy B's edge at the cost of A's (a genuine trade between two
+    /// edges that are BOTH one-way).
+    ///
+    /// Before the fix, `room_alignment_score`'s trial for this move was computed as a LOSS
+    /// (moving away from A cost `RECIPROCAL_WEIGHT` because the incoming edge was wrongly
+    /// scored reciprocal, while gaining B's edge only added 1), so `repair_directional_hints`
+    /// rejected it and F never moved. After the fix both edges score 1, the trade is a wash,
+    /// and the move is accepted.
+    ///
+    /// B is boxed in by five filler rooms occupying every cell it could otherwise reach that
+    /// would ALSO satisfy its own edge (the loop below, ids 200-204) — without them B, not F,
+    /// would be the one to move (a cheaper, bug-independent alternative that would trivially
+    /// pass either way and mask the defect this test exists to catch).
+    #[test]
+    fn repair_accepts_the_trade_a_one_way_edge_for_a_one_way_edge_after_the_reciprocity_fix() {
+        use mapper::graph::MapGraph;
+
+        const F: u32 = 100; // Forest-analog
+        const A: u32 = 101; // Canyon-View-analog: A --W--> F, one-way, satisfied at orig
+        const B: u32 = 102; // South-of-House-analog: F --S--> B, one-way, satisfied only after F moves
+
+        let mut g = MapGraph::new();
+        g.upsert_room(F, "F".into());
+        g.upsert_room(A, "A".into());
+        g.upsert_room(B, "B".into());
+        g.set_pos(F, (0, 0));
+        g.set_pos(A, (5, 0)); // same row, east of F: A--W-->F satisfied
+        g.set_pos(B, (0, -1)); // north of F: F--S-->B NOT satisfied (B must be south of F)
+        g.add_edge(A, Direction::W, F);
+        g.add_edge(F, Direction::S, B);
+
+        // Block every cell B could reach (radius 2) that would satisfy F--S-->B by B moving
+        // instead of F: with B at (0,-1), only y=+1 (i.e. (dx, 1) for dx in -2..=2) is reachable
+        // within radius 2 and puts B south of F's ORIGINAL position (0,0).
+        for (offset, dx) in (-2..=2).enumerate() {
+            let id = 200 + offset as u32;
+            g.upsert_room(id, "wall".into());
+            g.set_pos(id, (dx, 1));
+        }
+
+        let align_orig = mapper::layout::room_alignment_score(&g, F);
+        let base_score = mapper::layout::directional_hint_score(&g);
+
+        repair_directional_hints(&mut g, 2, 3);
+
+        let p = g.room(F).unwrap().pos.unwrap();
+        assert_eq!(
+            p,
+            (0, -2),
+            "F must move to (0,-2) — the only cell that satisfies F--S-->B while staying on \
+             A's required column — trading A's edge for B's: align_orig={align_orig} \
+             base_score={base_score}, got {p:?}",
+        );
+        assert_eq!(
+            mapper::layout::directional_hint_score(&g),
+            base_score + (g.connections().len() + 1),
+            "the global hint score must have gone up by exactly one compass edge's weight",
+        );
+        assert_eq!(render_overlap_stats(&g).0, 0, "the accepted move must not introduce an illegal overlap");
+    }
+
     #[test]
     fn yielded_updown_pair_draws_a_lane_connector_not_a_stub() {
         // Up/Down pair placed far apart (yielded from a clean stack). Task 6 routes Up/Down as a
@@ -6871,6 +7340,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// SQ-1637 Part 4: a trial that was TRIED and REJECTED must leave a trace — before this, a
+    /// rejected trial vanished without a frame (the exact shape at the heart of SQ-1636: a move
+    /// scored as a net loss and silently discarded).
+    ///
+    /// `render_overlap_stats`/`overlap_stats` measures CONNECTOR-path overlaps (two routed
+    /// passages sharing an illegal cell), not simply two room boxes sharing a coordinate — so
+    /// this reuses the same A129 subset `cleanup_clears_a129_illegal_overlaps` uses, the
+    /// smallest graph in this file already proven to leave a real illegal overlap after
+    /// `relayout_auto`. `cleanup_overlaps_observed` needs several candidate moves per pass to
+    /// find the one that actually helps, so committed < tried is guaranteed here.
+    #[test]
+    fn cleanup_overlaps_summary_frame_surfaces_rejected_trials() {
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let mut g = MapGraph::new();
+        for (id, name) in [
+            (74, "Clearing"), (75, "Forest Path"), (77, "Forest"), (78, "Forest"),
+            (79, "Behind House"), (80, "South of House"), (81, "North of House"),
+            (143, "Clearing"), (180, "West of House"), (239, "Forest"),
+        ] { g.upsert_room(id, name.into()); }
+        for (o, d, dst) in [
+            (180, Direction::N, 81), (81, Direction::W, 180), (180, Direction::S, 80),
+            (80, Direction::E, 79), (79, Direction::N, 81), (81, Direction::E, 79),
+            (79, Direction::S, 80), (80, Direction::W, 180), (180, Direction::W, 78),
+            (78, Direction::N, 143), (143, Direction::S, 75), (75, Direction::N, 143),
+            (143, Direction::W, 78), (143, Direction::E, 77), (77, Direction::S, 74),
+            (74, Direction::N, 77), (77, Direction::E, 239), (239, Direction::N, 77),
+            (239, Direction::S, 77),
+        ] { g.add_edge(o, d, dst); }
+        relayout_auto(&mut g);
+        // Force a real illegal connector overlap: smash room 74 onto room 180's cell so its
+        // S/N connector to 77 crosses several of 180's own connectors.
+        let p180 = g.room(180).unwrap().pos.unwrap();
+        g.set_pos(74, p180);
+        let (base_illegal, _) = render_overlap_stats(&g);
+        assert!(base_illegal > 0, "sanity: this fixture must start with a real illegal overlap");
+
+        let mut frames: Vec<(String, String)> = Vec::new();
+        cleanup_overlaps_observed(&mut g, 3, 40, Some(&mut |_g, label, desc, _s| {
+            frames.push((label.to_owned(), desc.to_owned()));
+        }));
+        let (final_illegal, _) = render_overlap_stats(&g);
+        assert_eq!(final_illegal, 0, "sanity: cleanup must still clear the overlap, as it did before this change");
+
+        let summary = frames
+            .iter()
+            .find(|(_, d)| d.starts_with("Overlap cleanup summary:"))
+            .unwrap_or_else(|| panic!("no summary frame emitted: {frames:?}"));
+        // Parse "N trials tried, M committed, K rejected" back out to assert on the numbers,
+        // not just that the word "rejected" appears somewhere.
+        let nums: Vec<u32> = summary.1
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let [tried, committed, rejected] = nums[..] else {
+            panic!("expected exactly 3 numbers in the summary: {}", summary.1)
+        };
+        assert!(tried > 0, "at least one trial must have been tried: {}", summary.1);
+        assert!(rejected > 0, "at least one trial must have been rejected: {}", summary.1);
+        assert_eq!(tried, committed + rejected, "tried must equal committed + rejected: {}", summary.1);
+        assert!(committed >= 1, "at least one move must have resolved the overlap: {}", summary.1);
     }
 
     #[test]

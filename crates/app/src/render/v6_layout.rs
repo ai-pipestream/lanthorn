@@ -19,7 +19,12 @@ use zvm::screen::V6Cell;
 /// so they are NOT explicit and the theme keeps the channel. Standard 2-9 and
 /// every True/True24 value ARE explicit. Shared by the raster block-paint
 /// decision and the cell colour paths so both gate identically. (SQ-0487/0488)
-pub(crate) fn packed_explicit(packed: u32) -> bool {
+///
+/// `pub` (SQ-1599): a host reading [`crate::render::screen::V6HybridGroundFill`]'s
+/// raw packed `fg`/`bg` needs the same explicit-or-inherit test this module
+/// applies internally, or "0" and "Default" are indistinguishable from "the
+/// game actually chose black".
+pub fn packed_explicit(packed: u32) -> bool {
     packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1)
 }
 
@@ -67,7 +72,14 @@ pub(crate) fn explicit_pixel_rgba(palette: zvm::screen::Palette, packed: u32) ->
     }
 }
 
-pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
+/// `pub` (SQ-1609): a host resolving a packed z-colour off
+/// [`crate::render::screen::V6FrameInputs::host_pair`], or any other packed
+/// value of its own, otherwise has to reimplement this function's own body by
+/// hand from the public primitives it already composes (True24 direct,
+/// Standard via [`crate::colors::standard_colour_rgb`], else a theme fallback
+/// via [`crate::render::resolve_zcolour`]) — this is that composition, done
+/// once.
+pub fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
     if packed == 0 {
         return fallback;
     }
@@ -1818,6 +1830,14 @@ impl GlyphSink {
     /// `over_art`/`bar` are the pushed [`V6TextRun`]'s SQ-1592 classification —
     /// only a [`V6RunSource::Chrome`] caller has a real answer for either; every
     /// other source passes `false, false`.
+    ///
+    /// `suppress_paint` (SQ-1612) drops just this call's `blit_glyph_styled`
+    /// while leaving recording exactly as if it were `false` — the per-call
+    /// escape hatch a caller needs when ITS OWN row-skip decision (a hybrid
+    /// host already drawing this native row in cells) must not also erase the
+    /// row from `V6Frame::text`. Independent of `self.mode`'s own paint gate
+    /// above: a caller passes `true` only for a row it is choosing not to
+    /// paint on other grounds, never to spell `RecordOnly` a second way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn blit(
         &mut self,
@@ -1834,8 +1854,9 @@ impl GlyphSink {
         source: V6RunSource,
         over_art: bool,
         bar: bool,
+        suppress_paint: bool,
     ) {
-        if self.mode != V6TextMode::RecordOnly {
+        if self.mode != V6TextMode::RecordOnly && !suppress_paint {
             crate::render::bitfont::blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, style, Some(tf));
         }
         if self.mode == V6TextMode::Rasterise {
@@ -1963,16 +1984,16 @@ pub(crate) fn build_chrome_canvas_into(
             // in at 0 and 16, a text row above where the ring's glyphs land. That
             // is the ghost the half-block capture showed beside crisp letters.
             if !g.px_texts.is_empty() {
+                // SQ-1612: the PAINT-only subset (the two floods below stay fed
+                // exactly this, unchanged) — but recording must not be gated on
+                // it, or a host reading `V6Frame::text` for a row it told us to
+                // skip gets no run at all for something it explicitly asked
+                // lanthorn to hand back. `kept.is_empty()` therefore no longer
+                // `continue`s the whole window: it only skips the two floods,
+                // which have nothing to fill when every run in the window is
+                // one the ring already draws.
                 let kept: Vec<&PxText> =
                     g.px_texts.iter().filter(|t| !text.skips(t.y.max(1) - 1)).collect();
-                if kept.is_empty() {
-                    continue;
-                }
-                // SQ-1009: one run per character is how a grid publishes a line, and
-                // a per-glyph pen has to see the whole line to place it. Identity for
-                // every face that is not proportional.
-                let joined = pen_chains(&kept, tf);
-                let px_texts: Vec<&PxText> = joined.iter().collect();
                 // **The window's own right edge bounds the pen** (SQ-1026).
                 //
                 // ZMSD §8.8's window property 7 is a RIGHT MARGIN, and `zvm` lays
@@ -1993,32 +2014,61 @@ pub(crate) fn build_chrome_canvas_into(
                 // stable, and the alternative is glyphs drawn across the frame art.
                 let bound = (tf.proportional() && (it.w_px as i16) >= 0)
                     .then(|| (ox + it.w_px as u32).saturating_sub(u32::from(it.right_margin)));
-                // The run colour rule itself now lives in `chrome_run_ink`, which the
-                // glyph loop below calls and so does the cell path that draws these
-                // same runs as terminal glyphs (SQ-0944).
-                //
-                // Fill pure-reverse-row gaps FIRST, so the glyph loop paints the run
-                // cells on top of them (SQ-0499). Both this fill and the glyph loop
-                // put their over-art question to `art`, never to `canvas`.
-                fill_reverse_row_gaps(&mut canvas, &art, &px_texts, default_fg, colors, tf);
-                // SQ-0519: then flood the full WINDOW width of each explicit-bg,
-                // non-reverse row with its own background, so an explicitly-coloured
-                // status band (Shogun's black-on-white location/score bar) reads as
-                // one solid bar in the pixel composite rather than showing the page
-                // in the gaps between its runs. Only when the window's width is
-                // resolved (a size sentinel would balloon the flood, SQ-0481). The
-                // glyph loop then stamps the runs on top.
-                if (it.w_px as i16) >= 0 {
-                    fill_explicit_bg_rows(&mut canvas, &px_texts, ox, it.w_px as u32, default_bg, colors, tf);
+                if !kept.is_empty() {
+                    // SQ-1009: one run per character is how a grid publishes a line, and
+                    // a per-glyph pen has to see the whole line to place it. Identity for
+                    // every face that is not proportional.
+                    let joined = pen_chains(&kept, tf);
+                    let px_texts: Vec<&PxText> = joined.iter().collect();
+                    // The run colour rule itself now lives in `chrome_run_ink`, which the
+                    // glyph loop below calls and so does the cell path that draws these
+                    // same runs as terminal glyphs (SQ-0944).
+                    //
+                    // Fill pure-reverse-row gaps FIRST, so the glyph loop paints the run
+                    // cells on top of them (SQ-0499). Both this fill and the glyph loop
+                    // put their over-art question to `art`, never to `canvas`.
+                    fill_reverse_row_gaps(&mut canvas, &art, &px_texts, default_fg, colors, tf);
+                    // SQ-0519: then flood the full WINDOW width of each explicit-bg,
+                    // non-reverse row with its own background, so an explicitly-coloured
+                    // status band (Shogun's black-on-white location/score bar) reads as
+                    // one solid bar in the pixel composite rather than showing the page
+                    // in the gaps between its runs. Only when the window's width is
+                    // resolved (a size sentinel would balloon the flood, SQ-0481). The
+                    // glyph loop then stamps the runs on top.
+                    if (it.w_px as i16) >= 0 {
+                        fill_explicit_bg_rows(&mut canvas, &px_texts, ox, it.w_px as u32, default_bg, colors, tf);
+                    }
                 }
+                // SQ-1612: joined from the UNFILTERED set, not from `kept` — the
+                // glyph loop below is the ONE place these runs are recorded into
+                // `V6Frame::text`, so it has to see a row the ring draws itself
+                // too, not only the rows nobody else owns. `pen_chains` only ever
+                // joins fragments that already share a row, and the skip filter
+                // never splits one logical row's fragments across the kept/dropped
+                // line — every fragment on a given native top shares that same
+                // top — so this is exactly `kept`'s own joins plus the skipped
+                // rows' joins, never a different grouping of survivors.
+                let all_refs: Vec<&PxText> = g.px_texts.iter().collect();
+                let all_joined = pen_chains(&all_refs, tf);
+                let all_px_texts: Vec<&PxText> = all_joined.iter().collect();
                 // SQ-1592: this window's own per-row bar answer, bucketed by the
                 // same native-row-top key `fill_reverse_row_gaps` groups by, so
                 // the raster path's `V6TextRun::bar` field cannot drift from the
-                // fill/flood logic's own idea of which rows are bars.
-                let bar_rows = row_bar_tops(&px_texts);
-                for t in &px_texts {
+                // fill/flood logic's own idea of which rows are bars. Asked of
+                // `all_px_texts`, not `kept`'s joins (SQ-1612): a skipped row's
+                // recorded `bar` must read the same as it would if the row were
+                // never skipped, and a lookup keyed off the smaller set would
+                // answer `None`/`false` for every row the ring took.
+                let bar_rows = row_bar_tops(&all_px_texts);
+                for t in &all_px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;
+                    // SQ-1612: this run's own row may be exactly the one the ring
+                    // already draws in cells — the run is still walked and
+                    // recorded below (this loop no longer excludes it), only its
+                    // paint into `canvas` is suppressed, on the identical
+                    // criterion `kept`'s filter used above.
+                    let suppress_paint = text.skips(t.y.max(1) - 1);
                     // Run coords are SCREEN-absolute 1-based pixels stamped at
                     // paint time (v6 paint semantics) — no window-origin
                     // offset: the window may have moved/shrunk since (Shogun
@@ -2085,7 +2135,7 @@ pub(crate) fn build_chrome_canvas_into(
                         let opaque = region_has_opaque(&art, pen, py, span_w, font_h);
                         let (fg, bg) = chrome_run_ink(t, default_fg, default_bg, colors, || opaque);
                         let bar = bar_rows.get(&py).copied().unwrap_or(false);
-                        glyphs.blit(&mut canvas, ch, pen, py, font_w, font_h, fg, bg, t.style, tf, V6RunSource::Chrome, opaque, bar);
+                        glyphs.blit(&mut canvas, ch, pen, py, font_w, font_h, fg, bg, t.style, tf, V6RunSource::Chrome, opaque, bar, suppress_paint);
                         pen += adv;
                     }
                 }
@@ -2095,16 +2145,20 @@ pub(crate) fn build_chrome_canvas_into(
                 let py = oy + row as u32 * font_h;
                 // SQ-0903, the cell-grid half. Same rule, same reason: the ring
                 // draws this row with glyphs, so imaging it here is work whose
-                // only consumer is the carve that used to follow.
-                if text.skips(py as u16) {
-                    continue;
-                }
+                // only consumer is the carve that used to follow. SQ-1612: no
+                // longer a `continue` past the whole row — a skipped row's own
+                // cells still have to reach `blit` below so it can RECORD them
+                // into `V6Frame::text`, even though nothing here paints them.
+                let suppress_paint = text.skips(py as u16);
                 for col in 0..g.cols {
                     let idx = row as usize * g.cols as usize + col as usize;
                     let Some(cell) = g.cells.get(idx) else { continue };
                     let px = ox + col as u32 * font_w;
                     if cell.ch == '\0' || cell.ch == ' ' {
-                        if cell.bg != 0 {
+                        // A blank cell's background block is paint only — no
+                        // run is ever recorded for it — so a skipped row's own
+                        // suppression is a plain `continue` here, same as before.
+                        if cell.bg != 0 && !suppress_paint {
                             let b = packed_to_rgba(cell.bg, Rgba([0, 0, 0, 255]), colors);
                             fill_cell(&mut canvas, px, py, font_w, font_h, b);
                         }
@@ -2117,7 +2171,7 @@ pub(crate) fn build_chrome_canvas_into(
                     // here would place a character where nothing asked for it.
                     // A grid CELL never asks the SQ-1592 questions today (only
                     // the pixel-run path above does) — false, false.
-                    glyphs.blit(&mut canvas, cell.ch, px, py, font_w, font_h, fg, cellbg, cell.style, tf, V6RunSource::GridCell, false, false);
+                    glyphs.blit(&mut canvas, cell.ch, px, py, font_w, font_h, fg, cellbg, cell.style, tf, V6RunSource::GridCell, false, false, suppress_paint);
                 }
             }
         }
@@ -2194,7 +2248,7 @@ pub(crate) fn draw_secondary_prose_into(
                     break;
                 }
                 // A Panel run is never asked SQ-1592's questions today — false, false.
-                glyphs.blit(canvas, ch, pen, *y0, font_w, font_h, fg, None, 0, tf, V6RunSource::Panel, false, false);
+                glyphs.blit(canvas, ch, pen, *y0, font_w, font_h, fg, None, 0, tf, V6RunSource::Panel, false, false, false);
                 pen += adv;
             }
         }
@@ -2225,7 +2279,7 @@ pub(crate) fn draw_secondary_prose_into(
             if i == input.chars().count() {
                 glyphs.caret(canvas, pen, y0, font_w, font_h, fg, true);
             } else {
-                glyphs.blit(canvas, ch, pen, y0, font_w, font_h, fg, None, 0, tf, V6RunSource::Panel, false, false);
+                glyphs.blit(canvas, ch, pen, y0, font_w, font_h, fg, None, 0, tf, V6RunSource::Panel, false, false, false);
             }
             pen += adv;
         }
@@ -2309,7 +2363,7 @@ pub(crate) fn draw_story_canvas_runs_into(
                 }
             }
             // A StoryCanvas run is never asked SQ-1592's questions today — false, false.
-            glyphs.blit(canvas, ch, pen, py, font_w, font_h, fg, bg, t.style, tf, V6RunSource::StoryCanvas, false, false);
+            glyphs.blit(canvas, ch, pen, py, font_w, font_h, fg, bg, t.style, tf, V6RunSource::StoryCanvas, false, false, false);
             pen += tf.advance_styled(ch, t.style);
         }
     }
@@ -3179,7 +3233,7 @@ pub(crate) fn draw_story_text_into(canvas: &mut RgbaImage, main: &MainText, ox: 
             let hit = reveal.filter(|_| lit.iter().any(|&(s, e)| col >= s && col < e));
             if !blocked(pen, py) {
                 // A StoryProse run is never asked SQ-1592's questions today — false, false.
-                glyphs.blit(canvas, glyph, pen, py, font_w, font_h, hit.map_or(fg, |r| r.ink), None, style, tf, V6RunSource::StoryProse, false, false);
+                glyphs.blit(canvas, glyph, pen, py, font_w, font_h, hit.map_or(fg, |r| r.ink), None, style, tf, V6RunSource::StoryProse, false, false, false);
                 // …and the rule under it, AFTER the glyph so it reads as one line
                 // rather than as a row the descenders punch holes in — the same
                 // order `blit_metric_glyph` draws SQ-1028's in. Spanning the whole
@@ -3211,7 +3265,7 @@ pub(crate) fn draw_story_text_into(canvas: &mut RgbaImage, main: &MainText, ox: 
                     break;
                 }
                 if !blocked(ox + pen, py) {
-                    glyphs.blit(canvas, glyph, ox + pen, py, font_w, font_h, fg, None, 0, tf, V6RunSource::StoryProse, false, false);
+                    glyphs.blit(canvas, glyph, ox + pen, py, font_w, font_h, fg, None, 0, tf, V6RunSource::StoryProse, false, false, false);
                 }
                 pen += adv;
             }
@@ -4233,8 +4287,8 @@ mod tests {
         // Differing `over_art`.
         let mut canvas = RgbaImage::new(4 * FONT_W, FONT_H);
         let mut sink = GlyphSink::new(V6TextMode::RasteriseAndRecord);
-        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, false);
-        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, false);
+        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, false, false);
+        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, false, false);
         let runs = sink.into_runs();
         assert_eq!(runs.len(), 2, "differing over_art must start a new run: {runs:?}");
         assert_eq!((runs[0].text.as_str(), runs[0].over_art), ("A", true));
@@ -4243,8 +4297,8 @@ mod tests {
         // Differing `bar`.
         let mut canvas = RgbaImage::new(4 * FONT_W, FONT_H);
         let mut sink = GlyphSink::new(V6TextMode::RasteriseAndRecord);
-        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, true);
-        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, false);
+        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, true, false);
+        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, false, false, false);
         let runs = sink.into_runs();
         assert_eq!(runs.len(), 2, "differing bar must start a new run: {runs:?}");
         assert_eq!((runs[0].text.as_str(), runs[0].bar), ("A", true));
@@ -4254,8 +4308,8 @@ mod tests {
         // this is the fast path staying intact, not merely never taken.
         let mut canvas = RgbaImage::new(4 * FONT_W, FONT_H);
         let mut sink = GlyphSink::new(V6TextMode::RasteriseAndRecord);
-        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, true);
-        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, true);
+        sink.blit(&mut canvas, 'A', 0, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, true, false);
+        sink.blit(&mut canvas, 'B', FONT_W, 0, FONT_W, FONT_H, fg, None, 0, &tf, V6RunSource::Chrome, true, true, false);
         let runs = sink.into_runs();
         assert_eq!(runs.len(), 1, "identical over_art/bar must still join: {runs:?}");
         assert_eq!(runs[0].text, "AB");

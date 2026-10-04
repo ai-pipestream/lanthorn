@@ -1099,6 +1099,41 @@ fn presentation_option_selects_room_block_layout() {
     assert!(trs.contains("<--"), "the TRS-80 rule frames the block: {trs:?}");
 }
 
+/// SQ-1625: `room_description_text` follows the SAME presentation switch as `room_block` above —
+/// every layout's own room-prefix rule, with none of the exits/items sections, and never the
+/// TRS-80 rule line (that is decorative block framing, not room content).
+#[test]
+fn presentation_option_selects_room_description_text_too() {
+    let mut db = base_db(twin_bottles(1, 1));
+    db.rooms[1].exits = [2, 0, 0, 0, 0, 0];
+    db.rooms[1].literal = false;
+    db.rooms[1].desc = "clearing".into();
+
+    let vm_c64 = Vm::new_full(db.clone(), false, Vm::DEFAULT_RNG_SEED, Options::default());
+    assert_eq!(vm_c64.room_description_text(), "I'm in a clearing");
+
+    let vm_sf =
+        Vm::new_full(db.clone(), false, Vm::DEFAULT_RNG_SEED, Options::new().with_presentation(Presentation::ScottFree));
+    assert_eq!(vm_sf.room_description_text(), "I'm in a clearing");
+
+    let vm_trs = Vm::new_full(db.clone(), false, Vm::DEFAULT_RNG_SEED, Options::new().with_presentation(Presentation::Trs80));
+    let trs = vm_trs.room_description_text();
+    assert_eq!(trs, "I'm in a clearing", "no TRS-80 rule line in the description text: {trs:?}");
+
+    let vm_ti = Vm::new_full(db, false, Vm::DEFAULT_RNG_SEED, Options::new().with_presentation(Presentation::Ti994a));
+    assert_eq!(vm_ti.room_description_text(), "I am in a clearing.", "TI-99/4A's own prefix and trailing period");
+
+    // None of the four ever leaks the exits/items sections into the description alone.
+    for (name, text) in [
+        ("c64", vm_c64.room_description_text()),
+        ("scottfree", vm_sf.room_description_text()),
+        ("trs80", vm_trs.room_description_text()),
+    ] {
+        assert!(!text.contains("Obvious exits"), "{name}: {text:?}");
+        assert!(!text.contains("bottle"), "{name}: {text:?}");
+    }
+}
+
 // ── SQ-1413: unsupported-dialect detection ────────────────────────────────
 
 /// A file that fails to parse AND matches a known other dialect's signature

@@ -4669,8 +4669,7 @@ impl Machine {
             0x0025 => {
                 // glk_window_get_size(win, awidthptr, aheightptr) — PIXELS for a
                 // graphics window, cells (unchanged) for other window types.
-                let cp = self.backend.char_pixels();
-                let size = self.glk.window_pixel_size(a(0), cp).or_else(|| self.glk.window_size(a(0)));
+                let size = self.glk.window_pixel_size_in_screen(a(0)).or_else(|| self.glk.window_size(a(0)));
                 if let Some((w, h)) = size {
                     self.glk_store_ptr(a(1), w)?;
                     self.glk_store_ptr(a(2), h)?;
@@ -5330,7 +5329,6 @@ impl Machine {
                     0
                 } else {
                     let rule = glk::ImageRule { rule: a(6), width: a(4), height: a(5), maxwidth: a(7) };
-                    let cp = self.backend.char_pixels();
                     let link = self.current_hyperlink();
                     match self.glk.window_type(a(0)) {
                         // Graphics window: ONE-SHOT. Resolve against the
@@ -5338,7 +5336,7 @@ impl Machine {
                         // the result to the same seam `glk_image_draw_scaled`
                         // uses, so a host needs no change to support it.
                         Some(glk::WinType::Graphics) => {
-                            let win_w = self.glk.window_pixel_size(a(0), cp).map(|(w, _)| w).unwrap_or(0);
+                            let win_w = self.glk.window_pixel_size_in_screen(a(0)).map(|(w, _)| w).unwrap_or(0);
                             match self.backend.image_info(a(1)).and_then(|nat| rule.resolve_in_graphics(nat, win_w)) {
                                 Some(size) => {
                                     self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some(size), link)
@@ -5354,7 +5352,7 @@ impl Machine {
                         // size, so it can re-resolve on every relayout. `val1`
                         // is the imagealign; `val2` is unused and must be zero.
                         Some(glk::WinType::TextBuffer) => {
-                            let win_w = self.glk.window_size(a(0)).map(|(w, _)| w * cp.0).unwrap_or(0);
+                            let win_w = self.glk.window_rect_px(a(0)).map(|(w, _)| w).unwrap_or(0);
                             self.backend.buffer_draw_image_ext(a(0), a(1), a(2), rule, win_w, link) as u32
                         }
                         // Grid/pair/blank/absent windows do not display images.
@@ -5627,9 +5625,8 @@ impl Machine {
 
     /// Recompute the window layout from the backend's screen size and notify it.
     fn relayout_glk(&mut self) {
-        let (w, h) = self.backend.screen_size();
-        let cp = self.backend.char_pixels();
-        let layout = self.glk.relayout(w, h, cp, self.backend.borderless());
+        let screen = self.backend.screen();
+        let layout = self.glk.relayout_screen(&screen, self.backend.borderless());
         self.backend.window_layout(&layout);
         let tree = self.glk.window_tree();
         self.backend.window_tree(tree);
@@ -6487,6 +6484,16 @@ impl Machine {
     /// buffer. (SQ-0337)
     pub fn line_request_window(&self) -> Option<u32> {
         self.glk.first_line_request().map(|(w, _)| w)
+    }
+
+    /// Whether `key` is a registered line-input terminator for `win`
+    /// (`glk_set_terminators_line_event`, Glk spec §11.2). Lets a host decide
+    /// BEFORE delivering a special key whether it will end a pending line read,
+    /// the same way it already can for the Z-machine's terminating-characters
+    /// table (SQ-1613). Thin wrapper over [`crate::glk::Model::is_line_terminator`],
+    /// which is `pub(crate)`-only on `Machine`.
+    pub fn is_line_terminator(&self, win: u32, key: u32) -> bool {
+        self.glk.is_line_terminator(win, key)
     }
 
     /// The resolved `GlkStyle::Input` colour for window `win` (for host input echo).
@@ -11331,6 +11338,32 @@ mod tests {
         m.supply_line_terminated("look", keycode::FUNC1 - 1); // Func2, not registered
         assert_eq!(step_to_event(&mut m), StepResult::Quit);
         assert_eq!(read_event(&m, 0x100).3, 0, "unregistered terminator -> val2 = 0");
+    }
+
+    /// [`Machine::is_line_terminator`] (SQ-1613): a host-facing bridge over
+    /// `Model::is_line_terminator`, exercised the same way as
+    /// `glk_line_terminator_delivered_in_val2`'s own registration but checked
+    /// BEFORE delivering anything, the way `app`'s Glulx `line_key_terminator`
+    /// needs to.
+    #[test]
+    fn is_line_terminator_reports_registered_vs_unregistered_keys() {
+        use asm::Op::{C16, C8, Zero};
+        use crate::glk::keycode;
+        // set_terminators_line_event(win=1, keycodes=@0x0190, count=1) with Func1,
+        // then request_line_event + select.
+        let mut body = glk_call(0x151, &[C8(1), C16(0x0190), C8(1)], Zero);
+        body.extend(glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero));
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x190, keycode::FUNC1).unwrap(); // the registered terminator key
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        assert_eq!(m.line_request_window(), Some(1), "premise: a line request is pending on window 1");
+        assert!(m.is_line_terminator(1, keycode::FUNC1), "Func1 was registered");
+        assert!(!m.is_line_terminator(1, keycode::FUNC1 - 1), "Func2 was not registered");
+        assert!(!m.is_line_terminator(1, keycode::ESCAPE), "Escape was not registered either");
+        assert!(!m.is_line_terminator(2, keycode::FUNC1), "no such window has any terminators registered");
     }
 
     #[test]

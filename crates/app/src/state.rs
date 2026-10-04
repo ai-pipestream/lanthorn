@@ -159,28 +159,24 @@ impl RoomDockView {
 
 // ── Side panel cycle (SQ-1237) ──────────────────────────────────────────────
 
-/// Which of the two mutually-exclusive panels the story pane's border control
-/// summons is open: the command panel, the inventory panel, or neither.
+/// Whether the command panel the story pane's border control summons is open.
 ///
-/// The two panels never show at once — opening one closes the other — so one
-/// value, not two independent booleans, describes the pair. `/cycle-panel`
-/// (and a click on the border control) walks [`SidePanel::next`]; the value is
-/// what the per-game sidecar persists (`styles::PerGameConfig::panel`), the
-/// same single mechanism the command band's on/off state already used before
-/// the inventory panel joined the cycle.
+/// SQ-1237 made this a three-way cycle with an inventory panel; SQ-1684 moved
+/// the inventory into the Journal (a tab, not a panel), so it is two again.
+/// `/cycle-panel` (and a click on the border control) walks [`SidePanel::next`];
+/// the value is what the per-game sidecar persists
+/// (`styles::PerGameConfig::panel`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidePanel {
     Command,
-    Inventory,
     None,
 }
 
 impl SidePanel {
-    /// The next state in the cycle: Command → Inventory → None → Command.
+    /// The next state in the cycle: Command → None → Command.
     pub fn next(self) -> SidePanel {
         match self {
-            SidePanel::Command => SidePanel::Inventory,
-            SidePanel::Inventory => SidePanel::None,
+            SidePanel::Command => SidePanel::None,
             SidePanel::None => SidePanel::Command,
         }
     }
@@ -189,7 +185,6 @@ impl SidePanel {
     pub fn key(self) -> &'static str {
         match self {
             SidePanel::Command => "command",
-            SidePanel::Inventory => "inventory",
             SidePanel::None => "none",
         }
     }
@@ -200,7 +195,6 @@ impl SidePanel {
     pub fn from_key(s: &str) -> Option<SidePanel> {
         match s {
             "command" => Some(SidePanel::Command),
-            "inventory" => Some(SidePanel::Inventory),
             "none" => Some(SidePanel::None),
             _ => Option::None,
         }
@@ -1530,6 +1524,24 @@ pub struct TidyFrame {
     pub manifest: Option<Vec<String>>,
 }
 
+impl TidyFrame {
+    /// This frame rendered as `layer`'s map, WITH the cross-layer ghosts the live map draws.
+    /// A frame is a `layer_subgraph`, which drops every connection leaving the layer, so
+    /// rendering it bare shows no ghost rooms (SQ-1697). The crossings are grafted on from
+    /// `live` first; a layer with none renders the frame directly, with no extra clone.
+    pub fn render_with_crossings(&self, live: &MapGraph, layer: LayerId) -> mapper::render::RenderMap {
+        let crosses = live.connections().iter().any(|c| {
+            (live.layer_of(c.origin) == layer) != (live.layer_of(c.dest) == layer)
+        });
+        if !crosses {
+            return mapper::render::render_layer(&self.graph, layer);
+        }
+        let mut g = self.graph.clone();
+        g.graft_crossings_from(live, layer);
+        mapper::render::render_layer(&g, layer)
+    }
+}
+
 /// Transient playback state for the tidy animation. While this is `Some`, the map
 /// pane renders the current frame's graph instead of the live one. Playback holds
 /// on the final frame; `Esc` clears it back to the live map.
@@ -1672,6 +1684,22 @@ pub struct SoundPulse {
 /// `to` over the tween. Driven by the run loop, which snaps to `to` and clears
 /// this once the tween is `done()`. The single animated-offset type, reused by
 /// the transcript and by `ListScroll`.
+/// Which rule armed a [`ScrollAnim`] (SQ-1597) — so a host driving its own copy
+/// of the ease (e.g. a raster host that draws the story pane itself) can run
+/// the SAME ease the library decided on, instead of re-deriving SQ-1595's own
+/// "when does a follow apply" rule (at bottom, clamped to `[more]`, cancelled
+/// by input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAnimKind {
+    /// An ordinary, reader-driven scroll — wheel, page/half-page keys, the
+    /// `[more]` pager's own advance/dismiss, selection-drag autoscroll, or a
+    /// `HintSession` scroll — timed off `config.animation.scroll_ms`.
+    Scroll,
+    /// New output arriving while the reader was already at the bottom
+    /// (SQ-1595) — timed off `config.animation.follow_ms` instead.
+    Follow,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScrollAnim {
     /// Displayed offset (rows) when the animation was armed.
@@ -1680,26 +1708,38 @@ pub struct ScrollAnim {
     pub to: usize,
     /// The timing curve.
     pub tween: crate::anim::Tween,
+    /// Which rule armed this animation (SQ-1597).
+    pub kind: ScrollAnimKind,
 }
 
 impl ScrollAnim {
     /// Arm an animation easing the displayed offset from `from` to `to` per the
     /// `[animation]` config. Returns `None` when animation is disabled or
     /// `scroll_ms == 0` (the caller should jump instantly and clear any anim) —
-    /// the byte-for-byte instant path.
+    /// the byte-for-byte instant path. Always tags [`ScrollAnimKind::Scroll`] —
+    /// every caller of `to` (the transcript's reader-driven scroll, `ListScroll`,
+    /// the hint panel) is an ordinary scroll, never a follow.
     pub fn to(from: usize, to: usize, cfg: &crate::config::AnimationConfig) -> Option<Self> {
-        Self::over(from, to, cfg.enabled, cfg.scroll_ms, cfg.easing)
+        Self::over(from, to, cfg.enabled, cfg.scroll_ms, cfg.easing, ScrollAnimKind::Scroll)
     }
 
-    /// Same as [`Self::to`], but with an explicit duration instead of always
-    /// reading `cfg.scroll_ms` — used by the transcript follow-ease (SQ-1595),
-    /// which times off `cfg.follow_ms` while still honoring the master switch
-    /// and the shared easing curve.
-    pub fn over(from: usize, to: usize, enabled: bool, ms: u64, easing: crate::anim::Easing) -> Option<Self> {
+    /// Same as [`Self::to`], but with an explicit duration and an explicit
+    /// [`ScrollAnimKind`] instead of always reading `cfg.scroll_ms` and tagging
+    /// `Scroll` — used by the transcript follow-ease (SQ-1595), which times off
+    /// `cfg.follow_ms` while still honoring the master switch and the shared
+    /// easing curve.
+    pub fn over(
+        from: usize,
+        to: usize,
+        enabled: bool,
+        ms: u64,
+        easing: crate::anim::Easing,
+        kind: ScrollAnimKind,
+    ) -> Option<Self> {
         if !enabled || ms == 0 {
             return None;
         }
-        Some(Self { from, to, tween: crate::anim::Tween::new(Duration::from_millis(ms), easing) })
+        Some(Self { from, to, tween: crate::anim::Tween::new(Duration::from_millis(ms), easing), kind })
     }
 
     /// The current displayed offset: `lerp(from, to, tween.progress())`.
@@ -1929,6 +1969,10 @@ impl PaletteState {
 pub enum Focus {
     Game,
     Map,
+    /// The Journal's Hints tab holds the keyboard: keys go to the hint session's
+    /// input row (SQ-1685). Only ever set while that tab is on screen with a
+    /// session running; use [`AppState::hints_have_keyboard`] to ask.
+    Hints,
 }
 
 // ── Text-entry prompt kinds ─────────────────────────────────────────────────
@@ -2320,13 +2364,8 @@ pub enum Layout {
 pub enum ResizeTarget {
     /// The story/map split ratio (`Layout::Split` only).
     StoryMap,
-    /// The inventory dock height.
-    InvDock,
     /// The command band's height (only while the band is open; SQ-0238).
     CommandBand,
-    /// The room dock's height, carved from the map pane's bottom (only while the
-    /// dock is open; SQ-0692).
-    RoomDock,
 }
 
 /// Where the event loop should go when the current story ends. `Exit` leaves
@@ -2364,12 +2403,6 @@ pub struct PaneSizes {
     pub split_ratio: u16,
     /// Command band height in rows, including its frame (default 8).
     pub band_height: u16,
-    /// Inventory dock height cap as % of screen height (default 33).
-    pub inv_dock_pct: u16,
-    /// Room dock height as % of screen height (default 33). Measured against the
-    /// FRAME, like `inv_dock_pct`, even though the dock is carved out of the map
-    /// pane — one unit for both docks, so `dock_pct_for_rows` inverts either.
-    pub room_dock_pct: u16,
 }
 
 /// Zoom levels for the map pane. `Boxes` is the closest/most-detailed view;
@@ -2480,7 +2513,8 @@ pub struct OverlayState {
     pub reset_clear_map: bool,
     /// When true, the "Delete saved progress" checkbox is checked in the reset
     /// dialog: on confirm, the game's auto persistent data (VFS cache + aux + auto
-    /// Save State) is deleted so the game re-initializes from scratch.
+    /// Save State) AND the player's quick-save slot are deleted (SQ-1665) so the
+    /// game re-initializes from scratch with nothing left to resume from.
     pub reset_delete_data: bool,
     /// When `Some`, the save-name modal is open (host Save State slot or in-game
     /// `@save`). Replaces the old bottom-bar `PromptKind::SaveAs` overlay so the
@@ -2541,6 +2575,13 @@ pub struct OverlayState {
     /// the same room — the menu and the panel underneath always agree on
     /// which room is meant.
     pub room_menu: Option<crate::room_menu::RoomMenu>,
+    /// The "Download documents from IFDB" chooser and its worker (SQ-1680). A
+    /// modal: it owns every key and click while open.
+    pub documents: Option<crate::documents_chooser::DocumentsSession>,
+    /// The Documents tab is asking whether to open a spoiler-flagged file
+    /// (SQ-1681): the entry's file name. A two-button confirm on the common dialog
+    /// chrome; Cancel is the default.
+    pub confirm_spoiler_document: Option<String>,
 }
 
 /// Where the last v6 frame put one thing on the terminal, for `/dump-windows`
@@ -2744,10 +2785,28 @@ pub struct AppState {
     /// needs the pre-turn total, which is only known at render time). (SQ-0404)
     pub last_transcript_total_rows: u16,
     /// Transcript length at the most recent game screen-clear (`erase_window`),
-    /// or `None`. When set and the view is at the bottom, the renderer pins the
-    /// post-clear lines to the top of the pane so a screen clear looks fresh
-    /// while older scrollback stays reachable above it. See `mark_screen_clear`.
+    /// or `None`. The comparison baseline [`apply_game_driven_result`](crate::host::turn::apply_game_driven_result)
+    /// reads to decide whether the NEXT clear looks like the same screen
+    /// redrawing (collapse, which truncates scrollback back to this anchor)
+    /// or a different one taking over (preserve, which keeps the scrollback
+    /// but still pins the render — see `mark_screen_clear`). Moves in
+    /// lockstep with [`Self::top_anchor`] on every clear, collapse or
+    /// preserve alike (SQ-1656 briefly made them diverge on a preserving
+    /// clear; SQ-1660 reverted that — stacking two unrelated screens in one
+    /// viewport with no visual sign a clear happened read as broken in
+    /// practice, not as the fix it was meant to be).
     pub clear_anchor: Option<usize>,
+    /// The anchor the renderer actually top-anchors the view against. Equal
+    /// to `clear_anchor` after every clear — typed-command or game-driven,
+    /// collapsing or preserving alike (see `beyondzork_title_repaint.rs`,
+    /// SQ-0748): a clear always pins the fresh content to the top of the
+    /// pane, instantly and with no scroll animation, with everything older
+    /// reachable by scrolling up rather than shown alongside the new screen
+    /// by default. Reset alongside `clear_anchor` at every restore/rewind
+    /// site that replaces the transcript wholesale (a stale index into a
+    /// replaced transcript is not merely unhelpful, it can coincide with
+    /// real content and mis-anchor it).
+    pub top_anchor: Option<usize>,
     /// Monotonic transcript-content generation, bumped by every mutation of the
     /// transcript vecs (append / insert / merge / in-place edit / wholesale
     /// reset). Distinguishes a same-length content replacement (rewind / restore)
@@ -2847,6 +2906,10 @@ pub struct AppState {
     /// modal, dialog, or full-screen overlay is open, plus the shared
     /// modal button-focus index. Grouped off `AppState` in SQ-0307.
     pub overlays: OverlayState,
+    /// This session's IFDB one-request-in-flight guard, handed to the documents
+    /// chooser's worker (SQ-1682). Per state, never process-wide: a host serving
+    /// several players gives each its own.
+    pub ifdb_gate: crate::ifdb_search::IfdbGate,
     /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
     /// its box interior (Boxes zoom only). Palette-only since SQ-0446 (reached
     /// through the `/` command palette) — `Ctrl+A` is a readline caret shortcut
@@ -2948,6 +3011,9 @@ pub struct AppState {
     pub room_dock_view: RoomDockView,
     /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
     pub drag: Option<DragState>,
+    /// When a cross-layer ghost click last jumped layers (SQ-1692). The recentre moves the room
+    /// from under the cursor, so a click right after it is swallowed (see `end_map_click`).
+    pub last_ghost_jump: Option<std::time::Instant>,
     /// A left-press over the drawn v6 image that the game may want (SQ-1378).
     /// `Some` between that Down and whatever ends the gesture — a drag (which
     /// makes it a text selection instead), the release (which delivers it), or
@@ -3138,6 +3204,24 @@ pub struct AppState {
     /// resolved `colors` (garglk sits between the global theme and the user's
     /// per-game `<game_dir>/style.toml`). `None` when no sidecar was found.
     pub garglk_overlay: Option<crate::garglk_ini::GarglkOverlay>,
+
+    /// The story's Windows Glk `<stem>.cfg` (SQ-1703), discovered beside the
+    /// story at boot: design size, borders, mask Pict, fonts. `None` when no
+    /// `.cfg` was found. The one place every host reads the design from.
+    pub glk_design: Option<crate::glk_cfg::GlkDesign>,
+    /// SQ-1703 P3: the Glulx story is in stretch design mode (see
+    /// `host::screen::apply_glk_design`) — the window tree in the screen model
+    /// is already in terminal cells, graphics windows are stretched to exactly
+    /// their cell rect (aspect not honoured) and no text margin is carved out
+    /// of a text window. Set by `apply_glk_design`; `false` in cell mode.
+    pub glk_stretch: bool,
+    /// SQ-1707: the fit mode in force while `glk_stretch` is on (stretch, or
+    /// aspect with a centred letterboxed frame). Resolved per-game over global
+    /// by `host::screen::apply_glk_design`; the border icon reads it.
+    pub glk_fit: crate::glk_cfg::GlkFitMode,
+    /// The story's window-shape mask (`WindowMask`, SQ-1703 P4) while stretch
+    /// mode is on and the Pict loaded; cells it covers under 50% are hidden.
+    pub glk_mask: Option<std::sync::Arc<crate::glk_cfg::GlkMask>>,
 
     /// The global `honor_game_colours` default (from config.toml/CLI, before any
     /// garglk.ini or per-game override), captured at boot. `reload_style` recomputes
@@ -3486,16 +3570,35 @@ pub struct AppState {
     /// title/hint lookup. Empty until set.
     pub ifid: String,
 
+    /// Which physical copy of this story's release this session was booted
+    /// from — the file (and disk-image entry/machine, if any), set once at
+    /// startup alongside `ifid` (SQ-1633). Informational only, for display
+    /// (e.g. "Continue on the Amiga version"): `storage::game_dir`'s
+    /// IFID-keyed grouping of every copy of one release into a single shared
+    /// save folder, and which slot a boot resumes from, never read this.
+    pub source: crate::archive::SaveSource,
+
     /// The per-game storage directory (`<data_base>/<story-key>.save/`) holding
     /// this story's saves and sidecars, including the per-game `style.toml` and
     /// `config.toml` overrides. Set once at startup; empty until then (no
     /// per-game reads/writes happen against an empty path).
     pub game_dir: std::path::PathBuf,
 
+    /// Where this player's data lives — the documents folders among it — set
+    /// once at startup (SQ-1680). `None` until then, and in a host that has no
+    /// library, where there is nothing for `download-documents` to save into.
+    pub data_roots: Option<crate::data_roots::DataRoots>,
+
     // ── Inventory panel state ─────────────────────────────────────────────────
 
-    /// When true, the inventory strip is shown above the input line.
-    pub show_inventory: bool,
+    /// Which tab the Journal shows (SQ-1684). The Journal itself is on screen
+    /// whenever `layout` is `Split`; this is which of its tabs is up.
+    pub journal_tab: crate::journal::JournalTab,
+    /// The Journal's Documents tab: the game's documents folder and its viewer (SQ-1681).
+    pub documents_tab: crate::documents_tab::DocumentsTab,
+    /// The Journal's Hints tab: whether its session has started, why not, and the
+    /// in-flight hint download (SQ-1685). The session itself is `overlays.hints`.
+    pub hints_tab: crate::hints_tab::HintsTab,
     /// Locked player object number once detected by the heuristic. None until
     /// the player moves between two rooms and exactly one object follows.
     pub player_obj: Option<u16>,
@@ -3508,6 +3611,21 @@ pub struct AppState {
     /// by `render::inventory_dock::refresh_inventory_click_words` (SQ-1244).
     /// Empty whenever the panel is neither shown nor sliding.
     pub inventory_click_words: Vec<String>,
+    /// An active `filter-items` query (SQ-1630), or `None` to show every
+    /// tracked item. Applied by `render::inventory_dock::build_inventory_dock_rows`
+    /// to both the "Carrying" and "Elsewhere" sections independently.
+    pub inv_dock_filter: Option<String>,
+    /// The inventory dock's own [`crate::list_scroll::ListScroll`] (SQ-1630) —
+    /// the dock's counterpart to [`Self::room_dock_info_scroll`]. One scroll,
+    /// not two, since the dock has a single body (unlike the room dock's two
+    /// tabs); `selected`/keyboard nav are never driven (the dock has no
+    /// keyboard focus), only [`crate::list_scroll::ListScroll::scroll_by`],
+    /// from the wheel.
+    pub inv_dock_scroll: crate::list_scroll::ListScroll,
+    /// The dock's viewport height (rows) as of the last render, so a wheel
+    /// action between frames has something to clamp `scroll_by` against —
+    /// the dock's own analogue of [`Self::room_dock_body_viewport`].
+    pub inv_dock_body_viewport: u16,
     /// The player's previous room (global 0 value from the previous turn).
     pub prev_location: Option<mapper::graph::RoomId>,
     /// Objects whose parent was prev_location at the end of the previous turn.
@@ -3609,6 +3727,70 @@ pub struct AppState {
     /// the same nothing. Set once at launch (`startup.rs`) and never revised
     /// afterward — see `loop_tick::poll_picker_requery`, the only reader.
     pub game_picker_query_answered: bool,
+    /// The host's own stated Glk cell pixel size, carried from
+    /// `TerminalFacts::glk_cell_px` (SQ-1598) — `None` when the host left the
+    /// `game_picker`/8×16 cascade to decide. Not itself read for anything past
+    /// boot; kept so an `@restart` (`host::reset`) re-derives the SAME Glulx
+    /// `char_px` the launch used rather than silently reverting to the
+    /// picker/8×16 fallback, mirroring why `game_picker` above is carried the
+    /// same way.
+    ///
+    /// Fractional (SQ-1603): a host's real text cell is not always a whole
+    /// device pixel (e.g. 10.2×22.95 at a 17px font), and rounding it to an
+    /// integer HERE — before it ever reaches a graphics window — would force
+    /// every window's canvas to share one pre-rounded ratio, drifting further
+    /// from the host's true cell the more windows of different sizes a game
+    /// opens. The fractional value is carried as-is all the way to
+    /// [`crate::glk_backend::AppGlk::canvas_size`], which multiplies and
+    /// rounds PER WINDOW; only `AppGlk`'s `GlkBackend::char_pixels` impl (the
+    /// boundary a game's own bytecode can observe, e.g. `glk_window_get_size`)
+    /// rounds once, since gvm's own layout model is integer pixels.
+    pub glk_cell_px: Option<(f64, f64)>,
+    /// The host's own stated floor on the story pane, carried from
+    /// `TerminalFacts::min_story_screen` (SQ-1596) — `None` when the host left
+    /// no floor in force. Kept so an `@restart` (`host::reset`) re-applies the
+    /// SAME floor the launch used rather than silently reverting to the real
+    /// terminal size, which for a story below its own minimum (Bureaucracy's
+    /// 40x19) means hitting `[Screen too small.]` again on a restart the host
+    /// already worked around once (SQ-1602). Mirrors `glk_cell_px` just above.
+    ///
+    /// Also read at every LIVE resize (SQ-1606): `host::screen::set_story_pane`
+    /// consults this before either engine call, via
+    /// `host::screen::min_story_pane_for_floor`'s pane-space search, so a
+    /// resize honors the same floor with no extra work from the host beyond
+    /// setting this once at launch.
+    pub min_story_screen: Option<(u16, u16)>,
+    /// A host opt-in (SQ-1623), unrelated to anything `TerminalFacts` carries at
+    /// boot — set directly on an already-built `AppState`, not derived from a
+    /// boot-time probe. `false` (every constructor's default, including
+    /// `AppState::default()`) reproduces today's SQ-1620 behaviour exactly: when
+    /// a v6 story-slot `Grid` is wider, in its own native columns, than the
+    /// Hybrid ring's viewport, [`crate::render::screen::hybrid_chrome_layout`]
+    /// and [`crate::render::screen::hybrid_story_slot_grid`] both answer `None`
+    /// — no ring, no grid placement — exactly as they did before this field
+    /// existed, and the TERMINAL's own render path
+    /// (`crate::render::screen::render_story_pane_frame`) is unconditionally
+    /// unaffected either way, because it never reads this field and always
+    /// falls back to the raster composite for that case (a real terminal
+    /// cannot draw one window's text at a smaller per-glyph size than the rest
+    /// of the screen).
+    ///
+    /// Set this `true` when the host draws its OWN text (a browser or native
+    /// UI, never a terminal) and can shrink that one grid's glyphs to fit —
+    /// unlike a terminal, such a host is not committed to one glyph size for
+    /// the whole frame. With it `true`, `hybrid_chrome_layout` and
+    /// `hybrid_story_slot_grid` answer `Some` for this case instead of `None`,
+    /// on the understanding that the CALLER will do the shrinking:
+    /// `hybrid_story_slot_grid`'s [`crate::render::screen::V6HybridStorySlotGrid::grid_cols`]/
+    /// [`crate::render::screen::V6HybridStorySlotGrid::grid_rows`] carry the
+    /// grid's true native size for the host to compare against its own
+    /// `viewport.width`/`viewport.height` and derive a shrink ratio from.
+    ///
+    /// A host taking this opt-in must also remap clicks itself — see
+    /// `V6HybridStorySlotGrid`'s own doc for why lanthorn's built-in
+    /// `V6ClickMap::map_click` (an assumed fixed native-8px-per-column grid)
+    /// does not apply once the host is drawing this grid's glyphs smaller.
+    pub host_shrinks_story_grid_text: bool,
     /// Bytes and frame flushes the ratatui backend has written to the terminal,
     /// for `/dump-terminal` (SQ-0994). `None` in every headless harness, which
     /// builds no terminal at all — and the report says "unavailable" rather than
@@ -3647,14 +3829,8 @@ pub struct AppState {
     /// outlives the turn it describes.
     pub game_ended: bool,
 
-    /// Slide-in inventory dock (bottom). Session-only; starts closed.
-    pub inv_dock: crate::anim::PanelSlide,
     /// Slide-in command band (bottom). Session-only; starts closed.
     pub band_dock: crate::anim::PanelSlide,
-    /// Slide-in room dock, at the bottom of the MAP pane (SQ-0692).
-    /// Session-only; starts closed. Deliberately NOT an overlay: the map above
-    /// it stays fully interactive and the story prompt keeps the keyboard.
-    pub room_dock: crate::anim::PanelSlide,
 
     /// The room dock's two bodies scroll independently (SQ-1280), each sharing
     /// [`crate::list_scroll::ListScroll`] with every other scrollable list in the
@@ -3754,6 +3930,10 @@ impl Default for AppState {
             transcript_images: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             garglk_overlay: None,
+            glk_design: None,
+            glk_stretch: false,
+            glk_fit: crate::glk_cfg::GlkFitMode::Stretch,
+            glk_mask: None,
             honor_game_colours_base: true,
             v6_pixel_lock_base: false,
             guidance_base: false,
@@ -3768,6 +3948,7 @@ impl Default for AppState {
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,
             clear_anchor: None,
+            top_anchor: None,
             transcript_gen: 0,
             transcript_edits: 0,
             transcript_tail_insert: std::cell::Cell::new(None),
@@ -3783,6 +3964,7 @@ impl Default for AppState {
             input: crate::text_field::TextField::default(),
             notifications: crate::notify::Notifications::default(),
             overlays: OverlayState::default(),
+            ifdb_gate: Default::default(),
             show_alignment: false,
             show_portal_labels: false,
             tidy_anim: None,
@@ -3808,6 +3990,7 @@ impl Default for AppState {
             viewed_layer: None,
             room_dock_view: RoomDockView::Info,
             drag: None,
+            last_ghost_jump: None,
             pending_v6_click: None,
             selection: None,
             selection_edge: 0,
@@ -3842,8 +4025,6 @@ impl Default for AppState {
             pane_sizes: PaneSizes {
                 split_ratio: 50,
                 band_height: crate::render::command_band::DEFAULT_BAND_ROWS,
-                inv_dock_pct: 33,
-                room_dock_pct: 33,
             },
             pending_config_write: false,
             resize_mode: false,
@@ -3875,11 +4056,18 @@ impl Default for AppState {
             title: String::new(),
             pane_title: String::new(),
             ifid: String::new(),
+            source: crate::archive::SaveSource::default(),
             game_dir: std::path::PathBuf::new(),
-            show_inventory: false,
+            data_roots: None,
+            journal_tab: crate::journal::JournalTab::default(),
+            documents_tab: crate::documents_tab::DocumentsTab::default(),
+            hints_tab: crate::hints_tab::HintsTab::default(),
             player_obj: None,
             inventory_fallback: Vec::new(),
             inventory_click_words: Vec::new(),
+            inv_dock_filter: None,
+            inv_dock_scroll: crate::list_scroll::ListScroll::new(),
+            inv_dock_body_viewport: 0,
             prev_location: None,
             prev_objects_here: std::collections::BTreeSet::new(),
             pending_resume: None,
@@ -3897,6 +4085,9 @@ impl Default for AppState {
             picture_pace_next: None,
             game_picker: None,
             game_picker_query_answered: false,
+            glk_cell_px: None,
+            min_story_screen: None,
+            host_shrinks_story_grid_text: false,
             term_traffic: None,
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             query_sweep: crate::query_sweep::QuerySweep::default(),
@@ -3904,9 +4095,7 @@ impl Default for AppState {
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
             game_ended: false,
-            inv_dock: crate::anim::PanelSlide::closed(),
             band_dock: crate::anim::PanelSlide::closed(),
-            room_dock: crate::anim::PanelSlide::closed(),
             room_dock_info_scroll: crate::list_scroll::ListScroll::new(),
             room_dock_diag_scroll: crate::list_scroll::ListScroll::new(),
             room_dock_scroll_room: None,
@@ -3935,9 +4124,7 @@ impl AppState {
             || self.overlays.command_band.as_ref().is_some_and(|b| b.has_active_animation())
             || self.overlays.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
             || self.overlays.hints.as_ref().is_some_and(|h| h.has_active_animation())
-            || self.inv_dock.active()
             || self.band_dock.active()
-            || self.room_dock.active()
             || self.notifications.needs_tick()
     }
 
@@ -3974,18 +4161,76 @@ impl AppState {
     pub fn current_side_panel(&self) -> SidePanel {
         if self.band_dock.open {
             SidePanel::Command
-        } else if self.show_inventory {
-            SidePanel::Inventory
         } else {
             SidePanel::None
         }
     }
 
-    /// True while the room dock is on screen — open, or still sliding out
-    /// (SQ-0692). The layout reserves rows for it in both cases, so a close
-    /// animates instead of snapping.
-    pub fn room_dock_visible(&self) -> bool {
-        self.room_dock.open || self.room_dock.active()
+    /// True while the Journal's Room tab is on screen (SQ-0692, SQ-1684).
+    pub fn room_tab_visible(&self) -> bool {
+        self.journal_tab == crate::journal::JournalTab::Room && self.layout == Layout::Split
+    }
+
+    /// True while the Journal's Inventory tab is on screen (SQ-1684). Gates the
+    /// per-frame inventory work the way the dock's visibility used to.
+    pub fn inventory_tab_visible(&self) -> bool {
+        self.journal_tab == crate::journal::JournalTab::Inventory && self.layout == Layout::Split
+    }
+
+    /// True while the Journal's Documents tab is on screen (SQ-1681).
+    pub fn documents_tab_visible(&self) -> bool {
+        self.journal_tab == crate::journal::JournalTab::Documents && self.layout == Layout::Split
+    }
+
+    /// True while the Journal's Hints tab is on screen (SQ-1685). The inspector
+    /// takes the Journal's slot while it is open, so it hides the tab too.
+    pub fn hints_tab_visible(&self) -> bool {
+        self.journal_tab == crate::journal::JournalTab::Hints
+            && self.layout == Layout::Split
+            && self.debug.is_none()
+    }
+
+    /// True when the hint session is what typed keys reach (SQ-1685): focus is on
+    /// it AND it is actually on screen to show that. Everything that routes a key,
+    /// draws a caret or dims an input row asks this, never `focus` alone — so the
+    /// keyboard can never be in a window the player cannot see (SQ-0599's rule).
+    pub fn hints_have_keyboard(&self) -> bool {
+        self.focus == Focus::Hints && self.hints_tab_visible() && self.hints_tab_interactive()
+    }
+
+    /// Whether the Hints tab has something to focus: a running session, or the
+    /// chooser's rows (SQ-1690).
+    pub fn hints_tab_interactive(&self) -> bool {
+        self.overlays.hints.is_some() || matches!(self.hints_tab.phase, crate::hints_tab::Phase::Choose(_))
+    }
+
+    /// Show `tab` in the Journal, revealing the Journal first if the layout had
+    /// hidden it (SQ-1684). Selecting a tab the Journal is already on is a no-op
+    /// apart from that reveal.
+    pub fn set_journal_tab(&mut self, tab: crate::journal::JournalTab) {
+        use crate::journal::JournalTab;
+        if self.journal_tab == JournalTab::Documents && tab != JournalTab::Documents {
+            // The image view's upload is freed while its tab is away; the
+            // re-draw re-places it when the tab is back.
+            crate::documents_tab::release_image(self);
+        }
+        if tab != JournalTab::Hints && self.focus == Focus::Hints {
+            // Leaving the tab gives the keyboard back to the story.
+            self.focus = Focus::Game;
+        }
+        if tab == JournalTab::Hints
+            && self.journal_tab != JournalTab::Hints
+            && self.hints_tab.phase == crate::hints_tab::Phase::Ended
+        {
+            self.hints_tab.phase = crate::hints_tab::Phase::NotStarted; // a quit session starts afresh
+        }
+        if tab == JournalTab::Documents && self.journal_tab != JournalTab::Documents {
+            self.documents_tab.mark_dirty(); // read the folder when the tab is shown
+        }
+        self.journal_tab = tab;
+        if self.layout == Layout::TranscriptFull {
+            self.layout = Layout::Split;
+        }
     }
 
     /// True when the room dock is PINNED — which is exactly "a room is
@@ -3996,20 +4241,17 @@ impl AppState {
         self.selected_room.is_some()
     }
 
-    /// Open (or re-point) the room dock in `view`, animating the slide.
+    /// Switch the Journal to the Room tab in `view`.
     pub fn open_room_dock(&mut self, view: RoomDockView) {
         self.room_dock_view = view;
-        if !self.room_dock.open {
-            self.room_dock.toggle_to(true, false);
-            self.room_dock.arm(&self.config.animation);
-        }
+        self.set_journal_tab(crate::journal::JournalTab::Room);
     }
 
-    /// Close the room dock, animating the slide. The view is remembered.
+    /// Leave the Room tab for the Map tab. A no-op on any other tab, so an Esc
+    /// aimed at the room panel never yanks you off the inventory.
     pub fn close_room_dock(&mut self) {
-        if self.room_dock.open {
-            self.room_dock.toggle_to(false, false);
-            self.room_dock.arm(&self.config.animation);
+        if self.journal_tab == crate::journal::JournalTab::Room {
+            self.journal_tab = crate::journal::JournalTab::Map;
         }
     }
 
@@ -4293,6 +4535,25 @@ impl AppState {
         self.sixel_scroll_motion_at = Some(Instant::now());
     }
 
+    /// Snap the transcript back to the bottom for the player's OWN command
+    /// submission — a deliberate "show me what happens now" signal, distinct
+    /// from passive output arriving while the reader is deliberately scrolled
+    /// into history ([`Self::arm_transcript_follow_ease`]'s own territory,
+    /// via `pager::apply_frame`'s `at_bottom` check, which this leaves
+    /// untouched). Called *before* the turn's output arrives, so that check
+    /// sees `transcript_scroll == 0` and takes its normal already-at-bottom
+    /// follow path for the new output, exactly as any other turn that starts
+    /// at the bottom does (SQ-1658).
+    ///
+    /// No-op when already at the bottom, so an ordinary submission that
+    /// never needed to move the view doesn't churn `scroll_anim` or flash the
+    /// scrollbar for nothing.
+    pub fn snap_scroll_for_own_submission(&mut self) {
+        if self.transcript_scroll != 0 {
+            self.scroll_transcript_to(0);
+        }
+    }
+
     /// Arm (or replace) the transcript's smooth-scroll animation for new output
     /// arriving while the reader was already at the bottom (SQ-1595), easing
     /// over `config.animation.follow_ms` rather than `scroll_ms`. Sets the
@@ -4306,7 +4567,14 @@ impl AppState {
     pub fn arm_transcript_follow_ease(&mut self, from: u16, target: u16) {
         self.transcript_scroll = target;
         let anim = &self.config.animation;
-        self.scroll_anim = ScrollAnim::over(from as usize, target as usize, anim.enabled, anim.follow_ms, anim.easing);
+        self.scroll_anim = ScrollAnim::over(
+            from as usize,
+            target as usize,
+            anim.enabled,
+            anim.follow_ms,
+            anim.easing,
+            ScrollAnimKind::Follow,
+        );
     }
 
     /// Snap the transcript's displayed scroll offset to its animation's target
@@ -4476,10 +4744,13 @@ impl AppState {
             || self.overlays.aux_prompt
             || self.overlays.quit_dialog
             || self.overlays.launch_dialog
-            || self.overlays.hints.is_some()
+            // NOT the hint session (SQ-1685): it lives in a Journal tab now, not
+            // over the story, so it neither hides the prompt nor swallows keys.
             || self.overlays.replay.is_some()
             || self.overlays.region_prompt.is_some()
             || self.overlays.room_menu.is_some()
+            || self.overlays.documents.is_some()
+            || self.overlays.confirm_spoiler_document.is_some()
             || self.resize_mode
     }
 
@@ -4632,6 +4903,7 @@ impl AppState {
         if self.overlays.text_entry.is_some() { v.push("text_entry"); }
         if self.overlays.confirm_delete_save.is_some() { v.push("confirm_delete_save"); }
         if self.overlays.confirm_overwrite_save.is_some() { v.push("confirm_overwrite_save"); }
+        if self.overlays.confirm_spoiler_document.is_some() { v.push("confirm_spoiler_document"); }
         if self.overlays.fetch_keep.is_some() { v.push("fetch_keep"); }
         if self.overlays.reset_dialog { v.push("reset_dialog"); }
         if self.overlays.game_over { v.push("game_over"); }
@@ -4641,7 +4913,6 @@ impl AppState {
         if self.overlays.aux_prompt { v.push("aux_prompt"); }
         if self.overlays.quit_dialog { v.push("quit_dialog"); }
         if self.overlays.launch_dialog { v.push("launch_dialog"); }
-        if self.overlays.hints.is_some() { v.push("hints"); }
         if self.overlays.replay.is_some() { v.push("replay"); }
         if self.resize_mode { v.push("resize_mode"); }
         v
@@ -4722,6 +4993,11 @@ impl AppState {
         if let Some(c) = self.map_render.borrow_mut().as_mut() {
             let current = graph.current();
             for r in &mut c.rm.rooms {
+                // A ghost shares its real room's id but is a placeholder: the render
+                // keeps it never-current and labelled "to Cellar" (SQ-1698).
+                if r.ghost.is_some() {
+                    continue;
+                }
                 r.is_current = Some(r.id) == current;
                 if let Some(room) = graph.room(r.id) {
                     // Compare before writing: labels rarely change, and this
@@ -4887,9 +5163,10 @@ impl AppState {
 
     /// Cycle keyboard focus one step forward (`forward = true`, Tab) or back
     /// (Shift-Tab). The stops are **per window**, not per sub-tab: the story
-    /// pane, then — when the debug inspector is open — each of its windows in
-    /// turn (story → debug 0 → 1 → 2 → story). With the inspector closed there
-    /// is nowhere else to go and Tab does nothing.
+    /// pane, then the hint session's input while the Journal's Hints tab is on
+    /// screen with a session running (SQ-1685), then — when the debug inspector
+    /// is open — each of its windows in turn (story → hints → debug 0 → 1 → 2 →
+    /// story). With neither there is nowhere else to go and Tab does nothing.
     ///
     /// The map pane is deliberately NOT a stop (SQ-0599). It used to be, and
     /// that made the same keystroke mean two different things depending on a
@@ -4898,25 +5175,30 @@ impl AppState {
     /// which. The map is now driven entirely modelessly: Shift+Arrow pans and
     /// the mouse does the rest, from wherever you are.
     pub fn cycle_focus(&mut self, forward: bool) {
-        // Focus stops after the story pane (position 0) — the inspector's
-        // windows, and nothing else.
+        // Stops after the story pane (position 0): the hint session's input while
+        // the Hints tab is on screen (SQ-1685), then the inspector's windows.
+        let hints = self.hints_tab_visible() && self.hints_tab_interactive();
         let extra = if self.debug.is_some() {
             crate::debug_panel::WINDOW_TABS.len() // one stop per debug window
         } else {
             0
         };
-        let total = extra + 1;
+        let hint_stops = usize::from(hints);
+        let total = hint_stops + extra + 1;
         let cur = match self.focus {
             Focus::Game => 0,
-            Focus::Map => 1 + self.debug.as_ref().map_or(0, |p| p.focus),
+            Focus::Hints => if hints { 1 } else { 0 },
+            Focus::Map => hint_stops + 1 + self.debug.as_ref().map_or(0, |p| p.focus),
         };
         let next = if forward { (cur + 1) % total } else { (cur + total - 1) % total };
         if next == 0 {
             self.focus = Focus::Game;
+        } else if hints && next == 1 {
+            self.focus = Focus::Hints;
         } else {
             self.focus = Focus::Map;
             if let Some(p) = &mut self.debug {
-                p.focus = next - 1;
+                p.focus = next - hint_stops - 1;
             }
         }
     }
@@ -4946,16 +5228,8 @@ impl AppState {
         if self.layout == Layout::Split {
             targets.push(ResizeTarget::StoryMap);
         }
-        if self.show_inventory {
-            targets.push(ResizeTarget::InvDock);
-        }
         if self.overlays.command_band.is_some() {
             targets.push(ResizeTarget::CommandBand);
-        }
-        // The room dock is carved out of the map pane, so it is only a target
-        // when the map is on screen AND the dock is open (SQ-0692).
-        if self.room_dock.open && self.layout == Layout::Split && self.debug.is_none() {
-            targets.push(ResizeTarget::RoomDock);
         }
         targets
     }
@@ -4984,8 +5258,6 @@ impl AppState {
     pub fn sync_pane_sizes_to_config(&mut self) {
         self.config.split_ratio = self.pane_sizes.split_ratio;
         self.config.command_band.height = self.pane_sizes.band_height;
-        self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
-        self.config.room_dock_pct = self.pane_sizes.room_dock_pct;
     }
 
     /// Reset all pane sizes to their config defaults and mirror into `config`.
@@ -4993,8 +5265,6 @@ impl AppState {
         self.pane_sizes = PaneSizes {
             split_ratio: crate::config::default_split_ratio(),
             band_height: crate::config::default_band_height(),
-            inv_dock_pct: crate::config::default_inv_dock_pct(),
-            room_dock_pct: crate::config::default_room_dock_pct(),
         };
         self.sync_pane_sizes_to_config();
     }
@@ -5143,10 +5413,19 @@ impl AppState {
     /// everything above the boundary stays reachable by scrolling up — a
     /// scrollback-preserving "clear" rather than a destructive wipe. Also snaps
     /// the view to the bottom so the cleared screen is what's shown.
+    ///
+    /// Also flags [`Pager::screen_cleared_this_turn`](crate::pager::Pager::
+    /// screen_cleared_this_turn) so the next `pager::apply_frame` — which the
+    /// caller arms for AFTER this runs — knows the `at_bottom` it's about to
+    /// observe (unconditionally true, from the snap above) came from a clear
+    /// rather than an organically-followed reader, and takes the instant-jump
+    /// path instead of arming a follow-ease (SQ-1607).
     pub fn mark_screen_clear(&mut self) {
         self.clear_anchor = Some(self.transcript.len());
+        self.top_anchor = self.clear_anchor;
         self.transcript_scroll = 0;
         self.scroll_anim = None;
+        self.pager.screen_cleared_this_turn = true;
     }
 
     /// Truncate the transcript — and every parallel sidecar vec — back to `len`,
@@ -6796,6 +7075,35 @@ mod tests {
         assert_eq!(s.transcript_gen, gen2, "a no-op truncate must not bump the generation");
     }
 
+    /// SQ-1660 (reverting SQ-1656): every `mark_screen_clear` call moves
+    /// `top_anchor` in lockstep with `clear_anchor`, with no preserve/collapse
+    /// split any more — `apply_game_driven_result` calls it unconditionally
+    /// now, whether or not the clear's content looked like the prior screen
+    /// redrawing. SQ-1656 briefly left `top_anchor` behind on a "different
+    /// screen taking over" clear so the new content fell back to ordinary
+    /// bottom-sticking scrollback; in practice that stacked unrelated screens
+    /// (e.g. Anchorhead's intro card and its quote splash) in one viewport
+    /// with no visual sign a clear had happened between them, so the user
+    /// asked for the pin back — instant, no scroll animation (`scroll_anim`
+    /// stays `None`, set directly below).
+    #[test]
+    fn mark_screen_clear_always_moves_top_anchor_in_lockstep() {
+        let mut s = AppState::default();
+        assert_eq!(s.clear_anchor, None, "premise: nothing has cleared yet");
+        assert_eq!(s.top_anchor, None, "premise: nothing has cleared yet");
+
+        s.mark_screen_clear();
+        assert_eq!(s.clear_anchor, Some(0));
+        assert_eq!(s.top_anchor, Some(0), "top_anchor moves with clear_anchor on every clear");
+        assert!(s.scroll_anim.is_none(), "a clear is instant — no scroll animation armed");
+
+        s.push_transcript("a different screen's content");
+        s.mark_screen_clear();
+        assert_eq!(s.clear_anchor, Some(1));
+        assert_eq!(s.top_anchor, Some(1), "still in lockstep on a second clear");
+        assert!(s.scroll_anim.is_none());
+    }
+
     #[test]
     fn reset_transcript_sidecars_clears_stale_head_entries() {
         // Reproduce the load/restore/reset bug: a Glulx game drew an inline image
@@ -7009,6 +7317,7 @@ mod tests {
                 std::time::Duration::from_millis(100),
                 crate::anim::Easing::EaseOut,
             ),
+            kind: ScrollAnimKind::Scroll,
         });
         assert!(s.has_active_animation(), "scroll anim counts as active");
         s.scroll_anim = None;
@@ -7044,9 +7353,9 @@ mod tests {
             scroll_ms: 100,
             ..Default::default()
         };
-        s.inv_dock.toggle_to(true, false);
-        s.inv_dock.arm(&cfg);
-        assert!(s.has_active_animation(), "arming inv_dock open counts as active");
+        s.band_dock.toggle_to(true, false);
+        s.band_dock.arm(&cfg);
+        assert!(s.has_active_animation(), "arming band_dock open counts as active");
     }
 
     #[test]
@@ -7060,6 +7369,75 @@ mod tests {
         assert_eq!(a.target(), 8, "to = new target");
     }
 
+    /// SQ-1658: the player's own command submission is an active signal — a
+    /// reader scrolled up into history who then types a command and hits
+    /// Return must end up heading back to the bottom, unlike passive output
+    /// arriving unprompted (SQ-1595, pinned separately by
+    /// `pager::apply_frame_arms_no_follow_ease_when_reader_scrolled_away`).
+    #[test]
+    fn snap_scroll_for_own_submission_heads_to_the_bottom_when_scrolled_up() {
+        let mut s = AppState::default();
+        s.transcript_scroll = 7;
+        s.snap_scroll_for_own_submission();
+        assert_eq!(s.transcript_scroll, 0, "logical target is the bottom");
+        let a = s.scroll_anim.as_ref().expect("a reader-driven scroll-to-bottom must be armed");
+        assert_eq!(a.from, 7, "eases from wherever the reader had scrolled to");
+        assert_eq!(a.target(), 0, "…down to the bottom");
+        assert_eq!(a.kind, ScrollAnimKind::Scroll, "this is a reader-style jump, not a content-arrival follow-ease");
+    }
+
+    /// Already at the bottom: submitting a command must not touch `scroll_anim`
+    /// or re-arm anything — there is nothing to snap, so this must be exactly
+    /// as inert as today's behavior for a submission from the bottom.
+    #[test]
+    fn snap_scroll_for_own_submission_is_a_noop_when_already_at_bottom() {
+        let mut s = AppState::default();
+        assert_eq!(s.transcript_scroll, 0, "premise: already at the bottom");
+        s.snap_scroll_for_own_submission();
+        assert_eq!(s.transcript_scroll, 0);
+        assert!(s.scroll_anim.is_none(), "no animation churned for a no-op snap");
+        assert!(s.scrollbar_shown_at.is_none(), "no scrollbar flash for a no-op snap");
+    }
+
+    /// `scroll_transcript_to` is the ordinary, reader-driven scroll path
+    /// (wheel, page keys, the pager's own advance/dismiss, drag-autoscroll —
+    /// see its own doc comment) — its `ScrollAnim` must always be tagged
+    /// `Scroll`, never `Follow`, and time off `scroll_ms` (SQ-1597).
+    #[test]
+    fn scroll_transcript_to_produces_scroll_kind_timed_off_scroll_ms() {
+        let mut s = AppState::default();
+        s.config.animation.scroll_ms = 250;
+        s.config.animation.follow_ms = 999_000; // if this leaked in, the duration below would betray it
+        s.scroll_transcript_to(8);
+        let a = s.scroll_anim.as_ref().expect("animation armed when enabled");
+        assert_eq!(a.kind, ScrollAnimKind::Scroll, "reader-driven scroll must tag Scroll, not Follow");
+        assert_eq!(
+            a.tween.duration(),
+            Duration::from_millis(250),
+            "must time off scroll_ms, not follow_ms"
+        );
+        assert_eq!(a.tween.easing(), s.config.animation.easing);
+    }
+
+    /// The transcript follow-ease (SQ-1595) must tag its `ScrollAnim` `Follow`
+    /// and time off `follow_ms`, so a host can tell it apart from an ordinary
+    /// scroll without re-deriving the "at bottom" rule itself (SQ-1597).
+    #[test]
+    fn arm_transcript_follow_ease_produces_follow_kind_timed_off_follow_ms() {
+        let mut s = AppState::default();
+        s.config.animation.scroll_ms = 999_000; // if this leaked in, the duration below would betray it
+        s.config.animation.follow_ms = 250;
+        s.arm_transcript_follow_ease(30, 12);
+        let a = s.scroll_anim.as_ref().expect("follow-ease armed");
+        assert_eq!(a.kind, ScrollAnimKind::Follow, "follow-ease must tag Follow, not Scroll");
+        assert_eq!(
+            a.tween.duration(),
+            Duration::from_millis(250),
+            "must time off follow_ms, not scroll_ms"
+        );
+        assert_eq!(a.tween.easing(), s.config.animation.easing);
+    }
+
     // ── Transcript follow-ease (SQ-1595) ─────────────────────────────────────
 
     /// `ScrollAnim::over` is what the follow-ease uses instead of `to` — same
@@ -7068,11 +7446,18 @@ mod tests {
     #[test]
     fn scroll_anim_over_honors_enabled_and_zero_duration() {
         use crate::anim::Easing;
-        assert!(ScrollAnim::over(0, 10, false, 200, Easing::EaseOut).is_none(), "disabled arms nothing");
-        assert!(ScrollAnim::over(0, 10, true, 0, Easing::EaseOut).is_none(), "0ms arms nothing");
-        let a = ScrollAnim::over(5, 10, true, 200, Easing::EaseOut).expect("armed");
+        assert!(
+            ScrollAnim::over(0, 10, false, 200, Easing::EaseOut, ScrollAnimKind::Follow).is_none(),
+            "disabled arms nothing"
+        );
+        assert!(
+            ScrollAnim::over(0, 10, true, 0, Easing::EaseOut, ScrollAnimKind::Follow).is_none(),
+            "0ms arms nothing"
+        );
+        let a = ScrollAnim::over(5, 10, true, 200, Easing::EaseOut, ScrollAnimKind::Follow).expect("armed");
         assert_eq!(a.from, 5);
         assert_eq!(a.target(), 10);
+        assert_eq!(a.kind, ScrollAnimKind::Follow, "caller-supplied kind is carried through");
     }
 
     /// `arm_transcript_follow_ease` sets the logical target immediately (same
@@ -7279,6 +7664,7 @@ mod tests {
             from: 0,
             to: 4,
             tween: crate::anim::Tween::new(std::time::Duration::ZERO, crate::anim::Easing::Linear),
+            kind: ScrollAnimKind::Scroll,
         });
         assert_eq!(s.effective_transcript_scroll(), 4, "done tween shows rounded target");
     }
@@ -7292,6 +7678,7 @@ mod tests {
                 std::time::Duration::from_millis(100),
                 crate::anim::Easing::Linear,
             ),
+            kind: ScrollAnimKind::Scroll,
         };
         // Right after construction progress is ~0, so current() is near `from`.
         let c = a.current();
@@ -7354,16 +7741,15 @@ mod tests {
         assert!(s.any_overlay_open(), "hotkey_dialog true => any_overlay_open true");
         s.overlays.hotkey_dialog = false;
 
-        // room dock — deliberately NOT an overlay (SQ-0692). It reserves rows out
-        // of the map pane instead of covering it, so the story prompt and caret
-        // must survive it; the room panel it replaced counted here and blanked
-        // both.
-        s.room_dock.toggle_to(true, true);
+        // Room tab — deliberately NOT an overlay (SQ-0692). It takes the Journal's
+        // body instead of covering anything, so the story prompt and caret must
+        // survive it; the room panel it replaced counted here and blanked both.
+        s.set_journal_tab(crate::journal::JournalTab::Room);
         s.selected_room = Some(1);
         assert!(!s.any_overlay_open(), "the room panel is not an overlay, pinned or not");
         s.selected_room = None;
         assert!(!s.any_overlay_open());
-        s.room_dock.toggle_to(false, true);
+        s.journal_tab = crate::journal::JournalTab::Map;
 
         // tidy_anim
         s.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
@@ -7659,6 +8045,72 @@ mod tests {
         assert_eq!(s.frame_layer(&live, None), cellar, "viewed layer still wins on the live graph");
         s.set_viewed_layer(None);
         assert_eq!(s.frame_layer(&live, None), MAIN_LAYER, "falls back to the current room's layer");
+    }
+
+    /// A two-layer graph: Hall -> Study on main, Study --Down--> Sump on "Under" (one way only,
+    /// so the ghost on main reads "to Sump"). The player stands in the Sump.
+    fn ghost_fixture() -> mapper::graph::MapGraph {
+        use mapper::direction::Direction;
+        let mut g = mapper::graph::MapGraph::new();
+        for (id, n) in [(1, "Hall"), (2, "Study"), (4, "Sump")] {
+            g.upsert_room(id, n.into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(4, (0, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let under = g.new_layer(Some(0), "Under".into());
+        g.set_room_layer(4, under);
+        g.add_edge(2, Direction::Down, 4);
+        g.set_current(4);
+        g
+    }
+
+    /// SQ-1698: a ghost shares its real room's id, so the per-frame live refresh in
+    /// `cached_map_render` used to overwrite "to Sump" with "Sump" (and light the ghost as the
+    /// current room, which the renderer deliberately never does).
+    #[test]
+    fn live_refresh_leaves_a_cross_layer_ghost_label_and_current_flag_alone() {
+        let g = ghost_fixture();
+        let mut s = AppState::default();
+        let _ = s.cached_map_render(mapper::layer::MAIN_LAYER, &g);
+        while s.map_render_in_flight() {
+            s.poll_render_job(&g);
+            std::thread::yield_now();
+        }
+        // Refresh runs on every call, whatever the generation.
+        let rm = s.cached_map_render(mapper::layer::MAIN_LAYER, &g);
+        let ghost = rm.rooms.iter().find(|r| r.id == 4).expect("main draws a ghost for the Sump");
+        assert!(ghost.ghost.is_some(), "fixture: room 4 is a ghost here");
+        assert_eq!(ghost.label, "to Sump", "the refresh must not rename a ghost");
+        assert!(!ghost.is_current, "the player is never standing in a placeholder");
+    }
+
+    /// SQ-1697: an animation frame is a `layer_subgraph` with no crossings; rendering it through
+    /// `render_with_crossings` must draw the same ghosts the live map does.
+    #[test]
+    fn tidy_frames_render_the_cross_layer_ghosts_the_live_map_has() {
+        let g = ghost_fixture();
+        let layer = mapper::layer::MAIN_LAYER;
+        let live = mapper::render::render_layer(&g, layer);
+        assert!(live.rooms.iter().any(|r| r.id == 4 && r.ghost.is_some()), "fixture: live has the ghost");
+        let frames = crate::tidy::run_tidy_pipeline(&mut g.clone(), layer, None);
+        assert!(frames.len() > 2, "a real animation");
+        let mid = &frames[frames.len() / 2];
+        let bare = mapper::render::render_layer(&mid.graph, layer);
+        assert!(!bare.rooms.iter().any(|r| r.ghost.is_some()), "the bare frame draws no ghost (the bug)");
+        let last = frames.last().unwrap();
+        for f in [mid, last] {
+            let rm = f.render_with_crossings(&g, layer);
+            let ghost = rm.rooms.iter().find(|r| r.id == 4).expect("frame draws the ghost");
+            assert!(ghost.ghost.is_some());
+            assert_eq!(ghost.label, "to Sump");
+        }
+        // The final frame is the tidied layout: its ghost sits where the live one's does.
+        let lg = live.rooms.iter().find(|r| r.id == 4).unwrap();
+        let fg = last.render_with_crossings(&g, layer);
+        assert_eq!(fg.rooms.iter().find(|r| r.id == 4).unwrap().cell, lg.cell);
     }
 
     /// Replay outranks an animation, matching the map pane's own order.
@@ -8180,33 +8632,16 @@ mod tests {
         assert!(!s.any_overlay_open(), "quit_dialog false => any_overlay_open false");
     }
 
+    /// The hint session lives in a Journal tab (SQ-1685), so it is NOT an overlay: a
+    /// running session must neither hide the story prompt nor swallow input.
     #[test]
-    fn hints_panel_counts_as_overlay() {
+    fn a_running_hint_session_is_not_an_overlay() {
         let mut s = AppState::default();
         assert!(!s.any_overlay_open());
-
-        // Build a minimal HintSession using the minizork fixture (same approach as
-        // the reset test in input.rs). If the fixture is absent we skip.
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
-        if !fixture_path.exists() {
-            return; // fixture absent — skip
-        }
-        let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes, true, false, None).expect("GameSession::new");
-        s.overlays.hints = Some(HintSession {
-            source: HintSource::Zcode(session),
-            transcript: vec![],
-            scroll: 0,
-            clear_anchor: None,
-            scroll_anim: None,
-            input: String::new(),
-            label: "Hints: Test".to_string(),
-            builtin_hint: false,
-        });
-        assert!(s.any_overlay_open(), "hints open => any_overlay_open true");
-        s.overlays.hints = None;
-        assert!(!s.any_overlay_open(), "hints closed => any_overlay_open false");
+        let Some(hs) = make_hint_session() else { return }; // fixture absent — skip
+        s.overlays.hints = Some(hs);
+        assert!(!s.any_overlay_open(), "the hint session is a tab, not a modal");
+        assert!(!s.any_modal_overlay_open());
     }
 
     #[test]
@@ -8242,6 +8677,24 @@ mod tests {
         // A max of 0 (nothing to scroll) pins scroll at 0.
         hs.scroll_by(4, 0, &anim);
         assert_eq!(hs.scroll, 0);
+    }
+
+    /// `HintSession::scroll_by` has no follow concept at all — SQ-1595 never
+    /// touched hint-panel scrolling — so its `ScrollAnim` must always tag
+    /// `Scroll`, protecting against a future accidental follow-tagging of
+    /// hint scrolling (SQ-1597).
+    #[test]
+    fn hint_session_scroll_by_produces_scroll_kind_not_follow() {
+        let Some(mut hs) = make_hint_session() else { return }; // fixture absent — skip
+        let anim = crate::config::AnimationConfig {
+            enabled: true,
+            easing: crate::anim::Easing::EaseOut,
+            scroll_ms: 100,
+            ..Default::default()
+        };
+        hs.scroll_by(3, 5, &anim);
+        let a = hs.scroll_anim.as_ref().expect("animation armed when enabled");
+        assert_eq!(a.kind, ScrollAnimKind::Scroll, "hint-panel scroll must never tag Follow");
     }
 
     /// Build a minimal `HintSession` off the minizork fixture (its transcript
@@ -8289,6 +8742,8 @@ mod tests {
             transcript_elems: vec![],
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         }
     }
 

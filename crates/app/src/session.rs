@@ -691,6 +691,79 @@ pub struct TurnResult {
     /// (tests, history replay, a host restore) leaves this `None`, which is
     /// the correct "behave exactly as today" answer for all of them.
     pub declared_exit: Option<crate::engine::DeclaredExit>,
+    /// The text this turn printed for the CURRENT room's description — on arrival or an explicit
+    /// LOOK (SQ-1625) — for the mapper to persist against `location`, or `None` when this turn
+    /// captured no such text. Each engine decides for itself what it can state with confidence
+    /// rather than guess at:
+    ///
+    /// - Scott always fills this from `scott::Vm::room_description_text`, a direct query of live
+    ///   VM state — no transcript heuristic involved.
+    /// - Glulx fills this only when `AppGlk`'s room-heading detector confirmed a heading is
+    ///   joined to prose (see `AppGlk::take_room_description`), the same evidence
+    ///   `take_room_heading` already requires.
+    /// - The Z-machine fills this only for the common single-scrolling-window convention (see
+    ///   `zvm_capture_room_description`); a v6 game's extra windows leave it `None` permanently —
+    ///   a deliberate gap, not a bug.
+    pub description: Option<String>,
+    /// Every item this turn's two OBSERVED vantage points actually showed the player (SQ-1627):
+    /// the room they are standing in and their own carried inventory. Never anything broader —
+    /// this app is a personal-exploration companion, so an item the player has not stood in a room
+    /// with or held must never appear here, however completely an engine's debug tooling could
+    /// otherwise enumerate it. See `apply_item_observations`'s own doc for how the mapper turns
+    /// this into [`mapper::graph::ItemRecord`]s, and each engine's own turn-builder (`session.rs`'s
+    /// Z-machine walk, `glulx_session.rs`'s `Introspect` calls, `scott_session.rs`'s item-index
+    /// helpers) for what it can state with confidence. Empty when this turn observed nothing new
+    /// (no location resolved yet, no player object locked on, or the room and inventory both hold
+    /// nothing) — never a failure, just nothing to report.
+    pub items: Vec<ItemObservation>,
+}
+
+/// One item [`TurnResult::items`] observed this turn (SQ-1627): its engine-defined identity (the
+/// same space [`grammar_model::ObjectWords::id`] and [`mapper::graph::ItemKey`] already share —
+/// object number/address/item index), its display name as of this turn, where it was seen, and
+/// the parser's own accepted words for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemObservation {
+    pub key: mapper::graph::ItemKey,
+    /// What to SHOW the player for this item — [`item_tracker_display_name`] (SQ-1648), never the
+    /// possibly-empty raw printed name alone (SQ-1631 Fix 1): an Inform 7 object routinely has no
+    /// hardware short name at all, only the parse words that function falls back to, and a filter
+    /// on the bare printed name drops every one of them (SQ-1042, the exact bug this mirrors — see
+    /// [`crate::render::room_info::list_room_objects_excluding`]'s own doc). Deliberately NOT
+    /// [`grammar_model::ObjectWords::display_name`] directly — see [`item_tracker_display_name`]'s
+    /// own doc for why a tracker needs a single word, not that method's whole joined list.
+    pub name: String,
+    pub location: ObservedItemLocation,
+    /// The SAME [`grammar_model::ObjectWords`] this observation's `name`/`key` were read off of
+    /// (SQ-1631 Fix 2) — carried forward so a later structural match
+    /// ([`take_noun_matches`]) can resolve a typed noun through
+    /// [`grammar_model::ObjectWords::refers_to`], the parser's own matching rule, instead of a
+    /// fresh hand-rolled overlap against `name` alone (which can both miss a real referent whose
+    /// printed name doesn't literally contain the typed word, and wrongly match an unrelated
+    /// object whose printed name happens to share a word).
+    pub words: grammar_model::ObjectWords,
+}
+
+/// Where [`ItemObservation`] saw an item this turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedItemLocation {
+    /// The current room's own top level — a bare child of the room object, never reached by
+    /// recursing into a container. The only kind an item needs to have been seen as, LAST, to be
+    /// eligible for `Vanished` on a later absence (see `mapper::graph::ItemLocation`'s own doc).
+    RoomDirect,
+    /// The current room, reached only by recursing into an open container. Never vanish-eligible.
+    ///
+    /// `container` (SQ-1632 Fix 1) names the immediate container — the brown sack, the table —
+    /// when the engine can state one. The Z-machine can (`GameSession::zvm_item_observations`,
+    /// via `zvm::world::WorldModel::real_container_in_room`) and also uses it as the SQ-1632
+    /// Fix 5 filter: an object that walk finds NO real containment relationship for at all
+    /// (local-global/shared scenery — a window, a house, visible from many rooms but a genuine
+    /// child of none of them) is dropped before it ever becomes an `ItemObservation`, rather than
+    /// surfacing here as nested-with-no-container. Glulx and Scott have no containment model to
+    /// ask at all (see each session's own item-observation doc) and always report `None`.
+    RoomNested { container: Option<mapper::graph::ItemKey> },
+    /// The player's own inventory.
+    Carried,
 }
 
 impl TurnResult {
@@ -829,6 +902,14 @@ pub struct GameSession {
     /// [`zvm::location::PlayerCandidates`]'s doc comment for the measured
     /// cost this cache removes.
     player_candidates: std::cell::OnceCell<PlayerCandidates>,
+    /// The host's own locked player-object id (SQ-1631 Fix 3), pushed in via
+    /// [`Engine::set_player_hint`] — [`crate::state::AppState::player_obj`] mirrored back into the
+    /// session so [`Self::zvm_item_observations`] can prefer it over the raw
+    /// [`zvm::location::find_player_object_with`] heuristic, the same fallback order
+    /// [`crate::vocab::scope_split`]'s own `player_hint` parameter already uses. `None` until the
+    /// host has locked one (every story before its first movement-tracked turn, and any story whose
+    /// player object is named and so never needs the heuristic's help at all).
+    player_hint: Option<u16>,
     /// The [`parse_names`](Self::parse_names) walk folded into the one set the
     /// bulk callers query — "does ANY object answer to this word" (SQ-1176).
     ///
@@ -1001,6 +1082,24 @@ pub struct GameSession {
     ///
     /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
     pub boot_screen_cols: u16,
+    /// What [`boot_screen_cols`](Self::boot_screen_cols) was immediately BEFORE
+    /// the most recent [`note_restored_screen_cols`](Self::note_restored_screen_cols)
+    /// raised it, so the raise can be given back once it is safe to (SQ-1604).
+    ///
+    /// The SQ-0681 floor is a blunt protection: it holds the restored save's
+    /// width for the rest of the session even for a story that recomputes its
+    /// status-line layout from header byte $21 every turn, for which the floor
+    /// protects nothing after the first repaint. Set only when a restore is
+    /// about to WIDEN the floor (`cols > boot_screen_cols`, so a restore into a
+    /// narrower save that never raises anything leaves this `None` and never
+    /// reverts a floor the story's own boot established). `drain_turn` clears it
+    /// back to `None` the first time [`GameSession::take_header_width_read`]
+    /// reports the game itself read `$21` — proof the running story does not
+    /// need the floor's protection any more, because it lays its own fields out
+    /// fresh every turn rather than baking them in once at boot the way Zork 1
+    /// r52 does (SQ-0681's specimen, which never reads `$21` again and must keep
+    /// this pin forever).
+    pre_restore_screen_cols: Option<u16>,
     /// The pre-loaded text (ZMSD §15 `read`, v5+ — TerpEtude option 12,
     /// Beyond Zork's "AGAIN") `zvm` reported for the CURRENTLY pending line
     /// read, empty when nothing is pre-loaded (the overwhelmingly common
@@ -1218,6 +1317,7 @@ impl GameSession {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -1232,6 +1332,7 @@ impl GameSession {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols,
+            pre_restore_screen_cols: None,
             line_preload,
             line_preload_seeded: false,
         })
@@ -1837,7 +1938,23 @@ impl GameSession {
         if version < 4 || version == 6 {
             return;
         }
+        // Remember what the floor was about to give up, but only when this
+        // restore actually raises it — a restore into a narrower save is a
+        // no-op `max` with nothing to revert (SQ-1604).
+        if cols > self.boot_screen_cols {
+            self.pre_restore_screen_cols = Some(self.boot_screen_cols);
+        }
         self.boot_screen_cols = self.boot_screen_cols.max(cols);
+    }
+
+    /// Drain whether the game's own `loadb`/`loadw` read header byte `$21`
+    /// (screen width) since the last drain (SQ-1604) — `zvm`'s own
+    /// [`zvm::cpu::exec::Machine::take_header_width_read`], set inside those
+    /// two opcode arms alone (never the interpreter's own internal reads),
+    /// forwarded from here so `drain_turn` reads it the same way it reads
+    /// every other per-turn VM signal.
+    pub fn take_header_width_read(&mut self) -> bool {
+        self.machine.take_header_width_read()
     }
 
     /// Build the `TurnResult` from a `RunStop` and drain the VM's per-turn
@@ -1956,6 +2073,21 @@ impl GameSession {
                 .and_then(|v6| v6.windows.get(idx))
                 .is_some_and(|w| w.stream_origin == Some(pen))
         });
+        // SQ-1604: a real turn just ran, so this is the earliest safe point to
+        // ask whether the story read header byte $21 itself — restoring never
+        // executes Z-code, so `take_header_width_read` cannot fire from the
+        // restore that raised `pre_restore_screen_cols` in the first place,
+        // only from a turn processed after it. Once it fires, give the
+        // SQ-0681 floor back what a restore borrowed from it: a story that
+        // reads $21 every turn (Lost Pig) lays its fields out fresh from
+        // whatever's declared next turn, so the wide pin has nothing left to
+        // protect; one that never reads it again (Zork 1 r52) never satisfies
+        // this and keeps the pin forever, exactly as SQ-0681 intended.
+        if self.take_header_width_read() {
+            if let Some(cols) = self.pre_restore_screen_cols.take() {
+                self.boot_screen_cols = cols;
+            }
+        }
         let win0_base = self.v6_win0_chars_seen;
         let (erase_lower, cleared_at) = self.take_screen_clear();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
@@ -1965,6 +2097,14 @@ impl GameSession {
         let detected = detect_location_with(&self.machine, self.player_candidates());
         let location = detected.as_ref().map(location_to_snapshot);
         let location_method = detected.as_ref().map(Location::method);
+        // SQ-1625 Tier 3: see `zvm_room_description`'s own doc for what counts as evidence
+        // (the room's name reprinted as its own line).
+        let description = zvm_room_description(&transcript, location.as_ref());
+        // SQ-1627: unlike `description`, this is a direct object-tree query, not a transcript
+        // heuristic — it works the same for a v6 game as any other version (see the helper's own
+        // doc for why no gate is needed here). SQ-1648: this turn's own `transcript` is passed
+        // through as the tier-1 evidence `item_tracker_display_name` prefers.
+        let items = self.zvm_item_observations(location.as_ref(), &transcript);
 
         let diagnostics = self.machine.take_diagnostics();
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
@@ -2083,6 +2223,8 @@ impl GameSession {
             transcript_elems,
             prose_retired,
             declared_exit: None,
+            description,
+            items,
         }
     }
 
@@ -4460,6 +4602,323 @@ pub fn apply_turn(
     }
 }
 
+/// Record this turn's freshly-observed room description into the map, if the engine captured
+/// one (SQ-1625, `TurnResult::description`) — kept alongside [`apply_turn`] rather than folded
+/// into it because `apply_turn` is engine-neutral and pure, and has no turn counter of its own:
+/// only the host knows the current turn number (`AppState::turns`), so it is handed in here as a
+/// plain argument instead of the map trying to derive it from anything on the graph.
+///
+/// A no-op when `result.description` is `None` (nothing captured this turn), and separately a
+/// no-op when `result.location`'s room isn't in the graph yet ([`mapper::graph::MapGraph::set_description`]
+/// mirrors every other room setter here) — the pre-corroboration NameOnly gate in [`apply_turn`]
+/// can leave the map's first room unminted even though `result.location` is `Some`.
+pub fn apply_room_description(mapper: &mut Mapper, turn: u32, result: &TurnResult) {
+    if let (Some(snap), Some(desc)) = (&result.location, &result.description) {
+        mapper.graph.set_description(snap.number, Some(desc.clone()), turn);
+    }
+}
+
+/// Update the map's item registry from this turn's OBSERVED item state (SQ-1627,
+/// [`TurnResult::items`]) — the item-keyed sibling of [`apply_room_description`], for the
+/// identical reason: the mapper needs the current turn number, and only the host
+/// (`AppState::turns`) has it.
+///
+/// Order matters and is fixed here rather than left to each engine: every observation this turn
+/// named (carried, in the current room, or nested in it) is applied FIRST, and only THEN is the
+/// current room swept for items absent from all of it — see
+/// [`mapper::graph::MapGraph::note_items_absent`]'s own doc for why an item touched anywhere this
+/// turn is never swept, so only a real, unexplained absence in the room the player is standing in
+/// ever reads as [`mapper::graph::ItemLocation::Vanished`].
+///
+/// Carried observations are applied even when `result.location` is `None` — the player's own
+/// hands are not the room's business — but the room sweep itself is skipped then, for the same
+/// reason [`apply_room_description`] has nothing to attach a description to without a room.
+pub fn apply_item_observations(mapper: &mut Mapper, turn: u32, result: &TurnResult) {
+    let mut touched = std::collections::BTreeSet::new();
+    for obs in &result.items {
+        touched.insert(obs.key);
+        match obs.location {
+            ObservedItemLocation::Carried => {
+                // Only actually consulted for an item the graph has never seen before (see
+                // `note_item_carried`'s own doc) — the room the player happens to be standing in
+                // when first noticed holding it, or 0 (no real room ever has this id) when even
+                // that is unresolved, e.g. the very first turn of a session that starts mid-story.
+                let origin = result.location.as_ref().map_or(0, |l| l.number);
+                mapper.graph.note_item_carried(obs.key, obs.name.clone(), origin, turn);
+            }
+            ObservedItemLocation::RoomDirect => {
+                if let Some(loc) = &result.location {
+                    mapper.graph.note_item_seen(obs.key, obs.name.clone(), loc.number, true, None, turn);
+                }
+            }
+            ObservedItemLocation::RoomNested { container } => {
+                if let Some(loc) = &result.location {
+                    mapper.graph.note_item_seen(obs.key, obs.name.clone(), loc.number, false, container, turn);
+                }
+            }
+        }
+    }
+    if let Some(loc) = &result.location {
+        mapper.graph.note_items_absent(loc.number, turn, &touched);
+    }
+}
+
+/// The noun phrase after a take-style verb, or `None` when `cmd` isn't shaped like a take attempt
+/// at all (SQ-1627, Facet 3; SQ-1631 Fix 4) — structural parsing of the command's own words, the
+/// same shape [`mapper::direction::is_travel_to_command`] uses for a travel command, never a
+/// guess at what the STORY's reply means.
+///
+/// Recognises the bare `<verb> <noun>` form plus the two common separable-particle spellings,
+/// "pick up <noun>" and "pick <noun> up" — "pick" alone names a different verb entirely ("pick
+/// lock"), so it is handled here structurally rather than resolved through `vocab` below.
+///
+/// The bare form's VERB is resolved through the story's own grammar, not a hand-copied word list:
+/// `vocab` is [`crate::vocab::StoryVocabulary::verb_named`]'s reader, and `first` must resolve to
+/// the SAME [`grammar_model::Verb`] the story's own "take" spelling reaches — exactly how
+/// [`crate::render::command_band::story_verbs`] resolves each core verb's own row, so Zork I's
+/// take-verb (dictionary-first spelling `carry`) is recognised because "take" and "carry" resolve
+/// to one `Verb`, not because "carry" happens to appear in a literal list. `None` for `vocab` (no
+/// readable dictionary at all, e.g. a menu-driven v6 game) or a story whose dictionary does not
+/// even recognise "take" disables the bare form entirely — a known, accepted gap rather than a
+/// guess, matching this feature's own "record nothing rather than guess" discipline.
+///
+/// Tokenises with [`crate::vocab::words_of`], not a bare `split_whitespace`, so trailing
+/// punctuation a player actually types ("take lamp.") does not stay glued to the noun.
+///
+/// `pub(crate)` since SQ-1655: [`crate::glulx_session::GlulxSession::learn_player_from_pickups`]
+/// reuses it (the NOUN it returns is not the point there — only whether the command is
+/// take-shaped at all) to gate its player-lock fallback's evidence to commands that look like a
+/// deliberate pickup, which is what keeps an ordinary `climb on garbage can` or `enter window`
+/// from being read as one (see that method's own doc for the false-positive it was fixing).
+pub(crate) fn take_command_target(cmd: &str, vocab: Option<&crate::vocab::StoryVocabulary>) -> Option<String> {
+    let tokens = crate::vocab::words_of(cmd);
+    let (first, rest) = tokens.split_first()?;
+    if first == "pick" {
+        let (last, body) = rest.split_last()?;
+        if rest.first().map(String::as_str) == Some("up") && rest.len() > 1 {
+            return Some(rest[1..].join(" "));
+        }
+        if last == "up" && !body.is_empty() {
+            return Some(body.join(" "));
+        }
+        return None;
+    }
+    let vocab = vocab?;
+    let take_verb = vocab.verb_named("take")?;
+    if !rest.is_empty() && std::ptr::eq(vocab.verb_named(first)?, take_verb) {
+        return Some(rest.join(" "));
+    }
+    None
+}
+
+/// Is `cmd` an `inventory`-shaped command, per the story's OWN grammar (SQ-1657)?
+///
+/// The same resolve-through-the-story's-own-verb-table technique
+/// [`take_command_target`] uses for "take", not a hand-copied spelling list: `first` must
+/// resolve (through [`crate::vocab::StoryVocabulary::verb_named`], truncation included) to
+/// the SAME [`grammar_model::Verb`] the story's own "inventory" spelling reaches, so a
+/// story whose dictionary files "i" as a synonym of that verb — the ordinary Inform case —
+/// is recognised because "i" and "inventory" resolve to one `Verb`, never because "i"
+/// happens to appear in a literal list. No noun is required or inspected: inventory never
+/// takes one in any dialect this codebase has seen, so a trailing word (if a player types
+/// one) changes nothing about whether the command is inventory-shaped.
+///
+/// `None` for `vocab` (no readable dictionary at all) disables this outright, the same
+/// known, accepted gap [`take_command_target`]'s own doc describes for its bare form.
+///
+/// Used by [`crate::glulx_session::GlulxSession::learn_player_from_inventory`] to gate its
+/// player-lock fallback's SECOND evidence source — the `inventory` command's own prose — to
+/// commands that actually asked for an inventory listing, the same discipline
+/// [`take_command_target`] already provides `learn_player_from_pickups`.
+pub(crate) fn inventory_command(cmd: &str, vocab: Option<&crate::vocab::StoryVocabulary>) -> bool {
+    let tokens = crate::vocab::words_of(cmd);
+    let Some(first) = tokens.first() else { return false };
+    let Some(vocab) = vocab else { return false };
+    let Some(inv_verb) = vocab.verb_named("inventory") else { return false };
+    vocab.verb_named(first).is_some_and(|v| std::ptr::eq(v, inv_verb))
+}
+
+/// What to call an item with no printed name, for [`ItemObservation::name`] ONLY (SQ-1648) —
+/// never a substitute for [`grammar_model::ObjectWords::display_name`] itself, whose other callers
+/// (autocomplete, room-object listings) genuinely need every parser-acceptable word and must keep
+/// calling that method directly.
+///
+/// `display_name` joins every known word into one run-on string when there is no printed name
+/// ("proprieto men old portly shopkeepe man himself person" for Anchorhead's shopkeeper) — correct
+/// for a caller composing what the parser will accept, unusable as one item's name in a tracker
+/// panel, and it also leaves a Glulx dictionary word exactly as truncated (`proprieto`,
+/// `shopkeepe`), never spelled out.
+///
+/// A non-empty printed name is not automatically trusted either (SQ-1649): [`printed_name_is_a_non_name`]
+/// catches the cases where a story's own `printed_name` is real per-object text but never something
+/// a player could act on — a bare pronoun a ZIL game gave a background object's header name, or an
+/// Inform compiler-synthesised internal identifier standing in for one — and routes those through
+/// the same word-list tiers below as an absent printed name.
+///
+/// Two tiers, in the object's own word order (`ow.words`), which the tier-2 fallback below also
+/// prefers first — solving both problems at once with the same underlying idea `vocab.rs`'s
+/// `spell_out`/`spell` (SQ-1553) already established: **what the player has just read wins**.
+///
+/// 1. The first of `ow.words` this turn's own printed text (`prose`) has actually used — matched
+///    with the same truncation comparison [`grammar_model::ObjectWords::refers_to`] applies (a
+///    prose word doesn't need to spell a stored dictionary key exactly, it needs to TRUNCATE to
+///    it), so the untruncated prose spelling is returned and the truncation problem is solved for
+///    free: `prose` containing "proprietor" resolves Anchorhead's shopkeeper to `"proprietor"`,
+///    not the stored `"proprieto"`. **But only when that stored word is uniquely this item's**
+///    (SQ-1652) — see `other_items` below; a candidate match shared with another item this same
+///    turn is skipped in favour of a later, unambiguous word in `ow.words`, or tier 2 if none
+///    exists.
+/// 2. No word in `prose` unambiguously matches (rare — an item observed some other way before any
+///    prose named it, or every prose match it has is shared with another item): the FIRST of
+///    `ow.words`, unspelled. Checked against Anchorhead's own registry before picking
+///    first-over-last: every sampled case had its real name as the FIRST stored word (Inform 7
+///    compiles an object's own declared name before any `understand ... as name` synonyms) —
+///    `"universit rooftops things …"` is Miskatonic University, `"trenchcoa player's holdalls …"`
+///    is the trenchcoat, never the last word in either list.
+///
+/// `other_items`: every OTHER item being resolved the same turn (never `ow` itself), passed by
+/// every call site because every item this turn shares one turn-wide `prose` string (SQ-1652).
+/// Without this, tier 1 attributes a shared vocabulary word to EVERY item that owns it, not just
+/// the one `prose` is actually about: examining Anchorhead's green umbrella prints only the
+/// umbrella's own description, but the unrelated `clothes` item's own vocabulary also has
+/// "green" (a separately-described "green ensemble" elsewhere in the game), so unguarded tier 1
+/// renamed `clothes` to `"green"` too, from prose that never mentioned it. A stored word present
+/// in more than one item's own `ow.words` this turn is therefore untrustworthy evidence for
+/// EITHER of them and is skipped, even though it did appear in the shared prose.
+pub(crate) fn item_tracker_display_name(
+    ow: &grammar_model::ObjectWords,
+    prose: &str,
+    other_items: &[&grammar_model::ObjectWords],
+) -> Option<String> {
+    if !ow.printed_name.is_empty() && !printed_name_is_a_non_name(&ow.printed_name) {
+        return Some(ow.printed_name.clone());
+    }
+    if ow.words.is_empty() {
+        return None;
+    }
+    let prose_words: Vec<String> = prose
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .map(|w| w.to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    for stored in &ow.words {
+        // Mirrors `ObjectWords::truncate` (private to `grammar_model`): a stored word is already
+        // cut to `truncated_at` characters, so a prose word names it when IT truncates to match.
+        let found = prose_words.iter().find(|w| match ow.truncated_at {
+            Some(n) => w.chars().take(n).collect::<String>() == *stored,
+            None => *w == stored,
+        });
+        let Some(w) = found else { continue };
+        // SQ-1652: this stored word is trustworthy evidence for `ow` only if no other item
+        // resolved this same turn also claims it — otherwise `prose` may be describing one of
+        // those other items instead, and there is no way to tell from a shared string alone.
+        let shared = other_items.iter().any(|other| other.words.iter().any(|s| s == stored));
+        if !shared {
+            return Some(w.clone());
+        }
+    }
+    Some(ow.words[0].clone())
+}
+
+/// A handful of bare pronouns/generics some ZIL games give a background-scenery object's own
+/// header short name (SQ-1649): HHGG's rose bed, wash-basin, wallpaper/chair and birdcage
+/// objects each store the literal two-character string `"it"` as their §12.4 header name —
+/// verified not a decoding bug (neighbouring objects at adjacent addresses decode sane text, and
+/// the same objects' own `words` carry their real vocabulary: `"basin"`/`"washba"`/`"sink"` for
+/// the wash-basin). A player is never shown a bare pronoun for anything else in this codebase, so
+/// there is nothing to lose by treating it the same as an absent printed name here.
+const BARE_NON_NAMES: [&str; 5] = ["it", "them", "this", "that", "thing"];
+
+/// True when `name` is not text an author wrote for a player to read at all, so
+/// [`item_tracker_display_name`] should treat it exactly like an absent printed name and fall
+/// through to the word-list tiers below (SQ-1649):
+///
+/// - A [`BARE_NON_NAMES`] pronoun (case-insensitive), or
+/// - An Inform 6/7 compiler-synthesised internal identifier standing in for the header name:
+///   parenthesised (Lost Pig's `"(missingOutside)"`, `"(whistle)"`, `"(missingBR)"`, `"(key)"` —
+///   [`zvm::objects::printed_name`]'s own doc names the identical convention for Inform's
+///   `MazeRoom` clones, `"(Alike_Maze_1)"`), or an identifier-cloning suffix (Lost Pig's six
+///   auto-multiplied brick instances, `"Brick_1"` .. `"Brick_6"`). Verified not a decoding bug on
+///   Lost Pig specifically: `zvm::objects::printed_name` — the SQ-1372-aware reader that checks
+///   the Inform `short_name` PROPERTY before falling back to the header — returns the exact same
+///   text, so these objects genuinely provide no player-facing name at all; the header identifier
+///   is all there is.
+fn printed_name_is_a_non_name(name: &str) -> bool {
+    if BARE_NON_NAMES.contains(&name.to_lowercase().as_str()) {
+        return true;
+    }
+    if name.starts_with('(') && name.ends_with(')') {
+        return true;
+    }
+    match name.rsplit_once('_') {
+        Some((head, tail)) => {
+            !tail.is_empty()
+                && tail.bytes().all(|b| b.is_ascii_digit())
+                && head.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// Whether `noun` (already lower-cased by [`take_command_target`]) names `words` (SQ-1631 Fix 2):
+/// every word of `noun`, minus an article, must be one [`grammar_model::ObjectWords::refers_to`]
+/// — the parser's own matching rule for this exact object — answers `true` for. Replaces a
+/// former hand-rolled overlap against the printed name alone, which could both MISS a real
+/// referent (a Zork I object whose printed name is "brass lantern" never contains "lamp", though
+/// the parser accepts it) and wrongly MATCH an unrelated one (two objects whose printed names
+/// happen to share a word) — see [`ItemObservation::words`]'s own doc.
+fn take_noun_matches(noun: &str, words: &grammar_model::ObjectWords) -> bool {
+    let mut any = false;
+    for word in noun.split_whitespace().filter(|w| !grammar_model::ARTICLES.contains(w)) {
+        any = true;
+        if !words.refers_to(word) {
+            return false;
+        }
+    }
+    any
+}
+
+/// Confirm an item fixed-in-place (SQ-1627, Facet 3): `cmd` is a take-style command
+/// ([`take_command_target`]), its noun matches EXACTLY ONE of `items` ([`take_noun_matches`]
+/// against each observation's own parser words, [`ItemObservation::words`]), and that one item's
+/// location this turn is anything OTHER than [`ObservedItemLocation::Carried`] — i.e. the take
+/// visibly did not put it in the player's hands. Returns that item's key, or `None` when the
+/// command isn't a take attempt at all, the noun matches zero or more-than-one candidate
+/// (ambiguous — never guess which), or the take actually worked.
+///
+/// Deliberately narrow, structural-only, and allowed to under-report (see this function's own
+/// callers for the "no death/quit this turn" guard, which lives at the call site because only it
+/// knows the turn's `quit` flag and has the transcript for [`turn_reports_death`]) — never a
+/// phrase match against the game's own refusal text, mirroring the discipline
+/// [`crate::probe::Refusals`] documents for the same reason (every family of game phrases a
+/// refusal differently, so a fixed list would misclassify as often as it helps).
+///
+/// **A caveat this narrowness does not close** (SQ-1631 audit): ANY refusal to a well-formed,
+/// unambiguous take is read as "fixed in place", including one that has nothing to do with the
+/// object being immovable — "you're not strong enough", "your hands are full", "it's too dark to
+/// see", an NPC holding it and refusing to hand it over. No existing structural signal separates a
+/// REFUSAL REASON from a plain "the take did not put it in inventory" fact, and per this feature's
+/// own discipline a phrase-list guess at the reason is exactly what [`crate::probe::Refusals`]'s
+/// doc already argues against — so this stays a known, undistinguished false-positive risk rather
+/// than a guessed fix. `mapper::graph::ItemRecord::fixed_in_place`'s own doc carries the same
+/// caveat for a reader who never looks at this function.
+pub fn classify_take_attempt(
+    cmd: &str,
+    items: &[ItemObservation],
+    vocab: Option<&crate::vocab::StoryVocabulary>,
+) -> Option<mapper::graph::ItemKey> {
+    let noun = take_command_target(cmd, vocab)?;
+    let mut candidates = items.iter().filter(|o| take_noun_matches(&noun, &o.words));
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        return None; // ambiguous — more than one thing here answers to this noun
+    }
+    if first.location == ObservedItemLocation::Carried {
+        return None; // the take worked; nothing to flag
+    }
+    Some(first.key)
+}
+
 /// What the mapper still owes a death the game has not finished with (SQ-0671, SQ-0673).
 ///
 /// A death is not one turn's event. Adventure kills you, offers to reincarnate you, insists
@@ -4670,6 +5129,15 @@ pub fn rollback_tried_on_death(
     }
 }
 
+/// Whether `line`, trimmed, names the room `name` (already trimmed by the caller) — trimmed,
+/// case-insensitive equality (SQ-1631 Fix 6). The one recognition rule
+/// [`reprinted_room_heading`] and [`transcript_room_description`] both run against every
+/// transcript line to find a reprinted heading, factored out so the two structural facts they
+/// build on it — a direction is "tried", a description exists — can never drift apart.
+fn line_is_room_heading(line: &str, name: &str) -> bool {
+    line.trim().eq_ignore_ascii_case(name)
+}
+
 /// True when this turn's output REPRINTED `name` as a room heading: a line of its own holding
 /// exactly the room's name (SQ-0666).
 ///
@@ -4683,7 +5151,58 @@ pub fn rollback_tried_on_death(
 /// existed. A `look` reprints the heading too, but names no direction, so it mints nothing.
 fn reprinted_room_heading(transcript: &str, name: &str) -> bool {
     let name = name.trim();
-    !name.is_empty() && transcript.lines().any(|l| l.trim().eq_ignore_ascii_case(name))
+    !name.is_empty() && transcript.lines().any(|l| line_is_room_heading(l, name))
+}
+
+/// SQ-1625 Tier 3: this turn's room description for a Z-machine story.
+///
+/// Version 6 is not special-cased (SQ-1675): only the game's transcript (or input) window
+/// streams into `transcript`; other prose windows are diverted and status text never streams
+/// (`zvm::cpu::exec`, SQ-0585/0746). A v6 game that prints no room heading into that window
+/// (Journey, or Arthur's bare LOOK) simply captures nothing.
+///
+/// Defers to [`transcript_room_description`], which is its own evidence for "arrival or
+/// an explicit LOOK" — the same reprinted-heading fact [`reprinted_room_heading`] uses for the
+/// mapper edge, just kept as the matched line's INDEX rather than a bool so the text after it can
+/// be sliced out.
+fn zvm_room_description(transcript: &str, location: Option<&LocationInfo>) -> Option<String> {
+    transcript_room_description(transcript, &location?.name)
+}
+
+/// The transcript text that followed the LAST line exactly matching `name` (trimmed,
+/// case-insensitive) — the room heading a successful move, a self-loop, or a bare LOOK reprints
+/// (see [`reprinted_room_heading`]) — trimmed of leading/trailing blank lines. `None` when no such
+/// line exists: a refusal ("You can't go that way.") or an unrelated turn reprints no heading at
+/// all, and there is deliberately no fallback to "whatever WAS printed" for one, matching this
+/// engine's bounded scope (SQ-1625) rather than guessing at what counts as description prose.
+///
+/// Deliberately excludes the heading line itself — matching the Glk detector's own heading/prose
+/// split (`AppGlk::take_room_description`), so a `Room`'s bare name (`Room.name`/`Room.label`) and
+/// its `description` state two different facts on every engine that captures one.
+///
+/// This is also why no separate command-echo or parser-error filter is needed here, unlike the
+/// Glk detector: the slice starts strictly AFTER the heading line, so a self-echoed command
+/// (rare on this engine — most Z-machine games never print their own input back) sits entirely
+/// BEFORE it and falls away on its own. A trailing parser aside chained onto the SAME turn as a
+/// real arrival is a known, accepted gap — rare enough in practice that a dedicated detector for
+/// it is not worth carrying.
+///
+/// SQ-1629: a v1–3 game that prints its own inline read prompt as part of the SAME turn's
+/// transcript (e.g. minizork's `\n>` after every room description) would otherwise leave that
+/// prompt hanging off the end of the captured description. [`strip_read_prompt`] is the SAME
+/// prompt-recognition the Glk tier's own `take_room_description` already runs for this exact
+/// purpose (`glk_backend.rs`) — reused here rather than duplicated, so the two engines can never
+/// grow different ideas of what a trailing prompt looks like.
+fn transcript_room_description(transcript: &str, name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = transcript.lines().collect();
+    let idx = lines.iter().rposition(|l| line_is_room_heading(l, name))?;
+    let rest = lines[idx + 1..].join("\n");
+    let trimmed = strip_read_prompt(&rest).trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// True when this turn's output carries a death/end banner — the interpreter
@@ -5269,12 +5788,6 @@ impl GameSession {
         }
     }
 
-    /// While a Z-machine *line* read is active, decide whether a special key the
-    /// player pressed is one the game listed as a line terminator (v5+ table).
-    /// Only arrow keys and function keys are candidate terminators; Enter (13)
-    /// flows through the normal submit path, and all other keys are never
-    /// terminators. Returns the ZSCII terminator code to submit with, or `None`
-    /// to leave the key to its normal app behavior.
     /// Does the story want mouse input? ZMSD §11.1 "Flags 2" bit 5, which a game
     /// sets when it intends to read clicks (`read_mouse`, the header extension's
     /// X/Y words). Zork Zero, Arthur, Shogun, Journey and Scopa all set it;
@@ -5299,6 +5812,12 @@ impl GameSession {
         (self.wants_mouse() && self.is_terminator(SINGLE_CLICK as u16)).then_some(SINGLE_CLICK)
     }
 
+    /// While a Z-machine *line* read is active, decide whether a special key the
+    /// player pressed is one the game listed as a line terminator (v5+ table).
+    /// Only arrow keys and function keys are candidate terminators; Enter (13)
+    /// flows through the normal submit path, and all other keys are never
+    /// terminators. Returns the ZSCII terminator code to submit with, or `None`
+    /// to leave the key to its normal app behavior.
     pub fn line_key_terminator(&self, ki: &KeyInput) -> Option<u8> {
         match ki {
             KeyInput::Up | KeyInput::Down | KeyInput::Left | KeyInput::Right | KeyInput::Func(_) => {}
@@ -5365,7 +5884,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
     ScreenModel {
         root: WinNode::Pair {
             vertical: true,
-            split: Split { fixed: screen.upper.rows , fixed_px: None },
+            split: Split { fixed: screen.upper.rows , fixed_px: None, rest: None },
             // The Z-machine has no Glk border; its status box is drawn by the simple path.
             border: false,
             key_bg: None,
@@ -5435,6 +5954,10 @@ impl Engine for GameSession {
         self.machine.set_mouse(y_px, x_px, 0b1);
     }
 
+    fn set_player_hint(&mut self, hint: Option<u16>) {
+        self.player_hint = hint;
+    }
+
     fn set_screen_dims(&mut self, rows: u16, cols: u16) {
         // ZMSD §8.4 — publish the host's REAL pane size in bytes $20/$21 (and the
         // v5+ unit words). A story pane wider or narrower than the old fixed 80×24
@@ -5486,6 +6009,31 @@ impl Engine for GameSession {
             .map(|(at, img)| (at, TranscriptElem::Image(img)))
             .collect();
         interleave_story_elems(&transcript, &runs, marks, base, None)
+    }
+
+    /// SQ-1629 Fix 2: the default [`Engine::seed_turn`] drains the boot transcript for the host's
+    /// opening banner but stops there — no command triggers a `drain_turn` for the starting room
+    /// (and the player has not typed `look` yet either), so without this override the room the
+    /// story opens in never got a `description`/`items` at all. Same heading-match rule as an
+    /// ordinary arrival ([`zvm_room_description`]) and the same direct object-tree query
+    /// ([`Self::zvm_item_observations`]) `drain_turn` uses, just run against the BOOT drain instead
+    /// of a command's.
+    fn seed_turn(&mut self) -> TurnResult {
+        let transcript_elems = self.take_transcript_elems();
+        let transcript = if transcript_elems.is_empty() { self.take_transcript() } else { String::new() };
+        let location = self.current_location();
+        let description = zvm_room_description(&transcript, location.as_ref());
+        let items = self.zvm_item_observations(location.as_ref(), &transcript);
+        TurnResult {
+            transcript,
+            transcript_elems,
+            location,
+            quit: self.has_quit(),
+            erase_lower: self.drain_screen_clear(),
+            description,
+            items,
+            ..TurnResult::default()
+        }
     }
 
     fn set_strip_prompt(&mut self, on: bool) {
@@ -5992,6 +6540,130 @@ impl GameSession {
     pub fn player_candidates(&self) -> &PlayerCandidates {
         self.player_candidates
             .get_or_init(|| PlayerCandidates::build(&self.machine.mem, self.parse_names()))
+    }
+
+    /// This turn's item observations (SQ-1627) — the two vantage points the player has actually
+    /// seen: the room they are standing in and their own carried inventory. NEVER the DEBUG-only
+    /// whole-object-tree walk (`build_object_tree` in this file) — this feature must not reveal an
+    /// item the player has not personally stood in a room with or held, however completely the
+    /// debug tooling could enumerate it.
+    ///
+    /// A direct object-tree query, not a transcript heuristic like [`zvm_room_description`], so
+    /// unlike `description` this needs no v6 gate — the object tree exists and answers the same
+    /// way whatever the story's window layout looks like this turn.
+    ///
+    /// Two separate room queries, not one, per the SQ-1627 correction: [`crate::inventory::list_inventory`]
+    /// walked over the room object itself gives the DIRECT top level only (get_child/get_sibling,
+    /// no recursion — the exact walk it already does for a holder's contents, just applied to a
+    /// room instead of a player), while
+    /// [`crate::render::room_info::list_room_objects_excluding`] gives everything the room reveals
+    /// INCLUDING what's on a supporter or inside an open container. Anything in the second set but
+    /// not the first is nested; the caller ([`apply_item_observations`]) needs that distinction to
+    /// decide vanish-eligibility later.
+    ///
+    /// The player id prefers [`Self::player_hint`] — the host's own locked
+    /// [`crate::state::AppState::player_obj`], pushed in via [`Engine::set_player_hint`] — over the raw
+    /// [`zvm::location::find_player_object_with`] heuristic, falling back to the heuristic only when no
+    /// hint has been set yet (SQ-1631 Fix 3): a story whose player object carries no short name can
+    /// never re-derive it from this call alone, but the host may already have locked one by watching
+    /// what moved between rooms, and bypassing that hint both under-populates carried items for such a
+    /// story and risks leaving the player's own object unexcluded from "what's directly in this room"
+    /// (the SQ-0667 hazard, reintroduced).
+    fn zvm_item_observations(&self, location: Option<&LocationInfo>, prose: &str) -> Vec<ItemObservation> {
+        let mut out = Vec::new();
+        let names = self.parse_names();
+        let player_obj = self
+            .player_hint
+            .or_else(|| zvm::location::find_player_object_with(&self.machine, self.player_candidates()));
+
+        let mut direct: Vec<grammar_model::ObjectWords> = Vec::new();
+        let mut nested: Vec<grammar_model::ObjectWords> = Vec::new();
+        let mut nested_room_num: Option<u16> = None;
+        if let Some(loc) = location {
+            if let Ok(room_num) = u16::try_from(loc.number) {
+                nested_room_num = Some(room_num);
+                // The room's own top level. The player object is structurally a child of
+                // whatever room they stand in (SQ-0667's exact hazard) — excluded by id, not name.
+                direct = crate::inventory::list_inventory(&self.machine.mem, names, room_num)
+                    .into_iter()
+                    .filter(|o| Some(o.id) != player_obj.map(u32::from))
+                    .collect::<Vec<_>>();
+                let direct_ids: std::collections::BTreeSet<u32> = direct.iter().map(|o| o.id).collect();
+                // Everything else the room reveals is nested by construction: it was excluded
+                // from `direct` above, so any object here that isn't in `direct_ids` was reached
+                // only by recursing into a supporter/container/scenery bucket.
+                nested = crate::render::room_info::list_room_objects_excluding(
+                    self.world_model(),
+                    names,
+                    &self.machine.mem,
+                    loc.number,
+                    player_obj.unwrap_or(0),
+                )
+                .into_iter()
+                .filter(|o| !direct_ids.contains(&o.id))
+                .collect();
+            }
+        }
+        let carried: Vec<grammar_model::ObjectWords> = match player_obj {
+            Some(p) => crate::inventory::list_inventory(&self.machine.mem, names, p),
+            None => Vec::new(),
+        };
+
+        // SQ-1652: every item observed this turn shares one turn-wide `prose` string, so names
+        // are resolved only once every item under consideration this turn is known — see
+        // `item_tracker_display_name`'s own doc for why (a stored word two items both know, e.g.
+        // Anchorhead's "green" umbrella/clothes, would otherwise be attributed to whichever
+        // item's loop ran first).
+        let all_words: Vec<&grammar_model::ObjectWords> =
+            direct.iter().chain(nested.iter()).chain(carried.iter()).collect();
+        let others_for = |id: u32| -> Vec<&grammar_model::ObjectWords> {
+            all_words.iter().copied().filter(|o| o.id != id).collect()
+        };
+
+        for o in &direct {
+            // SQ-1631 Fix 1: a display name, not the raw printed name alone — see
+            // `list_room_objects_excluding`'s own doc for why filtering on the bare printed
+            // name drops every Inform 7 object. SQ-1648: `item_tracker_display_name`, not
+            // `display_name` directly — see that function's own doc for why.
+            let Some(name) = item_tracker_display_name(o, prose, &others_for(o.id)) else {
+                continue; // nothing a panel could show, nothing a player could type
+            };
+            out.push(ItemObservation {
+                key: o.id,
+                name,
+                location: ObservedItemLocation::RoomDirect,
+                words: o.clone(),
+            });
+        }
+        if let Some(room_num) = nested_room_num {
+            for o in &nested {
+                let Some(name) = item_tracker_display_name(o, prose, &others_for(o.id)) else {
+                    continue;
+                };
+                // SQ-1632 Fix 5: a "nested" sighting the visibility walk reached is not
+                // necessarily a genuinely CONTAINED one — local-global/shared scenery (a
+                // window, a house, visible from many rooms) is never a real child of any of
+                // them (`WorldModel::real_container_in_room`'s own doc). Skip it outright
+                // rather than recording it as nested-with-no-container, which would read as a
+                // portable item that mysteriously follows the player from room to room.
+                let Some(container) = self.world_model().real_container_in_room(&self.machine.mem, room_num, o.id as u16) else {
+                    continue;
+                };
+                out.push(ItemObservation {
+                    key: o.id,
+                    name,
+                    location: ObservedItemLocation::RoomNested { container: Some(container as u32) },
+                    words: o.clone(),
+                });
+            }
+        }
+        for o in &carried {
+            let Some(name) = item_tracker_display_name(o, prose, &others_for(o.id)) else {
+                continue;
+            };
+            out.push(ItemObservation { key: o.id, name, location: ObservedItemLocation::Carried, words: o.clone() });
+        }
+        out
     }
 }
 
@@ -6511,6 +7183,88 @@ mod tests {
     use super::*;
     use mapper::direction::Direction;
 
+    // ── SQ-1625 Tier 3: transcript_room_description ────────────────────────────
+
+    #[test]
+    fn transcript_room_description_returns_text_after_the_heading_line() {
+        let transcript = "West of House\nYou are standing in an open field west of a white house.\n";
+        assert_eq!(
+            transcript_room_description(transcript, "West of House").as_deref(),
+            Some("You are standing in an open field west of a white house.")
+        );
+    }
+
+    /// The heading itself is excluded — `Room.name` already states it; the description is the
+    /// paragraph beneath it, matching the Glk detector's own heading/prose split.
+    #[test]
+    fn transcript_room_description_excludes_the_heading_line_itself() {
+        let transcript = "West of House\nYou are standing in an open field.\n";
+        let desc = transcript_room_description(transcript, "West of House").unwrap();
+        assert!(!desc.contains("West of House"), "the heading must not reappear inside the body: {desc:?}");
+    }
+
+    /// A multi-paragraph description survives whole — unlike the Glk cap this mirrors
+    /// conceptually, nothing here truncates.
+    #[test]
+    fn transcript_room_description_keeps_a_multi_paragraph_body() {
+        let transcript = "Attic\nA dusty attic.\n\nA loose board catches your eye.\n";
+        assert_eq!(
+            transcript_room_description(transcript, "Attic").as_deref(),
+            Some("A dusty attic.\n\nA loose board catches your eye.")
+        );
+    }
+
+    /// A refusal reprints no heading at all — "arrival or explicit LOOK" is this function's OWN
+    /// evidence (SQ-1625), not a separate flag the caller has to check first.
+    #[test]
+    fn transcript_room_description_is_none_when_the_room_name_never_appears() {
+        let transcript = "You can't go that way.\n";
+        assert_eq!(transcript_room_description(transcript, "West of House"), None);
+    }
+
+    #[test]
+    fn transcript_room_description_is_none_for_an_empty_name() {
+        assert_eq!(transcript_room_description("Some text.\n", ""), None);
+    }
+
+    /// A heading with literally nothing after it (an empty room, or the room name is the very
+    /// last thing printed this turn) is `None`, not `Some("")`.
+    #[test]
+    fn transcript_room_description_is_none_when_nothing_follows_the_heading() {
+        assert_eq!(transcript_room_description("West of House\n", "West of House"), None);
+    }
+
+    /// A rare self-echoing game's command echo sits BEFORE the heading line and falls away on
+    /// its own — this function needs no separate command-echo filter (see its own doc).
+    #[test]
+    fn transcript_room_description_drops_a_leading_self_echo_by_construction() {
+        let transcript = "look\nWest of House\nYou are standing in an open field.\n";
+        let desc = transcript_room_description(transcript, "West of House").unwrap();
+        assert!(!desc.contains("look"), "the self-echoed command must not leak into the body: {desc:?}");
+        assert_eq!(desc, "You are standing in an open field.");
+    }
+
+    /// When the room's heading line is printed twice in one turn's transcript (e.g. a status
+    /// recap that reprints the bare name, followed by the real arrival heading), the text after
+    /// the LAST occurrence is the description — not the first, which would grab the text sitting
+    /// between the two as if it were the room's own body.
+    #[test]
+    fn transcript_room_description_uses_the_last_matching_heading_line() {
+        let transcript = "West of House\nSomething unrelated happens here.\nWest of House\nYou are standing in an open field.\n";
+        let desc = transcript_room_description(transcript, "West of House").unwrap();
+        assert_eq!(desc, "You are standing in an open field.");
+    }
+
+    /// SQ-1629 Fix 1: a v1–3 game whose read prompt rides the SAME turn's transcript (minizork's
+    /// `\n>` after every room description) must not leak into the captured description — falsifies
+    /// the pre-fix behaviour, which returned the description with a trailing "\n\n>".
+    #[test]
+    fn transcript_room_description_strips_a_trailing_inline_read_prompt() {
+        let transcript = "Forest Path\nThis is a path through a dimly lit forest.\nOn the ground is a pile of leaves.\n\n>";
+        let desc = transcript_room_description(transcript, "Forest Path").unwrap();
+        assert_eq!(desc, "This is a path through a dimly lit forest.\nOn the ground is a pile of leaves.");
+    }
+
     // ── Object tree ordering ──────────────────────────────────────────────────
 
     #[test]
@@ -6796,6 +7550,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "look", &first, &mut Default::default());
         assert_eq!(m.graph.current(), Some(1));
@@ -6821,6 +7577,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "north", &second, &mut Default::default());
         assert!(m.graph.room(2).is_some());
@@ -6861,6 +7619,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "look", &enter, &mut Default::default());
         assert_eq!(m.graph.current(), Some(1));
@@ -6884,6 +7644,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "west", &west, &mut Default::default());
 
@@ -6921,6 +7683,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "look", &enter, &mut Default::default());
         assert_eq!(m.graph.current(), Some(183));
@@ -6944,6 +7708,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "north", &north, &mut Default::default());
 
@@ -7058,6 +7824,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "look", &result, &mut Default::default());
         assert_eq!(m.graph.current(), None);
@@ -7103,6 +7871,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         let mut m = Mapper::default();
         apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"), &mut Default::default());
@@ -7156,6 +7926,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         let mut m = Mapper::default();
         apply_turn(&mut m, "", &mk(1, "The Bar", "The Bar\n"), &mut Default::default());
@@ -7212,6 +7984,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         let mut m = Mapper::default();
         apply_turn(&mut m, "", &mk(1, "The Bar", "The Bar\n"), &mut Default::default());
@@ -7249,6 +8023,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
 
         let mut m = Mapper::default();
@@ -7308,6 +8084,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         apply_turn(&mut m, "", &result, &mut Default::default());
         assert_eq!(m.graph.current(), Some(333));
@@ -7337,6 +8115,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         };
         assert!(r.info.is_none());
     }
@@ -7363,6 +8143,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         }
     }
 
@@ -8479,6 +9261,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8493,6 +9276,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8554,6 +9338,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8568,6 +9353,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8624,6 +9410,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8638,6 +9425,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8683,6 +9471,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8697,6 +9486,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8785,6 +9575,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8799,6 +9590,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8846,6 +9638,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8860,6 +9653,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8891,6 +9685,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8905,6 +9700,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -8950,6 +9746,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -8964,6 +9761,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9047,6 +9845,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -9061,6 +9860,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9102,6 +9902,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -9116,6 +9917,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9695,6 +10497,7 @@ mod tests {
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
             player_candidates: std::cell::OnceCell::new(),
+            player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -9709,6 +10512,7 @@ mod tests {
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            pre_restore_screen_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         }
@@ -10292,6 +11096,8 @@ mod untried_turn_tests {
             location_method: None, pending_io: None, timed_out: false,
             pictures: Vec::new(), transcript_elems: Vec::new(), prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         }
     }
 
@@ -10538,6 +11344,571 @@ mod inherited_random_pool_tests {
             inherited_random_pool(&mapper.graph, 4, Direction::Unknown, 3, None),
             None,
             "a move with no direction has nothing to mark"
+        );
+    }
+
+}
+
+/// SQ-1627: `apply_item_observations` (the item-registry sibling of `apply_room_description`),
+/// `take_command_target` and `classify_take_attempt` (Facet 3's structural refusal detector). A
+/// separate module rather than folded into `tests` or `inherited_random_pool_tests` above, since
+/// this feature is not what either of those is about.
+#[cfg(all(test, feature = "t-session"))]
+mod item_observation_tests {
+    use super::*;
+    use mapper::direction::Direction;
+
+    /// A synthetic observation whose `words` are `name`'s own content words (minus articles) —
+    /// good enough for every test here that isn't specifically about `words` diverging from
+    /// `name` (see [`item_obs_with_words`] for that case).
+    fn item_obs(key: u32, name: &str, loc: ObservedItemLocation) -> ItemObservation {
+        let words: Vec<String> = name
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .filter(|w| !grammar_model::ARTICLES.contains(&w.as_str()))
+            .collect();
+        item_obs_with_words(key, name, &words.iter().map(String::as_str).collect::<Vec<_>>(), loc)
+    }
+
+    /// An observation whose parser `words` are given explicitly, independent of `name` — for
+    /// exercising [`take_noun_matches`]/[`classify_take_attempt`] against a printed name that
+    /// diverges from what the parser actually accepts (SQ-1631 Fix 2).
+    fn item_obs_with_words(key: u32, name: &str, words: &[&str], loc: ObservedItemLocation) -> ItemObservation {
+        ItemObservation {
+            key,
+            name: name.to_string(),
+            location: loc,
+            words: grammar_model::ObjectWords::new(
+                key,
+                name.to_string(),
+                words.iter().map(|w| w.to_string()).collect(),
+                None,
+                None,
+            ),
+        }
+    }
+
+    /// A minimal [`crate::vocab::StoryVocabulary`] with one verb reachable by every spelling in
+    /// `spellings` — enough to exercise [`take_command_target`]'s vocabulary-based resolution
+    /// (SQ-1631 Fix 4) without booting a real story.
+    fn vocab_with_take_verb(spellings: &[&str]) -> crate::vocab::StoryVocabulary {
+        let verb = grammar_model::Verb::new(1, 0, spellings.iter().map(|s| s.to_string()).collect(), Vec::new());
+        // `StoryVocabulary::verb_named` resolves through the flat dictionary (`words`) first —
+        // via its own private `stored()` — and only then through `by_word`, built from `verbs`
+        // alone; a spelling absent from `words` never resolves, however it appears in `verbs`.
+        let mut verb_role = grammar_model::WordRoles::default();
+        verb_role.verb = true; // `#[non_exhaustive]` forbids struct-literal syntax outside this crate
+        let words = spellings.iter().map(|s| (s.to_lowercase(), verb_role)).collect();
+        crate::vocab::StoryVocabulary::new(vec![verb], words, std::collections::BTreeSet::new(), 0)
+    }
+
+    fn result_with_items(number: mapper::graph::RoomId, name: &str, items: Vec<ItemObservation>) -> TurnResult {
+        TurnResult {
+            location: Some(LocationInfo { number, parent: 0, name: name.to_string() }),
+            items,
+            ..TurnResult::default()
+        }
+    }
+
+    // ── apply_item_observations ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_item_observations_mints_a_new_direct_sighting() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        let result = result_with_items(1, "West of House", vec![item_obs(10, "a small mailbox", ObservedItemLocation::RoomDirect)]);
+        apply_item_observations(&mut m, 1, &result);
+        let rec = m.graph.item(10).unwrap();
+        assert_eq!(rec.origin_room, 1);
+        assert_eq!(rec.origin_turn, 1);
+        assert_eq!(rec.last_seen, mapper::graph::ItemLocation::Room { room: 1, direct: true, container: None });
+    }
+
+    #[test]
+    fn apply_item_observations_carries_and_then_drops_in_a_different_room() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::N));
+        // Turn 1: the coin sits loose in room A.
+        apply_item_observations(&mut m, 1, &result_with_items(1, "A", vec![item_obs(10, "a coin", ObservedItemLocation::RoomDirect)]));
+        // Turn 2: picked up (now in room A, but carried).
+        apply_item_observations(&mut m, 2, &result_with_items(1, "A", vec![item_obs(10, "a coin", ObservedItemLocation::Carried)]));
+        assert_eq!(m.graph.item(10).unwrap().last_seen, mapper::graph::ItemLocation::Carried);
+        // Turn 3: walked to B and dropped there.
+        apply_item_observations(&mut m, 3, &result_with_items(2, "B", vec![item_obs(10, "a coin", ObservedItemLocation::RoomDirect)]));
+        let rec = m.graph.item(10).unwrap();
+        assert_eq!(rec.origin_room, 1, "origin never moves");
+        assert_eq!(
+            rec.last_seen,
+            mapper::graph::ItemLocation::Room { room: 2, direct: true, container: None },
+            "current location is B"
+        );
+        // Turn 4: re-entering A observes nothing of the coin there (it is in B) — this must NOT
+        // read as Vanished-in-A, and must NOT resurrect a stale Room(A). It is simply not evidence
+        // about A at all, because the record already says B.
+        apply_item_observations(&mut m, 4, &result_with_items(1, "A", vec![]));
+        assert_eq!(
+            m.graph.item(10).unwrap().last_seen,
+            mapper::graph::ItemLocation::Room { room: 2, direct: true, container: None },
+            "re-entering A must not disturb a record that already correctly says B"
+        );
+    }
+
+    #[test]
+    fn apply_item_observations_vanishes_a_direct_item_absent_and_uncarried() {
+        let mut m = Mapper::default();
+        m.observe(1, "Room", None);
+        apply_item_observations(&mut m, 1, &result_with_items(1, "Room", vec![item_obs(10, "a coin", ObservedItemLocation::RoomDirect)]));
+        // Later turn, same room, the coin is simply gone and not carried.
+        apply_item_observations(&mut m, 2, &result_with_items(1, "Room", vec![]));
+        assert_eq!(
+            m.graph.item(10).unwrap().last_seen,
+            mapper::graph::ItemLocation::Vanished { room: 1, turn: 2 },
+            "SQ-1632 Fix 2: Vanished now carries the room it was last seen in"
+        );
+    }
+
+    /// SQ-1632 Fix 4: an item last known `Carried` that this turn is observed neither carried nor
+    /// anywhere in the room must be swept as `Vanished` too, stamped with the room the player is
+    /// STANDING IN now — the room-only sweep the direct-item test above exercises never even
+    /// looked at a `Carried` record, so something eaten/burned/destroyed while held stayed
+    /// `Carried` forever before this fix. Falsify by reverting `note_items_absent`'s
+    /// `vanished_while_carried` branch: this test fails with `last_seen` still `Carried`.
+    #[test]
+    fn apply_item_observations_vanishes_a_carried_item_that_disappears_entirely() {
+        let mut m = Mapper::default();
+        m.observe(1, "Room", None);
+        // Turn 1: the garlic is picked up.
+        apply_item_observations(&mut m, 1, &result_with_items(1, "Room", vec![item_obs(10, "a clove of garlic", ObservedItemLocation::Carried)]));
+        assert_eq!(m.graph.item(10).unwrap().last_seen, mapper::graph::ItemLocation::Carried);
+        // Turn 2: eaten (or burned, or otherwise destroyed) — this turn's observations name it
+        // neither carried nor anywhere in the room at all.
+        apply_item_observations(&mut m, 2, &result_with_items(1, "Room", vec![]));
+        let rec = m.graph.item(10).unwrap();
+        assert_eq!(
+            rec.last_seen,
+            mapper::graph::ItemLocation::Vanished { room: 1, turn: 2 },
+            "vanished from the room the player was standing in when it was last WITH them"
+        );
+        assert_eq!(rec.carried_since_turn, None, "SQ-1632 Fix 3: no longer held, once vanished");
+    }
+
+    #[test]
+    fn apply_item_observations_never_vanishes_a_nested_only_sighting_when_its_container_closes() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        // The leaflet is seen only by recursing into the open mailbox (container = the mailbox's
+        // own key, SQ-1632 Fix 1).
+        apply_item_observations(
+            &mut m, 1,
+            &result_with_items(1, "West of House", vec![item_obs(11, "a leaflet", ObservedItemLocation::RoomNested { container: Some(23) })]),
+        );
+        // The mailbox is now closed — the leaflet is unreachable and absent from this turn's
+        // observations entirely, exactly like a real "close mailbox" + "look" turn.
+        apply_item_observations(&mut m, 2, &result_with_items(1, "West of House", vec![]));
+        assert_eq!(
+            m.graph.item(11).unwrap().last_seen,
+            mapper::graph::ItemLocation::Room { room: 1, direct: false, container: Some(23) },
+            "a nested-only sighting is never vanish-eligible — the record (container included) is untouched"
+        );
+    }
+
+    #[test]
+    fn apply_item_observations_scopes_carried_and_room_correctly_in_one_turn() {
+        let mut m = Mapper::default();
+        m.observe(1, "Room", None);
+        let result = result_with_items(
+            1,
+            "Room",
+            vec![item_obs(10, "a coin", ObservedItemLocation::RoomDirect), item_obs(20, "a lamp", ObservedItemLocation::Carried)],
+        );
+        apply_item_observations(&mut m, 1, &result);
+        assert_eq!(m.graph.item(10).unwrap().last_seen, mapper::graph::ItemLocation::Room { room: 1, direct: true, container: None });
+        assert_eq!(m.graph.item(20).unwrap().last_seen, mapper::graph::ItemLocation::Carried);
+        assert_eq!(m.graph.item(20).unwrap().origin_room, 1, "carried-from-first-sighting still names an origin");
+    }
+
+    // ── take_command_target / classify_take_attempt ────────────────────────────
+
+    #[test]
+    fn take_command_target_recognises_the_bare_and_separable_forms() {
+        let vocab = vocab_with_take_verb(&["take", "get", "carry"]);
+        assert_eq!(take_command_target("take mailbox", Some(&vocab)), Some("mailbox".to_string()));
+        assert_eq!(
+            take_command_target("Get the brass lantern", Some(&vocab)),
+            Some("the brass lantern".to_string())
+        );
+        assert_eq!(take_command_target("pick up the leaflet", Some(&vocab)), Some("the leaflet".to_string()));
+        assert_eq!(take_command_target("pick leaflet up", Some(&vocab)), Some("leaflet".to_string()));
+    }
+
+    #[test]
+    fn take_command_target_rejects_unrelated_and_ambiguous_pick_forms() {
+        let vocab = vocab_with_take_verb(&["take", "get", "carry"]);
+        assert_eq!(take_command_target("look", Some(&vocab)), None);
+        assert_eq!(take_command_target("north", Some(&vocab)), None);
+        assert_eq!(take_command_target("pick lock", Some(&vocab)), None, "a different verb entirely");
+        assert_eq!(take_command_target("pick up", Some(&vocab)), None, "no noun named");
+        assert_eq!(take_command_target("", Some(&vocab)), None);
+    }
+
+    /// SQ-1631 Fix 4: `take lamp.` — with the trailing full stop a player actually types — must
+    /// still extract `lamp` as the noun. Falsifies a bare `split_whitespace` tokenizer, which
+    /// leaves the period glued to the last word and no candidate's `words` would ever match it.
+    #[test]
+    fn take_command_target_strips_trailing_punctuation_via_words_of() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        assert_eq!(take_command_target("take lamp.", Some(&vocab)), Some("lamp".to_string()));
+    }
+
+    /// SQ-1631 Fix 4: a story's take-verb is resolved through its OWN grammar
+    /// ([`crate::vocab::StoryVocabulary::verb_named`]), not a hand-copied English word list —
+    /// falsified by `acquire`, a spelling that was never in the old hard-coded `TAKE_VERBS` list
+    /// and so the old code would have rejected outright, but which this story's own dictionary
+    /// files as a synonym of the same verb as `take`.
+    #[test]
+    fn take_command_target_recognises_a_storys_own_take_synonym_absent_from_the_old_hardcoded_list() {
+        let vocab = vocab_with_take_verb(&["take", "acquire"]);
+        assert_eq!(take_command_target("acquire lamp", Some(&vocab)), Some("lamp".to_string()));
+    }
+
+    /// SQ-1631 Fix 4: Zork I's own take-verb dictionary-first spelling is `carry` (`take` a mere
+    /// synonym reaching the same verb) — named explicitly in the audit as the case the OLD
+    /// `TAKE_VERBS` list only recognised by coincidence, not by resolving the story's own grammar.
+    #[test]
+    fn take_command_target_recognises_zork_ones_carry_spelling() {
+        let vocab = vocab_with_take_verb(&["carry", "take", "get"]);
+        assert_eq!(take_command_target("carry sword", Some(&vocab)), Some("sword".to_string()));
+    }
+
+    /// With no readable vocabulary at all (a menu-driven v6 game, or an engine with no dictionary
+    /// reader), the bare verb form is disabled outright rather than guessed — the "pick up"
+    /// particle forms are unaffected, since they never consult `vocab`.
+    #[test]
+    fn take_command_target_disables_the_bare_form_without_a_vocabulary() {
+        assert_eq!(take_command_target("take mailbox", None), None);
+        assert_eq!(take_command_target("pick up the leaflet", None), Some("the leaflet".to_string()));
+    }
+
+    // ── inventory_command ───────────────────────────────────────────────────────
+
+    #[test]
+    fn inventory_command_recognises_a_storys_own_synonym() {
+        // `vocab_with_take_verb` is structurally generic (one verb reachable by every
+        // listed spelling) despite its name — reused here for "inventory"/"i".
+        let vocab = vocab_with_take_verb(&["inventory", "i"]);
+        assert!(inventory_command("inventory", Some(&vocab)));
+        assert!(inventory_command("i", Some(&vocab)), "the standard Inform abbreviation");
+    }
+
+    #[test]
+    fn inventory_command_rejects_unrelated_commands() {
+        let vocab = vocab_with_take_verb(&["inventory", "i"]);
+        assert!(!inventory_command("look", Some(&vocab)));
+        assert!(!inventory_command("take lamp", Some(&vocab)));
+        assert!(!inventory_command("", Some(&vocab)));
+    }
+
+    #[test]
+    fn inventory_command_disabled_without_a_vocabulary() {
+        assert!(!inventory_command("inventory", None));
+    }
+
+    #[test]
+    fn classify_take_attempt_flags_a_single_unambiguous_refusal() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        let items = vec![item_obs(10, "a small mailbox", ObservedItemLocation::RoomDirect)];
+        assert_eq!(classify_take_attempt("take mailbox", &items, Some(&vocab)), Some(10));
+    }
+
+    #[test]
+    fn classify_take_attempt_is_silent_when_the_take_actually_worked() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        let items = vec![item_obs(11, "a leaflet", ObservedItemLocation::Carried)];
+        assert_eq!(
+            classify_take_attempt("take leaflet", &items, Some(&vocab)),
+            None,
+            "the take succeeded — nothing to flag"
+        );
+    }
+
+    #[test]
+    fn classify_take_attempt_is_silent_on_an_ambiguous_noun() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        let items = vec![
+            item_obs(10, "a red box", ObservedItemLocation::RoomDirect),
+            item_obs(11, "a blue box", ObservedItemLocation::RoomDirect),
+        ];
+        assert_eq!(
+            classify_take_attempt("take box", &items, Some(&vocab)),
+            None,
+            "two candidates — never guess which"
+        );
+    }
+
+    #[test]
+    fn classify_take_attempt_is_silent_on_no_candidate_or_non_take_command() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        let items = vec![item_obs(10, "a small mailbox", ObservedItemLocation::RoomDirect)];
+        assert_eq!(
+            classify_take_attempt("take sword", &items, Some(&vocab)),
+            None,
+            "no candidate answers to this noun"
+        );
+        assert_eq!(classify_take_attempt("look", &items, Some(&vocab)), None, "not a take command at all");
+    }
+
+    /// SQ-1631 Fix 2: falsifies the misattribution the old printed-name-overlap matcher was
+    /// capable of. Object 10 is the real "sword" — its parser accepts `sword`/`blade`, but its
+    /// printed name is "long blade" and never literally contains the word "sword". Object 11 is
+    /// an unrelated "sword fern" whose ONLY parser word is `fern`, but whose printed name happens
+    /// to contain the literal word "sword" as flavour text. Under the old matcher (overlap against
+    /// `name` alone), object 10 would MISS ("sword" isn't a word of "long blade") while object 11
+    /// would falsely MATCH ("sword" is a word of "sword fern") — a single, unambiguous, and WRONG
+    /// answer. The new matcher resolves through each object's own parser words instead.
+    #[test]
+    fn classify_take_attempt_never_misattributes_to_an_object_whose_printed_name_merely_shares_a_word() {
+        let vocab = vocab_with_take_verb(&["take"]);
+        let items = vec![
+            item_obs_with_words(10, "long blade", &["sword", "blade"], ObservedItemLocation::RoomDirect),
+            item_obs_with_words(11, "sword fern", &["fern"], ObservedItemLocation::RoomDirect),
+        ];
+        assert_eq!(
+            classify_take_attempt("take sword", &items, Some(&vocab)),
+            Some(10),
+            "resolves to the real sword (object 10) by its own parser words, never object 11 whose \
+             printed name merely contains the word"
+        );
+    }
+
+    // ── item_tracker_display_name (SQ-1648) ─────────────────────────────────────
+
+    /// A no-printed-name object with `truncated_at` set, mirroring a real Glulx dictionary entry —
+    /// e.g. Anchorhead's shopkeeper, stored `"proprieto"` among its other words.
+    fn no_name_object(words: &[&str], truncated_at: Option<usize>) -> grammar_model::ObjectWords {
+        grammar_model::ObjectWords::new(
+            1,
+            String::new(),
+            words.iter().map(|w| w.to_string()).collect(),
+            None,
+            truncated_at,
+        )
+    }
+
+    #[test]
+    fn item_tracker_display_name_prefers_the_printed_name_when_there_is_one() {
+        let ow = grammar_model::ObjectWords::new(1, "brass lantern".to_string(), vec!["lantern".to_string()], None, None);
+        assert_eq!(item_tracker_display_name(&ow, "You are in a dark room.", &[]), Some("brass lantern".to_string()));
+    }
+
+    #[test]
+    fn item_tracker_display_name_none_when_the_story_holds_no_text_at_all() {
+        let ow = grammar_model::ObjectWords::new(1, String::new(), Vec::new(), None, None);
+        assert_eq!(item_tracker_display_name(&ow, "anything", &[]), None);
+    }
+
+    /// Tier 1's core case: several known words, none a printed name, and the turn's own prose has
+    /// used one of them — that word wins, not the joined list `display_name` would have produced.
+    #[test]
+    fn item_tracker_display_name_picks_the_word_the_turns_prose_actually_used() {
+        let ow = no_name_object(&["old", "portly", "man", "person"], None);
+        let prose = "An old, portly man stands behind the counter, eyeing you suspiciously.";
+        assert_eq!(
+            item_tracker_display_name(&ow, prose, &[]),
+            Some("old".to_string()),
+            "the first of ow.words with a match, not the whole joined list"
+        );
+    }
+
+    /// Truncation resolved for free: the stored word is Glulx's own 9-character-truncated
+    /// `"proprieto"`, and the turn's prose spells the whole word `"proprietor"` — the truncated
+    /// comparison recognises the match and returns the FULL prose spelling, not the stored key.
+    #[test]
+    fn item_tracker_display_name_spells_out_a_truncated_word_from_this_turns_prose() {
+        let ow = no_name_object(&["proprieto", "men", "old", "portly", "shopkeepe", "man"], Some(9));
+        let prose = "The proprietor eyes you with open suspicion.";
+        assert_eq!(item_tracker_display_name(&ow, prose, &[]), Some("proprietor".to_string()));
+    }
+
+    /// The FIRST of `ow.words` with a prose match wins, in the object's own stored order, not
+    /// merely the first prose occurrence of any known word.
+    #[test]
+    fn item_tracker_display_name_prefers_the_earliest_stored_word_with_a_match() {
+        let ow = no_name_object(&["shopkeeper", "man", "person"], None);
+        // "man" appears in the prose before "shopkeeper" does, but "shopkeeper" is earlier in
+        // ow.words, so it wins.
+        let prose = "A man stands behind the counter. The shopkeeper glares.";
+        assert_eq!(item_tracker_display_name(&ow, prose, &[]), Some("shopkeeper".to_string()));
+    }
+
+    /// Tier 2: nothing in this turn's prose matches any known word — falls back to the FIRST of
+    /// `ow.words`, unspelled, never the whole joined list.
+    #[test]
+    fn item_tracker_display_name_falls_back_to_the_first_stored_word_with_no_prose_match() {
+        let ow = no_name_object(&["universit", "rooftops", "things", "rooftop", "roof"], Some(9));
+        assert_eq!(
+            item_tracker_display_name(&ow, "You are standing in a quiet street.", &[]),
+            Some("universit".to_string()),
+            "no textual evidence this turn: the first stored word, not the whole list"
+        );
+    }
+
+    /// Case-insensitivity: the prose capitalises a sentence-initial word, the stored dictionary
+    /// key is lower-case — the match still fires (and the returned spelling is lower-cased, same
+    /// as every other stored word this tracker shows).
+    #[test]
+    fn item_tracker_display_name_matches_case_insensitively() {
+        let ow = no_name_object(&["trenchcoat", "coat"], None);
+        assert_eq!(item_tracker_display_name(&ow, "Trenchcoat pockets bulge with odds and ends.", &[]), Some("trenchcoat".to_string()));
+    }
+
+    // ── printed_name_is_a_non_name / bare-pronoun & internal-identifier filtering (SQ-1649) ────
+
+    #[test]
+    fn printed_name_is_a_non_name_catches_every_bare_pronoun_case_insensitively() {
+        for w in BARE_NON_NAMES {
+            assert!(printed_name_is_a_non_name(w), "{w:?} should be caught");
+            assert!(printed_name_is_a_non_name(&w.to_uppercase()), "{w:?} uppercased should still be caught");
+        }
+    }
+
+    #[test]
+    fn printed_name_is_a_non_name_catches_lost_pigs_actual_specimens() {
+        // The exact strings SQ-1649 found in Lost Pig's own compiled object table.
+        for w in ["(missingOutside)", "(whistle)", "(missingBR)", "(key)"] {
+            assert!(printed_name_is_a_non_name(w), "{w:?} (Inform's own no-name-given convention) should be caught");
+        }
+        for n in 1..=6 {
+            let w = format!("Brick_{n}");
+            assert!(printed_name_is_a_non_name(&w), "{w:?} (a cloned instance's synthesized name) should be caught");
+        }
+    }
+
+    #[test]
+    fn printed_name_is_a_non_name_never_catches_a_real_printed_name() {
+        for w in [
+            "brass lantern",
+            "Mr. Prosser",
+            "Ford Prefect",
+            "your gown",
+            "thing your aunt gave you which you don't know what it is",
+        ] {
+            assert!(!printed_name_is_a_non_name(w), "{w:?} is real author-written text, must not be filtered");
+        }
+    }
+
+    #[test]
+    fn printed_name_is_a_non_name_requires_a_closing_paren_and_a_digit_only_suffix() {
+        // An unterminated paren isn't the Inform convention this guards against.
+        assert!(!printed_name_is_a_non_name("(a note, unfinished"));
+        // An underscore whose tail isn't purely digits is an ordinary compound word, not a clone
+        // suffix — must not be swept up by the same rule that catches "Brick_1".
+        assert!(!printed_name_is_a_non_name("Number_Six"));
+        assert!(!printed_name_is_a_non_name("under_construction"));
+    }
+
+    #[test]
+    fn item_tracker_display_name_skips_a_bare_pronoun_printed_name_and_falls_back_to_the_word_list() {
+        // HHGG's own wash-basin (SQ-1649): a real ZIL object whose header short name is
+        // literally "it", whose real vocabulary is its word list.
+        let ow = grammar_model::ObjectWords::new(
+            153,
+            "it".to_string(),
+            vec!["basin".to_string(), "washba".to_string(), "sink".to_string()],
+            Some(31),
+            Some(6),
+        );
+        assert_eq!(
+            item_tracker_display_name(&ow, "You are in a small bedroom.", &[]),
+            Some("basin".to_string()),
+            "a bare pronoun printed name must fall through to the word-list tiers, not show \"it\""
+        );
+    }
+
+    #[test]
+    fn item_tracker_display_name_skips_a_parenthesised_internal_identifier() {
+        // Lost Pig's own metal whistle (SQ-1649), given no explicit name by its author.
+        let ow = grammar_model::ObjectWords::new(
+            104,
+            "(whistle)".to_string(),
+            vec!["thing".to_string(), "whistle".to_string(), "tube".to_string(), "metal".to_string()],
+            Some(1),
+            Some(9),
+        );
+        assert_eq!(
+            item_tracker_display_name(&ow, "You take the metal whistle.", &[]),
+            Some("whistle".to_string()),
+            "an Inform internal identifier must fall through to the word-list tiers, never show the parenthesised form"
+        );
+    }
+
+    #[test]
+    fn item_tracker_display_name_skips_a_cloned_instances_synthesized_suffix() {
+        // Lost Pig's own bricks (SQ-1649): six auto-multiplied instances, each printing its
+        // compiler-synthesized clone name ("Brick_1" .. "Brick_6") with no prose match available.
+        let ow = grammar_model::ObjectWords::new(
+            47,
+            "Brick_1".to_string(),
+            vec!["whole".to_string(), "brick".to_string(), "brown".to_string()],
+            Some(1),
+            Some(9),
+        );
+        assert_eq!(
+            item_tracker_display_name(&ow, "Nothing here names it.", &[]),
+            Some("whole".to_string()),
+            "a cloned instance's synthesized name must fall through to the word-list tiers"
+        );
+    }
+
+    // ── item_tracker_display_name cross-item disambiguation (SQ-1652) ──────────
+
+    /// The real repro's shape, reduced: two items whose own vocabularies both include "green"
+    /// (clothes' own DECLARED name "clothes" comes first per Inform's own compile order, "green"
+    /// a later synonym — see tier 2's own doc), and a turn's prose that only ever describes one of
+    /// them (the umbrella). Without the `other_items` check, `clothes` would resolve to `"green"`
+    /// via tier 1, purely because its own word list happens to share that word — even though
+    /// nothing in `prose` is about it.
+    #[test]
+    fn item_tracker_display_name_never_attributes_a_word_shared_with_another_items_own_vocabulary() {
+        let umbrella = no_name_object(&["green", "umbrella"], None);
+        let clothes = no_name_object(&["clothes", "green"], None);
+        let prose = "It's a plain green umbrella, nothing special about it.";
+        assert_eq!(
+            item_tracker_display_name(&clothes, prose, &[&umbrella]),
+            Some("clothes".to_string()),
+            "\"green\" is shared with the umbrella's own vocabulary, so it must not be trusted as \
+             evidence for clothes even though it appears in this turn's prose — falls through to \
+             clothes' own first stored word (its real declared name) instead"
+        );
+    }
+
+    /// The other half of the same fix: the item the shared word's prose actually WAS describing
+    /// still resolves sensibly, by continuing past the ambiguous "green" to its own later,
+    /// unambiguous word ("umbrella") rather than being stuck on a word two items both claim.
+    #[test]
+    fn item_tracker_display_name_still_resolves_the_item_the_shared_prose_is_actually_about() {
+        let umbrella = no_name_object(&["green", "umbrella"], None);
+        let clothes = no_name_object(&["clothes", "green"], None);
+        let prose = "It's a plain green umbrella, nothing special about it.";
+        assert_eq!(
+            item_tracker_display_name(&umbrella, prose, &[&clothes]),
+            Some("umbrella".to_string()),
+            "\"green\" is shared with clothes' own vocabulary too, so it must be skipped for the \
+             umbrella as well — but \"umbrella\" itself is unambiguous and also appears in prose, \
+             so tier 1 still resolves correctly by continuing past the shared word"
+        );
+    }
+
+    /// With no other item this turn claiming the same word, tier 1's original behaviour is
+    /// unchanged: a single item's own prose-matched word still wins.
+    #[test]
+    fn item_tracker_display_name_disambiguation_does_not_affect_a_lone_item() {
+        let ow = no_name_object(&["old", "portly", "man", "person"], None);
+        let prose = "An old, portly man stands behind the counter, eyeing you suspiciously.";
+        assert_eq!(
+            item_tracker_display_name(&ow, prose, &[]),
+            Some("old".to_string()),
+            "no other item this turn claims \"old\", so tier 1 must still win exactly as before"
         );
     }
 }

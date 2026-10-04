@@ -1,0 +1,210 @@
+# SQ-1600: a verified command sequence for Adventureland (adv01.dat, the
+# first title in Adventure International's classic Scott Adams series),
+# reconstructed by decompiling the real database's action table
+# (`scott::decompile::decompile_all` on adv01.dat -- every room, item, verb,
+# noun, condition and effect) and then booting the real game headlessly
+# through ScottSession, submitting each command and checking its actual
+# printed reply against the decompiled conditions before adding it here
+# (crates/app/tests/suites/walkthrough_adventureland.rs). No published
+# walkthrough or solution file was consulted for this one -- it is this
+# project's own derived list of literal game commands, worked out directly
+# from the action table and confirmed turn by turn against the real
+# interpreter, produced for automated regression testing.
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. Every command is submitted as an ordinary typed line -- Scott
+# Adams games (outside a US S.A.G.A. picture-show sequence, which this
+# title never enters) take no keypress-only input.
+#
+# The harness injects a host Save State/Restore State persistence check
+# right after the `drop keys` below (back in the treasure room having just
+# deposited the Pot of Rubies and the skeleton keys, holding nothing more
+# exotic than the lit^H^H^Hunlit lamp and a full water bottle) -- see that
+# file's CHECKPOINT_AFTER_COMMAND doc.
+#
+# The walkthrough's shape, for anyone reading the raw command list: get the
+# axe and immediately visit the quicksand bog to say the magic word BUNYON
+# (this relocates both the axe and, on the next turn, the Blue Ox statue to
+# the hidden grove -- Paul Bunyan's own joke, and the only way to trigger
+# it, since the general "say bunyon anywhere" action does not also move the
+# ox); swim out of the bog (it has no ordinary exit); collect the axe, the
+# jewelled fruit and the ox from the grove; fetch the skeleton keys from the
+# cypress treetop BEFORE felling the tree (climbing it afterwards enters the
+# stump/treasure-room instead); chop the tree down and descend into the
+# stump to find the lamp, a full water bottle and the Pot of Rubies; unlock
+# the door beyond with the keys; fetch the flint & steel from the ledge
+# below the bottomless hole (needed to light both the lamp and, later, the
+# bottled gas); dive underground with mud on (protection against the
+# African bees and the chiggers) to net a bottle of bees (poke an air hole
+# in it or they suffocate) and the Royal Honey; drop the bees on the
+# sleeping dragon in the meadow to make it flee, dropping the Dragon Eggs
+# (a SECOND `drop bees`, once the dragon is gone, is the general case that
+# empties the bottle back out rather than the dragon-specific one); rub the
+# lamp (unlit!) exactly twice for the Genie's gifts -- a third rub turns it
+# hostile and takes a treasure back; fill the wine bladder with swamp gas,
+# carry it to the royal chamber and light it there (never while carrying
+# it) to blow a hole in the bricked-up window and loosen fire bricks;
+# scream at the black bear guarding the ledge to startle it off rather than
+# fighting it, freeing the Magic Mirror and, across the throne room, the
+# Gold Crown; fetch the Persian Rug from the maze of pits -- carrying it and
+# saying AWAY teleports between the meadow and the maze, the ONLY way in or
+# out of that whole underground cluster, which has no other route back to
+# the cavern; dam the lava at the bottom of the chasm with the bricks to
+# reveal the Firestone (too hot to hold), pour water on it to cool it, and
+# collect the Golden Net that was sitting right there; the Magic Mirror can
+# only be dropped safely in the same room as the (already-dropped) rug, or
+# it shatters; and finally net the Golden Fish at the lake shore (carrying
+# both the net and a full water bottle defeats its two separate decay
+# risks -- escaping back to the lake, and simply dying of thirst) for the
+# thirteenth and last treasure, then say SCORE for the game's own ending.
+#
+
+east
+east
+get axe
+north
+say bunyon
+swim
+west
+south
+west
+get axe
+get fruit
+get ox
+east
+climb tree
+get keys
+down
+chop tree
+climb tree
+drop fruit
+drop ox
+drop axe
+get lamp
+get bottle
+down
+get rubies
+go hole
+unlock door
+up
+up
+drop rubies
+drop keys
+up
+east
+go hole
+get flint
+up
+west
+get mud
+climb tree
+down
+go hole
+light lamp
+go hall
+down
+north
+drink water
+north
+get bees
+make hole
+get honey
+south
+south
+up
+up
+up
+up
+up
+north
+drop bees
+get eggs
+drop bees
+south
+climb tree
+drop honey
+drop eggs
+unlight lamp
+rub lamp
+rub lamp
+light lamp
+down
+go hole
+go hall
+down
+south
+get bladder
+north
+up
+up
+up
+up
+up
+get gas
+get mud
+north
+east
+get water
+west
+south
+climb tree
+down
+go hole
+go hall
+down
+south
+up
+drop bladder
+light gas
+drop flint
+get bricks
+go ledge
+drop bricks
+jump
+scream
+get mirror
+go throne
+get crown
+west
+jump
+get bricks
+west
+down
+north
+down
+down
+west
+north
+get rug
+say away
+south
+climb tree
+drop crown
+up
+say away
+down
+get net
+dam lava
+drop bricks
+drop water
+get firestone
+up
+say away
+south
+climb tree
+drop rug
+drop mirror
+drop firestone
+score
+up
+get mud
+north
+east
+get water
+get fish
+west
+south
+climb tree
+drop fish
+drop net
+score

@@ -355,6 +355,39 @@ pub enum DiskImage {
     AtariXex,
 }
 
+/// The real-world computer a [`DiskImage`] was pressed for — see
+/// [`DiskImage::machine`].
+///
+/// **Not [`crate::fat12::Machine`]**, a different, narrower enum in a different
+/// module that tells the two [`DiskImage::Fat12Dos`]/[`DiskImage::Fat12AtariSt`]
+/// presses of one filesystem apart; this one names a machine for every medium
+/// this crate reads, IBM PC included.
+///
+/// These spellings match two existing enums exactly, deliberately: they must not
+/// diverge from `app::interpreter::InterpreterProfile` (`Amiga`, `Macintosh`,
+/// `AtariSt`, `Commodore64`, `IbmPc`) or `scott::SagaPlatform` (`AppleII`
+/// generic, `Atari8Bit`, `Commodore64`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Machine {
+    /// The Amiga — [`DiskImage::Adf`].
+    Amiga,
+    /// The Macintosh — [`DiskImage::Hfs`].
+    Macintosh,
+    /// The Atari ST — [`DiskImage::Fat12AtariSt`].
+    AtariSt,
+    /// The Apple II family, generically (IIe/IIc/IIgs are not told apart here)
+    /// — [`DiskImage::ProDos`], [`DiskImage::InfocomBootDisk`],
+    /// [`DiskImage::AppleDos33`].
+    AppleII,
+    /// The Atari 8-bit line — [`DiskImage::AtariDos2`], [`DiskImage::AtariXex`].
+    Atari8Bit,
+    /// The Commodore 64/128 — [`DiskImage::CommodoreD64`],
+    /// [`DiskImage::CommodoreG64`].
+    Commodore64,
+    /// The IBM PC — [`DiskImage::Fat12Dos`].
+    IbmPc,
+}
+
 impl DiskImage {
     /// Which release medium `raw` is, or `None` when it is not one.
     ///
@@ -420,6 +453,18 @@ impl DiskImage {
     /// [`Self::interpreter_number`]'s `None`.
     pub fn implies_ibm_pc(self) -> bool {
         self.row().implies_ibm_pc
+    }
+
+    /// Which real-world computer this medium names, when it names exactly one.
+    ///
+    /// Independent of [`Self::interpreter_number`]: [`DiskImage::AtariDos2`] and
+    /// [`DiskImage::AtariXex`] answer `None` there — ZMSD §11.1.3 numbers no
+    /// Atari 8-bit machine at all — but answer `Some(Machine::Atari8Bit)` here,
+    /// because the medium still names a real computer even where the Z-machine
+    /// header has no byte for it. [`DiskImage::Iso9660`] answers `None` at both:
+    /// a hybrid disc is two machines, and no single one is the answer.
+    pub fn machine(self) -> Option<Machine> {
+        self.row().machine
     }
 
     /// The filename extensions this format is CONVENTIONALLY given — lowercase,
@@ -511,6 +556,8 @@ struct Format {
     /// floppy resolve as *no medium at all*: it took the fallback profile, so the
     /// story was told DECSystem-20 and the machine's own colours never applied.
     implies_ibm_pc: bool,
+    /// See [`DiskImage::machine`].
+    machine: Option<Machine>,
     /// See [`DiskImage::extensions`]. Lowercase, no dot, at least one — a row
     /// with none is a format a directory scan can never offer, and the census
     /// test in this module says so.
@@ -575,6 +622,7 @@ const FORMATS: &[Format] = &[
         label: "ADF",
         interpreter_number: Some(AMIGA_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::Amiga),
         // Every Amiga floppy in the corpus is `.adf`; the format has no second
         // customary spelling.
         extensions: &["adf"],
@@ -587,6 +635,7 @@ const FORMATS: &[Format] = &[
         label: "HFS",
         interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::Macintosh),
         // `.image` is DiskCopy 4.2's own name and what the corpus uses (`Zork
         // Zero Disk.image`). Macintosh volumes also circulate as `.img` and
         // `.dsk`; the first is admitted by the DOS row below and the second by
@@ -667,6 +716,7 @@ const FORMATS: &[Format] = &[
         // …and THIS `None` is a deferral, not an absence: see the comment above.
         // The machine is the IBM PC; only its number is a rule (SQ-0930).
         implies_ibm_pc: true,
+        machine: Some(Machine::IbmPc),
         // Two spellings of one thing, as this module's header already says:
         // `floppy1.ima` and `disk1.img` are the same raw sector dump and the
         // same reader opens both.
@@ -699,6 +749,7 @@ const FORMATS: &[Format] = &[
         // YZIP, so it has no Version 6 art geometry to state.
         interpreter_number: Some(ATARI_ST_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::AtariSt),
         // `.st` is the raw ST sector dump, which is what this reader opens and
         // what all nine compilations in the corpus are. **Not `.msa`**: Magic
         // Shadow Archiver images are RLE-compressed with their own header, not
@@ -767,6 +818,7 @@ const FORMATS: &[Format] = &[
         // window in this codebase's sense at all. See that knob's docs.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::AppleII),
         // Two spellings, one filesystem. `.2mg` is the wrapper every 3.5-inch
         // image in the corpus wears; `.dsk` is what a 5.25-inch dump is called,
         // and SQ-0864 established that those are ProDOS volumes too — the same
@@ -828,6 +880,7 @@ const FORMATS: &[Format] = &[
         // rather than a fresh guess.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::AppleII),
         // The same spelling as the ProDOS row, which the census handles by being
         // a UNION: a directory scan pre-filters on `.dsk` and
         // [`DiskImage::detect`] then says which of the two formats the bytes are.
@@ -855,6 +908,7 @@ const FORMATS: &[Format] = &[
         // DECSystem-20 (SQ-0857). `--interpreter 8` names the Commodore 64.
         interpreter_number: Some(COMMODORE_128_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::Commodore64),
         // `.d64` is the universal spelling for a 1541 dump and what all three
         // images in `stories/` wear — two of them shouting, which costs nothing:
         // the census is matched case-insensitively by every scan that uses it.
@@ -893,6 +947,7 @@ const FORMATS: &[Format] = &[
         // is not restated. `--interpreter 8` names the Commodore 64.
         interpreter_number: Some(COMMODORE_128_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::Commodore64),
         // `.g64` is the only spelling the format has ever had; it is what the
         // signature says (`GCR-1541`) and what every nibbler writes.
         extensions: &["g64"],
@@ -931,6 +986,10 @@ const FORMATS: &[Format] = &[
         // wearing Infocom's own creator, and only what it cannot name reaches
         // here.
         implies_ibm_pc: true,
+        // Neither machine: this disc is both, and a single answer here would be
+        // wrong for half of it (the same ground `interpreter_number` declines on
+        // above). See [`machine_from_finder`] for the per-file answer.
+        machine: None,
         // `iso` is the universal spelling and what both discs wear. `bin` and
         // `img` are claimed by rows above and reach this one anyway, since a
         // scan pre-filters on the union and `looks_like` decides.
@@ -968,6 +1027,10 @@ const FORMATS: &[Format] = &[
         // is not implied: leaving the rule in force means leaving each front-end's
         // own default, which is what "no row in §11.1.3" deserves.
         implies_ibm_pc: false,
+        // Unlike `interpreter_number` above, this medium DOES name a real
+        // machine — ZMSD §11.1.3 simply has no byte for it. The whole point of
+        // this field: the two facts are independent (SQ-1615).
+        machine: Some(Machine::Atari8Bit),
         // `.atr` is the only spelling this container has ever had, and all
         // fifteen Atari specimens in `stories/scott-dialects/atari/` wear it.
         // **Not `.xfd`** — that is the same disk with the header cut off, which
@@ -1000,6 +1063,7 @@ const FORMATS: &[Format] = &[
         // no Z-machine story in `stories/` is on a DOS 3.3 volume.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
         implies_ibm_pc: false,
+        machine: Some(Machine::AppleII),
         // `.dsk`, and only `.dsk` — the spelling all fourteen Apple sides in
         // `stories/scott-dialects/apple/` wear, and the third row to claim it.
         // The census is a union and a scan pre-filters on it, so sharing a
@@ -1038,6 +1102,9 @@ const FORMATS: &[Format] = &[
         // Z-machine header to write a byte into.
         interpreter_number: None,
         implies_ibm_pc: false,
+        // Same independence as the `.atr` row above: no ZMSD number, but a real
+        // machine all the same.
+        machine: Some(Machine::Atari8Bit),
         // `.xex` is the spelling the one specimen wears and the one the format is
         // universally called. **Not `.obj`, `.com` or `.bin`** — the same file
         // does wear those, and every one of them is claimed by something else
@@ -2038,6 +2105,11 @@ impl MountedDisk {
         self.image.interpreter_number()
     }
 
+    /// See [`DiskImage::machine`].
+    pub fn machine(&self) -> Option<Machine> {
+        self.image.machine()
+    }
+
     /// The volume's own name, where the format keeps one.
     pub fn volume_name(&self) -> Option<&str> {
         self.volume.volume_name()
@@ -2241,6 +2313,25 @@ mod tests {
         assert_eq!(DiskImage::Adf.label(), "ADF");
     }
 
+    /// **The whole point of SQ-1615**: `interpreter_number` and `machine` are
+    /// independent facts. ZMSD §11.1.3 numbers no Atari 8-bit machine at all,
+    /// so these two decline there — but the medium still names a real computer,
+    /// which nothing before this quest could say for it.
+    #[test]
+    fn an_atari_8_bit_disk_names_its_machine_even_with_no_interpreter_number() {
+        assert_eq!(DiskImage::AtariDos2.machine(), Some(Machine::Atari8Bit));
+        assert_eq!(DiskImage::AtariDos2.interpreter_number(), None);
+        assert_eq!(DiskImage::AtariXex.machine(), Some(Machine::Atari8Bit));
+        assert_eq!(DiskImage::AtariXex.interpreter_number(), None);
+    }
+
+    /// The other side of `machine`'s `None`: a hybrid disc names no single
+    /// machine at all, rather than a machine nothing recorded.
+    #[test]
+    fn a_hybrid_cd_names_no_single_machine() {
+        assert_eq!(DiskImage::Iso9660.machine(), None);
+    }
+
     // ── The seam: one mount path, every format (SQ-0840) ──────────────────────
 
     /// A structurally valid v6 story, so `looks_like_story` finds it and every
@@ -2399,20 +2490,23 @@ mod tests {
             DiskImage::AtariXex,
         ];
         for image in census {
-            let (label, interpreter) = match image {
-                DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
-                DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER)),
+            let (label, interpreter, machine) = match image {
+                DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER), Some(Machine::Amiga)),
+                DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER), Some(Machine::Macintosh)),
                 // A CD-ROM is not a machine: this one carries both, so the row
-                // states none and the file decides (SQ-0871).
-                DiskImage::Iso9660 => ("ISO", None),
+                // states none and the file decides (SQ-0871). `machine()`
+                // agrees for the same reason — neither number nor machine.
+                DiskImage::Iso9660 => ("ISO", None, None),
                 // One FAT12 filesystem, two machines, two different answers —
                 // and the difference is the point. The IBM PC's honest number
                 // is version-dependent (6 for Version 6, else 1), so no single
                 // constant expresses it and its own rule is already in force.
                 // The Atari ST's is a flat 5, written as such by Infocom's own
                 // ST interpreters; both are argued at their rows in `FORMATS`.
-                DiskImage::Fat12Dos => ("MS-DOS", None),
-                DiskImage::Fat12AtariSt => ("ST", Some(ATARI_ST_INTERPRETER_NUMBER)),
+                DiskImage::Fat12Dos => ("MS-DOS", None, Some(Machine::IbmPc)),
+                DiskImage::Fat12AtariSt => {
+                    ("ST", Some(ATARI_ST_INTERPRETER_NUMBER), Some(Machine::AtariSt))
+                }
                 // …and the Apple II answers like the ST rather than like DOS,
                 // which is the reversal SQ-0857 argued at the row. ProDOS still
                 // names the FAMILY and §11.1.3 still numbers three machines in
@@ -2421,41 +2515,54 @@ mod tests {
                 // rather than no machine. 10 is the top of the family the Apple
                 // YZIP will run on, and `--interpreter` still reaches the
                 // other two.
-                DiskImage::ProDos => ("ProDOS", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
+                DiskImage::ProDos => {
+                    ("ProDOS", Some(APPLE_IIGS_INTERPRETER_NUMBER), Some(Machine::AppleII))
+                }
                 // …and the raw self-booting press answers **the same number as
                 // the ProDOS row**, because §11.1.3's question is which machine
                 // the interpreter runs on and not which filesystem the disk has.
                 // Two Apple II rows disagreeing would say the number is a
                 // property of the disk, which is exactly what SQ-0857 disproved
                 // out of Infocom's own YZIP. Argued in full at the row.
-                DiskImage::InfocomBootDisk => ("Boot", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
+                DiskImage::InfocomBootDisk => {
+                    ("Boot", Some(APPLE_IIGS_INTERPRETER_NUMBER), Some(Machine::AppleII))
+                }
                 // …and the Commodore press names a family too, like ProDOS —
                 // but unlike ProDOS the two candidates are told apart ON the
                 // disk, and the corpus holds one of each. The C64 press is
                 // Version 3 and cannot read `$1E` at all, so the only Commodore
                 // story here that reads it is on a Commodore 128 disk. Argued in
                 // full at [`COMMODORE_128_INTERPRETER_NUMBER`].
-                DiskImage::CommodoreD64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
+                DiskImage::CommodoreD64 => {
+                    ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER), Some(Machine::Commodore64))
+                }
                 // …and the bitstream dump of the same floppy answers the same
                 // number, because §11.1.3 asks which MACHINE the interpreter
                 // runs on and a container cannot change that. It carries the
                 // same LABEL for the same reason: the type a library shows is
                 // the medium, and both of these are a 1541 floppy.
-                DiskImage::CommodoreG64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
+                DiskImage::CommodoreG64 => {
+                    ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER), Some(Machine::Commodore64))
+                }
                 // …and the Atari 8-bit declines for a THIRD reason, which is
                 // neither of the two above: §11.1.3 numbers no such machine at
-                // all. Its 5 is the Atari ST. Argued at the row.
-                DiskImage::AtariDos2 => ("Atari DOS", None),
-                DiskImage::AtariXex => ("XEX", None),
+                // all. Its 5 is the Atari ST. Argued at the row. `machine()`
+                // still answers `Atari8Bit` — the whole point of SQ-1615: the
+                // medium names a real machine even where ZMSD has no byte for it.
+                DiskImage::AtariDos2 => ("Atari DOS", None, Some(Machine::Atari8Bit)),
+                DiskImage::AtariXex => ("XEX", None, Some(Machine::Atari8Bit)),
                 // …and the Apple II's third filesystem answers the same number
                 // as its other two, because §11.1.3 asks which machine the
                 // interpreter runs on and three rows disagreeing would make the
                 // number a property of the disk (SQ-0857).
-                DiskImage::AppleDos33 => ("DOS 3.3", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
+                DiskImage::AppleDos33 => {
+                    ("DOS 3.3", Some(APPLE_IIGS_INTERPRETER_NUMBER), Some(Machine::AppleII))
+                }
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
             assert_eq!(image.interpreter_number(), interpreter, "{image:?}");
+            assert_eq!(image.machine(), machine, "{image:?}");
         }
         assert_eq!(
             DiskImage::all().count(),
@@ -2586,6 +2693,7 @@ mod tests {
             assert_eq!(disk.format(), image);
             assert_eq!(disk.label(), image.label());
             assert_eq!(disk.interpreter_number(), image.interpreter_number());
+            assert_eq!(disk.machine(), image.machine());
             let (story_name, others) = sample_entries(image);
             assert_eq!(disk.file_count(), 1 + others.len(), "{image:?} lists what it mounted");
 
@@ -3204,16 +3312,30 @@ mod tests {
     /// Every regular file under `dir`, recursing into subdirectories — the
     /// discs live one level down now (`treasures/Amiga/`, `treasures/Mac/`,
     /// `treasures/ISOs/`), and a future reorg might nest further still.
+    ///
+    /// Symlinked directories are followed, but each canonical directory is
+    /// walked once, so a link back to an ancestor cannot loop (SQ-1708).
     fn files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files_under(&path, out);
-            } else if path.is_file() {
-                out.push(path);
+        fn walk(
+            dir: &std::path::Path,
+            out: &mut Vec<std::path::PathBuf>,
+            seen: &mut std::collections::HashSet<std::path::PathBuf>,
+        ) {
+            let Ok(canon) = std::fs::canonicalize(dir) else { return };
+            if !seen.insert(canon) {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out, seen);
+                } else if path.is_file() {
+                    out.push(path);
+                }
             }
         }
+        walk(dir, out, &mut std::collections::HashSet::new());
     }
 
     /// **Every disc the user drops in `treasures/` mounts AND would be offered

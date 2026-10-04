@@ -17,7 +17,7 @@ use ratatui::layout::Rect;
 use app::engine_helpers::zvm_session_opt;
 use crate::reset::reset_game;
 use crate::{
-    combined_saves, format_rfc3339, handle_map_export, map_view, open_hints, scroll_for_match,
+    combined_saves, format_rfc3339, handle_map_export, map_view, scroll_for_match,
     should_prompt_save_on_quit, toggle_style_watch,
 };
 
@@ -37,6 +37,7 @@ pub(crate) fn dispatch_slash_outcome(
     game_dir: &std::path::Path,
     ifid: &str,
     arc_file: &std::path::Path,
+    quick_save_file: &std::path::Path,
     story_bytes: &[u8],
     story_path: &std::path::Path,
     map_rect: Rect,
@@ -357,15 +358,19 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("save failed: {}", e)),
             },
             None => {
-                // The default archive slot is the auto/quick-save equivalent —
-                // never a name the player typed — so it never prompts (SQ-0648).
+                // The quick-save slot (`quick-save.lanthorn`) is the manual
+                // Ctrl+S / bare `/save-state` equivalent — never a name the
+                // player typed — so it never prompts (SQ-0648). Kept apart
+                // from the per-turn/exit auto-save's `default.lanthorn`
+                // (SQ-1624) so this explicit save is never immediately
+                // overwritten by the next turn's auto-save.
                 // SQ-0588: the display list travels with this save too — this is
                 // the interactive Save State path, and an archive written
                 // without it restores art that can never be recoloured.
-                // Land any in-flight background per-turn auto-save first (SQ-1184):
-                // this writes the same default slot, so an explicit /save that
-                // reports "saved" must not race a background write for an
-                // earlier turn onto the same file.
+                // Land any in-flight background per-turn auto-save first
+                // (SQ-1184): it writes a different file now, but this still
+                // orders the explicit save after anything already queued this
+                // turn, so "saved" is reported only once this write itself lands.
                 state.archive_worker.flush();
                 let (v6_pics, v6_display, v6_ground, v6_diags) = app::engine_helpers::v6_save_payload(&mut *session);
                 for d in &v6_diags { state.note_v6_save(d); }
@@ -384,8 +389,9 @@ pub(crate) fn dispatch_slash_outcome(
                     location,
                     score,
                     trigger: app::archive::SaveTrigger::HostState,
+                    source: state.source.clone(),
                 };
-                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &app::archive::SessionRecord::of(state), &v6_pics, v6_display.as_ref(), v6_ground.as_deref())
+                let result = save_archive_meta_pics(quick_save_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &app::archive::SessionRecord::of(state), &v6_pics, v6_display.as_ref(), v6_ground.as_deref())
                     .map(|()| "saved".to_string())
                     .map_err(|e| format!("save failed: {}", e));
                 apply_slash_save_result(result, session, state);
@@ -556,8 +562,14 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::OpenHints => {
-            let ud = state.config.user_dir.clone();
-            open_hints(state, story_path, ifid, &ud);
+            // SQ-1685: show the Journal's Hints tab (starting its session); the
+            // keyboard stays where it was.
+            app::hints_tab::show(state, mapper, story_path, ifid);
+        }
+        SlashOutcome::DownloadHints => {
+            // SQ-1685: the Hints tab's button, and the same command the story
+            // browser runs for the selected story.
+            app::hints_tab::start_download(state, story_path);
         }
         SlashOutcome::HelpCommand(name) => {
             for line in slash::help_for_command(state.config.command_prefix, &name) {
@@ -628,6 +640,26 @@ pub(crate) fn dispatch_slash_outcome(
                 }
                 Err(e) => state.set_status(format!("set-game-borders failed: {e}")),
             }
+        }
+        SlashOutcome::DownloadDocuments => {
+            // SQ-1680: manuals, feelies and maps from this game's IFDB record.
+            // The chooser is a modal of the game's own; a game IFDB does not
+            // know gets the reason on the status line instead.
+            match app::documents_chooser::session_for_story(
+                state.data_roots.as_ref(),
+                story_path,
+                state.source.disk_entry.as_deref(),
+                state.ifdb_gate.clone(),
+                app::documents_chooser::default_source(),
+            ) {
+                Ok(session) => state.overlays.documents = Some(session),
+                Err(why) => state.set_status(why),
+            }
+        }
+        SlashOutcome::CreateDocumentsFolder => {
+            // SQ-1681: the Documents tab's button, and the same command the story
+            // browser's info panel runs for the selected story.
+            app::documents_tab::create_folder(state, story_path);
         }
         SlashOutcome::RunFontCheck => {
             // SQ-1104/SQ-1245: open the same modal the first run raises, on
@@ -804,6 +836,14 @@ pub(crate) fn dispatch_slash_outcome(
                     );
                 }
                 Err(e) => state.set_status(format!("set-v6-render failed: {e}")),
+            }
+        }
+        SlashOutcome::SetGlkFit(arg) => {
+            // SQ-1707: the whole effect lives in `host::screen` so a host that
+            // is not this binary runs the very same thing.
+            match app::host::screen::run_set_glk_fit(session, state, game_dir, arg) {
+                Ok(line) => state.push_transcript_internal(&line, TranscriptKind::Meta),
+                Err(e) => state.set_status(format!("[{e}]")),
             }
         }
         SlashOutcome::SetV6PixelLock(arg) => {
@@ -1089,7 +1129,7 @@ pub(crate) fn write_named_save(
         game_dir, ifid, name, app::archive::SaveTrigger::HostState, mapper, &session.save_state(),
         zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(),
         v6_ground.as_deref(), session.aux_data(), state.turns, location, score,
-        &app::archive::SessionRecord::of(state),
+        &app::archive::SessionRecord::of(state), &state.source,
     )
         .map(|()| format!("saved as \"{}\"", name))
         .map_err(|e| format!("save failed: {}", e))
@@ -1253,7 +1293,7 @@ mod debug_dispatch_tests {
         let dir = std::path::Path::new("/tmp/lanthorn-sq0435-test");
         dispatch_slash_outcome(
             outcome, state, &mut mapper, &mut engine, &mut style_watcher,
-            dir, "IFIDTEST", dir, &[], dir,
+            dir, "IFIDTEST", dir, dir, &[], dir,
             Rect::default(), Rect::default(), false,
         )
     }
@@ -1266,7 +1306,7 @@ mod debug_dispatch_tests {
         let mut style_watcher: Option<app::watch::StyleWatcher> = None;
         dispatch_slash_outcome(
             outcome, state, &mut mapper, &mut engine, &mut style_watcher,
-            dir, "IFIDTEST", dir, &[], dir,
+            dir, "IFIDTEST", dir, dir, &[], dir,
             Rect::default(), Rect::default(), false,
         );
     }
@@ -1500,10 +1540,11 @@ mod debug_dispatch_tests {
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
         let mut style_watcher: Option<app::watch::StyleWatcher> = None;
         let arc_file = dir.join("default.lanthorn");
+        let quick_save_file = dir.join("quick-save.lanthorn");
         let should_break = dispatch_slash_outcome(
             SlashOutcome::Save(Some("before, troll!".to_string())),
             &mut state, &mut mapper, &mut engine, &mut style_watcher,
-            &dir, "IFIDTEST", &arc_file, &[], &dir,
+            &dir, "IFIDTEST", &arc_file, &quick_save_file, &[], &dir,
             Rect::default(), Rect::default(), false,
         );
         assert!(!should_break);
@@ -1552,25 +1593,39 @@ mod debug_dispatch_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The default archive slot (`/save` with no name) is the quick-save
-    /// equivalent, never a name the player typed — it must keep overwriting
-    /// silently even when the slot already holds an earlier save, exactly like
-    /// the per-turn auto-save (SQ-0648).
+    /// `/save` with no name (Ctrl+S / bare `/save-state`) writes the QUICK-SAVE
+    /// slot (`quick-save.lanthorn`), never a name the player typed — so it
+    /// never prompts (SQ-0648) — and it must keep overwriting that slot
+    /// silently even when it already holds an earlier save. SQ-1624: it must
+    /// land in `quick-save.lanthorn`, NOT the per-turn/exit auto-save's
+    /// `default.lanthorn`, which this seeds too and asserts untouched — that
+    /// separation is the whole point of the two slots existing (a manual
+    /// quick-save used to be immediately overwritten by the next auto-save,
+    /// since both wrote the same file).
     #[test]
     fn slash_save_default_archive_never_prompts_even_when_it_already_exists() {
         let dir = temp_dir("default-slot");
         let arc_file = dir.join("default.lanthorn");
+        let quick_save_file = dir.join("quick-save.lanthorn");
 
-        let seed_meta = app::archive::Meta {
+        let seed_meta = || app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 1, saved_at: String::new(), location: None, score: None,
             trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         };
+        // Seed BOTH reserved slots so the write can be shown to land in exactly
+        // one of them.
         app::archive::save_archive_meta(
             &arc_file, &Mapper::default(), &EngineSave::new("mock", 1, vec![1, 2, 3]), None,
-            &BTreeMap::new(), seed_meta, &[], &[], &[], &[], &[], &[],
+            &BTreeMap::new(), seed_meta(), &[], &[], &[], &[], &[], &[],
         ).expect("seed default.lanthorn");
-        let before = std::fs::read(&arc_file).expect("seed archive written");
+        let before_default = std::fs::read(&arc_file).expect("seed archive written");
+        app::archive::save_archive_meta(
+            &quick_save_file, &Mapper::default(), &EngineSave::new("mock", 1, vec![4, 5, 6]), None,
+            &BTreeMap::new(), seed_meta(), &[], &[], &[], &[], &[], &[],
+        ).expect("seed quick-save.lanthorn");
+        let before_quick = std::fs::read(&quick_save_file).expect("seed archive written");
 
         let mut state = AppState::default();
         let mut mapper = Mapper::default();
@@ -1579,16 +1634,73 @@ mod debug_dispatch_tests {
         let should_break = dispatch_slash_outcome(
             SlashOutcome::Save(None),
             &mut state, &mut mapper, &mut engine, &mut style_watcher,
-            &dir, "IFIDTEST", &arc_file, &[], &dir,
+            &dir, "IFIDTEST", &arc_file, &quick_save_file, &[], &dir,
             Rect::default(), Rect::default(), false,
         );
         assert!(!should_break);
         assert!(
             state.overlays.confirm_overwrite_save.is_none(),
-            "the default archive slot must never open the overwrite-confirm overlay"
+            "the quick-save slot must never open the overwrite-confirm overlay"
         );
-        let after = std::fs::read(&arc_file).expect("archive still there");
-        assert_ne!(after, before, "it wrote silently, straight over the existing slot");
+        let after_quick = std::fs::read(&quick_save_file).expect("archive still there");
+        assert_ne!(after_quick, before_quick, "it wrote silently, straight over the existing quick-save slot");
+        let after_default = std::fs::read(&arc_file).expect("default.lanthorn still there");
+        assert_eq!(
+            after_default, before_default,
+            "a bare /save-state must NOT touch the auto-save slot (SQ-1624)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1633: the bare `/save-state` (quick-save) write builds its `Meta`
+    /// inline in this arm, a separate code path from `write_named_save` below —
+    /// it must carry the booted session's `source` too.
+    #[test]
+    fn slash_save_default_archive_names_its_own_source_sq1633() {
+        let dir = temp_dir("source-quicksave");
+        let mut state = AppState::default();
+        state.source = app::archive::SaveSource {
+            story_file: Some("Beyond Zork (1988)(Infocom).2mg".to_string()),
+            disk_entry: None,
+            machine: Some(app::archive::MachineDto::AppleII),
+        };
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let arc_file = dir.join("default.lanthorn");
+        let quick_save_file = dir.join("quick-save.lanthorn");
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::Save(None),
+            &mut state, &mut mapper, &mut engine, &mut style_watcher,
+            &dir, "IFIDTEST", &arc_file, &quick_save_file, &[], &dir,
+            Rect::default(), Rect::default(), false,
+        );
+        assert!(!should_break);
+        let meta = app::archive::read_archive_meta(&quick_save_file).expect("archive readable");
+        assert_eq!(meta.source, state.source, "the quick-save must name the booted copy's own source");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1633: `/save <name>` (`write_named_save`) is a third, separate call
+    /// site from the quick-save arm above and `save_named` itself — it must
+    /// also carry the booted session's `source`.
+    #[test]
+    fn slash_write_named_save_names_its_own_source_sq1633() {
+        let dir = temp_dir("source-named");
+        let mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut state = AppState::default();
+        state.source = app::archive::SaveSource {
+            story_file: Some("zork1-r88-s840726.z3".to_string()),
+            disk_entry: None,
+            machine: None,
+        };
+        super::write_named_save(&dir, "IFIDTEST", "checkpoint", &mapper, &mut engine, &mut state)
+            .expect("write succeeds");
+        let meta = app::archive::read_archive_meta(&dir.join("checkpoint.lanthorn")).expect("archive readable");
+        assert_eq!(meta.source, state.source, "a named save must name the booted copy's own source");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1638,7 +1750,7 @@ mod debug_dispatch_tests {
         let should_break = dispatch_slash_outcome(
             SlashOutcome::DumpWindows,
             state, &mut mapper, &mut engine, &mut style_watcher,
-            dir, "IFIDTEST", dir, &[], dir,
+            dir, "IFIDTEST", dir, dir, &[], dir,
             Rect::default(), Rect::default(), true,
         );
         assert!(!should_break, "a diagnostic dump never breaks the run loop");
@@ -1741,7 +1853,7 @@ mod debug_dispatch_tests {
         let should_break = dispatch_slash_outcome(
             SlashOutcome::DumpTerminal,
             state, &mut mapper, &mut engine, &mut style_watcher,
-            dir, "IFIDTEST", dir, &[], dir,
+            dir, "IFIDTEST", dir, dir, &[], dir,
             Rect::default(), pane, true,
         );
         assert!(!should_break, "a diagnostic dump never breaks the run loop");

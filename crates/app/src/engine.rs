@@ -368,6 +368,18 @@ pub struct Split {
     /// `fixed` unchanged; this is an additional fact a pixel-aware host (or a
     /// window's own canvas allocation) can use instead (SQ-1565).
     pub fixed_px: Option<u32>,
+    /// Size (rows or cols, per `vertical`) given to the SECOND child — its own
+    /// cell count, exactly as gvm's `layout_window` computed it (each child
+    /// rounds down independently on a proportional split; see the doc comment
+    /// there). This is NOT "whatever's left over after `fixed` and the
+    /// border": a proportional split can leave a one-cell remainder that
+    /// belongs to neither child, and a consumer that instead handed the second
+    /// child the full remaining area drew it one cell too large (SQ-1605).
+    /// `None` for a `WinNode::Pair` that isn't built from a real gvm split
+    /// (the app's own fixed-upper/fill-lower layouts for Z-machine and Scott
+    /// Adams, and hand-built test fixtures) — those have no rounding slack to
+    /// account for, so the second child correctly takes whatever's left.
+    pub rest: Option<u16>,
 }
 
 /// A graphics-window leaf: a snapshot of the window's canvas for rendering.
@@ -1009,6 +1021,23 @@ pub trait Engine {
     /// event path). (Lane M)
     fn set_mouse(&mut self, _y_px: u16, _x_px: u16) {}
 
+    /// Publish the host's own LOCKED player-object id
+    /// ([`crate::state::AppState::player_obj`]) into the engine (SQ-1631 Fix 3), mirroring
+    /// `set_mouse`/`set_screen_dims`/`set_default_colours`'s pattern of pushing a host-known fact
+    /// into the session rather than re-deriving it engine-side.
+    ///
+    /// Once the host has locked a player id — by watching what moved between rooms, for a story
+    /// whose player object carries no short name the engine's own heuristic could find directly —
+    /// every later per-turn item observation should prefer that hint over the raw heuristic, the
+    /// same fallback order [`crate::vocab::scope_split`]'s own `player_hint` parameter already
+    /// uses. `crate::host::turn::finish_command_turn` calls this once per command turn, right after
+    /// its own lock attempt, so the FOLLOWING turn's observations see it.
+    ///
+    /// Default no-op: only the Z-machine and Glulx sessions track item observations by object id
+    /// at all (Scott Adams has no player-object concept — every item is simply in a room, carried,
+    /// or nowhere) and override this to store it.
+    fn set_player_hint(&mut self, _hint: Option<u16>) {}
+
     /// The v6 screen's PAINTED ground — filled rectangles left by `erase_window`,
     /// in native pixels (SQ-0706). `None` for every engine and every game that
     /// never paints one, which is all of them but scopa-shaped v6 titles.
@@ -1270,8 +1299,19 @@ pub trait Engine {
     /// and neither plays its sounds nor prints its diagnostics. Surfacing a boot
     /// sound and a boot warning at the boot is the real change, and it waits for a
     /// story that needs one.
+    ///
+    /// SQ-1629: also drains `transcript`/`transcript_elems` (the same pair
+    /// `host::boot` used to drain a second time, separately, for the opening
+    /// banner) so this is now the ONE boot drain — an engine that fills
+    /// `description`/`items` from that same drain (overriding this default, as
+    /// `GameSession` does) needs the text still warm, not re-drained empty by a
+    /// caller who read it first.
     fn seed_turn(&mut self) -> TurnResult {
+        let transcript_elems = self.take_transcript_elems();
+        let transcript = if transcript_elems.is_empty() { self.take_transcript() } else { String::new() };
         TurnResult {
+            transcript,
+            transcript_elems,
             location: self.current_location(),
             quit: self.has_quit(),
             erase_lower: self.drain_screen_clear(),
@@ -1413,7 +1453,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1, fixed_px: None },
+                split: Split { fixed: 1, fixed_px: None, rest: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,

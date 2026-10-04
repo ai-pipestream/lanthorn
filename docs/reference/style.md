@@ -123,10 +123,41 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `tidy_progress` | Elements | Style | `accent` |  | |
 | `meta_marker` | Elements | Style | `muted` |  | |
 | `inventory_panel` | Elements | Style | `accent` |  | |
+| `journal.tabbar` | Elements | Style | `text` |  | |
+| `journal.tab` | Elements | Style | `muted` |  | |
+| `journal.tab:active` | Elements | Style | `accent` | `bold` | |
+| `journal.map.card` | Elements | Style | `text` |  | |
+| `journal.map.card.border` | Elements | Style | `chrome` |  | |
+| `journal.map.card.name` | Elements | Style | `heading` |  | |
+| `journal.map.card.layer` | Elements | Style | `muted` |  | |
+| `journal.map.card.description` | Elements | Style | `text` |  | |
+| `journal.map.card.seen` | Elements | Style | `muted` |  | |
+| `journal.map.card.button` | Elements | Style | `accent` | `bold reversed` | |
+| `journal.hints.transcript` | Elements | Style | `text` |  | |
+| `journal.hints.input` | Elements | Style | `text` |  | |
+| `journal.hints.input:unfocused` | Elements | Style | `muted` | `dim` | |
+| `journal.hints.builtin` | Elements | Style | `muted` | `italic` | |
+| `journal.hints.nohint` | Elements | Style | `muted` |  | |
+| `journal.hints.button` | Elements | Style | `accent` | `bold reversed` | |
+| `journal.hints.tab:focused` | Elements | Style | `accent` | `bold` | |
+| `journal.docs.row` | Elements | Style | `text` |  | |
+| `journal.docs.row:selected` | Elements | Style | `accent` | `reversed` | |
+| `journal.docs.meta` | Elements | Style | `muted` |  | |
+| `journal.docs.desc` | Elements | Style | `muted` |  | |
+| `journal.docs.spoiler` | Elements | Style | `alert` | `bold` | |
+| `journal.docs.header` | Elements | Style | `muted` |  | |
+| `journal.docs.button` | Elements | Style | `accent` | `bold reversed` | |
+| `journal.docs.hint` | Elements | Style | `muted` | `italic` | |
+| `journal.docs.pager` | Elements | Style | `text` |  | |
+| `journal.docs.pager_title` | Elements | Style | `heading` |  | |
+| `journal.docs.pager_notice` | Elements | Style | `alert` |  | |
+| `inventory_panel.header` | Elements | Style | `heading` |  | |
+| `inventory_panel.meta` | Elements | Style | `muted` |  | |
 | `room_panel` | Elements | Style | `text` |  | |
 | `room_panel.header` | Elements | Style | `heading` |  | |
 | `room_panel.header:pinned` | Elements | Style | `accent` | `reversed` | |
 | `room_panel.aliases` | Elements | Style | `muted` |  | |
+| `room_panel.description` | Elements | Style | `muted` | `italic` | |
 | `story_info_title` | Elements | Style | `heading` |  | |
 | `terminal_dump_heading` | Elements | Style | `heading` | `bold` | |
 | `terminal_dump_assumed` | Elements | Style | `alert` |  | |
@@ -137,7 +168,10 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `story_info_continuation` | Elements | Style | `muted` |  | |
 | `story_info_artwork` | Elements | Style | `story_info_value` |  | |
 | `story_info_artwork:active` | Elements | Style | `accent` | `bold` | |
+| `story_info_documents` | Elements | Style | `story_info_value` |  | |
+| `story_info_documents_button` | Elements | Style | `accent` | `bold reversed` | |
 | `graphics` | Elements | Style | `chrome` |  | |
+| `glk_mask_outside` | Elements | Style | `graphics` |  | |
 | `inline_image` | Elements | Style | `chrome` |  | |
 | `story_header` | Elements | Style | `muted` |  | |
 | `story_header_active` | Elements | Style | `accent` | `bold` | |
@@ -170,6 +204,10 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `ifdb_download_marker` | Elements | Style | `accent` | `glyph="⭳"` | |
 | `ifdb_download_present` | Elements | Style | `muted` | `glyph="✓"` | |
 | `ifdb_attribution` | Elements | Style | `muted` | `italic` | |
+| `documents_checked` | Elements | Style | `accent` | `glyph="✓"` | |
+| `documents_spoiler` | Elements | Style | `alert` | `italic` | |
+| `documents_title_match` | Elements | Style | `accent` | `bold` | |
+| `documents_preview` | Elements | Style | `muted` |  | |
 | `saves_portable` | Elements | Style | `accent` | `glyph="↗"` | |
 | `saves_host_only` | Elements | Style | `muted` |  | |
 | `dialog.list_selected` | Dialog | Style |  | `fg=Black bg=Cyan bold` | |

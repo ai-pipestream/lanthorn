@@ -409,6 +409,90 @@ fn zork1_answers_the_misses_it_can_and_stays_quiet_otherwise() {
     );
 }
 
+// ── SQ-1645: the word-split source, on a real story's grammar ───────────────
+
+/// `anchor.z8` — Anchorhead, freely distributed and fetched by
+/// `scripts/fetch-fixtures.sh`, so (unlike the rest of this file's real
+/// fixtures) this one actually runs on CI rather than skipping vacuously.
+/// `crate::fixture_paths::fixture_path` is what reaches it there; this file's
+/// own `story()` above only ever finds the gitignored local copy.
+fn anchor() -> Option<Vec<u8>> {
+    let path = crate::fixture_paths::fixture_path("anchor.z8");
+    std::fs::read(&path).ok()
+}
+
+/// **The grounding, on real data.** This quest's own commit scanned every
+/// Z-machine story under `stories/` for a verb whose spelling, concatenated
+/// with one of its own grammar's literal words, forms a plausible English
+/// compound the dictionary never spells as one token — `anchor.z8`'s `pick`
+/// (a real Anchorhead verb) plus its own literal `up` is exactly that, and
+/// `pickup` is nowhere in the dictionary at all. This is the premise
+/// [`StoryVocabulary::by_word_split`] runs on, read off a real story rather
+/// than a hand-built fixture.
+#[test]
+fn anchorhead_really_pairs_pick_with_the_literal_up() {
+    let Some(bytes) = anchor() else { return };
+    let s = app::session::GameSession::new_with_trace(
+        bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+    )
+    .expect("anchor.z8 boots without a ZError");
+    let v = s.story_vocabulary().expect("Anchorhead's grammar reads");
+    assert!(v.knows("pick"), "Anchorhead really implements `pick`");
+    assert!(!v.knows("pickup"), "and never spells it as one word");
+    let pick = v.verb_named("pick").expect("`pick` resolves to a verb");
+    assert!(
+        pick.prepositions().contains(&"up"),
+        "Anchorhead's own `pick` genuinely uses the literal `up` somewhere in its grammar: {:?}",
+        pick.prepositions()
+    );
+}
+
+/// **And what actually happens end to end — tier 4 answers first, correctly,
+/// on a game this well developed.** `pickup letter` is a bare one-noun shape
+/// with no literal typed, and Anchorhead — a full Inform 6 game — implements
+/// several ordinary verbs (`take`, `carry`, `get` among them) that accept a
+/// bare noun with no preposition at all. [`StoryVocabulary::by_bare_grammar_shape`]
+/// (tier 4, SQ-1644) runs BEFORE [`StoryVocabulary::by_word_split`] (tier 5,
+/// this quest) in [`StoryVocabulary::candidates`], and tier 4's `out.is_empty()`
+/// gate means tier 5 never even attempts the split once tier 4 has already
+/// answered — exactly the ordering `candidates`' own doc describes, and this
+/// pins it against a real, large grammar rather than only the small synthetic
+/// fixtures built for tier 5 in isolation elsewhere in this file's sibling
+/// test module (`vocab.rs`'s own `#[cfg(test)]` block).
+///
+/// This is not a gap: it means the exact reported symptom this quest exists
+/// for (`pickup toolcase` answered with nothing at all) already has SOME
+/// candidate pool on a game shaped like this one, via the more general source
+/// — `by_word_split` earns its keep on a grammar too MINIMAL for `take`-style
+/// generic bare verbs to already cover the shape, which a small or
+/// purpose-built story is more likely to be than a fully fleshed-out one like
+/// Anchorhead. Both tiers are marked [`Pick::requires_vetting`], so neither
+/// reaches the player unvetted either way.
+#[test]
+fn anchorhead_answers_a_squished_pickup_through_the_more_general_tier() {
+    let Some(bytes) = anchor() else { return };
+    let s = app::session::GameSession::new_with_trace(
+        bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+    )
+    .expect("anchor.z8 boots without a ZError");
+    let v = s.story_vocabulary().expect("Anchorhead's grammar reads");
+
+    let picks = v.offer_picks("pickup", Position::Opening, &["letter"], &[]);
+    assert!(!picks.is_empty(), "some candidate must survive — this is the reported symptom");
+    assert!(
+        picks.iter().all(|p| p.requires_vetting),
+        "every surviving candidate here is tier 3/4/5 and vetting-mandatory: {picks:?}"
+    );
+    assert!(
+        picks.iter().any(|p| p.word == "take" || p.word == "get" || p.word == "carry"),
+        "tier 4's generic bare-noun verbs answer first on a grammar this rich: {picks:?}"
+    );
+    assert!(
+        picks.iter().all(|p| p.word != "pick up"),
+        "tier 5 never even runs once tier 4 has already found something: {picks:?}"
+    );
+}
+
 /// **What the whole synonym effort was for**, on the game everybody meets first.
 /// `illuminate` is eight keystrokes from `light`, stems to nothing, and Zork's
 /// grammar relates them not at all — every source that reads FORM is blind to
@@ -680,7 +764,7 @@ fn a_glulx_story_that_rewords_the_refusal_is_answered_all_the_same() {
     let b = blorb::Blorb::parse(bytes).expect("a gblorb parses");
     let exec = b.executable().expect("an Exec chunk").1.to_vec();
     let mut s =
-        app::glulx_session::GlulxSession::new(exec, 80, 24, true, false, false, (1, 1), Some(b), &[])
+        app::glulx_session::GlulxSession::new(exec, 80, 24, true, false, false, (1.0, 1.0), Some(b), &[])
             .expect("Dr Ludwig boots");
     s.set_strip_prompt(false);
     // Its opening runs on keypresses; step past them to the first line prompt.

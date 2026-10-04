@@ -55,6 +55,7 @@
 use std::path::{Path, PathBuf};
 
 use blorb::infocom_pics::{Flavour, InfocomPics};
+use blorb::medium::Machine;
 
 use crate::config::ColourSource;
 
@@ -293,7 +294,17 @@ const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "da
 /// root sees the root's archives — which is every single-game floppy, and also
 /// the multi-disk case where a sibling volume carries the art at ITS root
 /// (SQ-0862). `None` lists everything on the medium, exactly as before.
-pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> Vec<ArtCandidate> {
+///
+/// `known_machine` is the machine a caller already knows this story was mounted
+/// out of, when it knows one — see [`rendition_label`]'s "known when it does"
+/// section. Passed straight through to every row's label; `None` when the
+/// caller has no medium in scope, which keeps a colour AmigaMac row honestly
+/// ambiguous.
+pub fn discover_art_candidates(
+    story_path: &Path,
+    disk_entry: Option<&str>,
+    known_machine: Option<Machine>,
+) -> Vec<ArtCandidate> {
     let story_stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let want_folder = disk_entry.map(folder_of);
     let mut out: Vec<ArtCandidate> = Vec::new();
@@ -398,7 +409,7 @@ pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> V
         let space_width = pics.picture_space_width();
         let mono = pics.is_monochrome();
         out.push(ArtCandidate {
-            rendition: rendition_label(pics.flavour(), space_width, &filename, mono),
+            rendition: rendition_label(pics.flavour(), space_width, &filename, mono, known_machine),
             flavour: pics.flavour(),
             pictures: pics.entries().len(),
             part: pics.part(),
@@ -588,12 +599,25 @@ impl DefaultArt {
 /// when the dialog opens and the renderer only formats the answer. The dialog is
 /// modal and nothing behind it can change the artwork on disk while it is up, so
 /// a value settled at open time cannot go stale before it is closed.
-pub fn resolved_default_art(story_path: &Path, disk_entry: Option<&str>) -> Option<DefaultArt> {
+///
+/// `known_machine` is [`discover_art_candidates`]'s same parameter, passed
+/// through to the one row this function ever labels.
+pub fn resolved_default_art(
+    story_path: &Path,
+    disk_entry: Option<&str>,
+    known_machine: Option<Machine>,
+) -> Option<DefaultArt> {
     if let Some(art) = crate::graphics::release_art(story_path, disk_entry) {
         let space_width = art.pictures.picture_space_width();
         let mono = art.pictures.is_monochrome();
         return Some(DefaultArt {
-            rendition: rendition_label(art.pictures.flavour(), space_width, &art.name, mono),
+            rendition: rendition_label(
+                art.pictures.flavour(),
+                space_width,
+                &art.name,
+                mono,
+                known_machine,
+            ),
             pictures: art.pictures.entries().len(),
             on_medium: true,
             disk_number: art.disk_number,
@@ -648,18 +672,33 @@ pub fn resolved_default_art(story_path: &Path, disk_entry: Option<&str>) -> Opti
 /// say Macintosh here and nothing says Amiga: Spatterlight's bocfel reclassifies
 /// a monochrome `Pic.data` as the B&W Mac on exactly this flag, and the archive
 /// is drawn in the 480×300 picture space that is Infocom's own `GFXMAC_X` /
-/// `GFXMAC_Y` — "1.5 x Amiga sizes", a screen the Amiga never had. A *colour*
-/// AmigaMac archive still says plain "Amiga", because there the ambiguity is
-/// real and unresolved.
+/// `GFXMAC_Y` — "1.5 x Amiga sizes", a screen the Amiga never had.
+///
+/// # A colour AmigaMac archive: honest when the caller doesn't know, resolved when it does
+///
+/// The codec alone still cannot tell a colour `Pic.data`/`CPic.data` apart from
+/// an Amiga one — that half of SQ-0838 stands. But when this story was mounted
+/// out of a **known disk image**, the medium itself already states the machine:
+/// an HFS volume is Apple's filesystem and nothing else wrote one, an ADF is the
+/// Amiga's. `known_machine` carries that answer in when a caller has it
+/// ([`blorb::medium::DiskImage::machine`]), and the ambiguity resolves to
+/// whichever machine the disk says — `"Mac"` or `"Amiga"`. With no medium in
+/// scope (a loose archive beside the story, or a disk image whose `.machine()`
+/// is `None`), the label stays the honest `"Amiga/Mac"` rather than guessing.
 fn rendition_label(
     flavour: Flavour,
     space_width: u16,
     filename: &str,
     monochrome: bool,
+    known_machine: Option<Machine>,
 ) -> &'static str {
     match flavour {
         Flavour::AmigaMac if monochrome => "Mac B&W",
-        Flavour::AmigaMac => "Amiga",
+        Flavour::AmigaMac => match known_machine {
+            Some(Machine::Macintosh) => "Mac",
+            Some(Machine::Amiga) => "Amiga",
+            _ => "Amiga/Mac",
+        },
         // Double hi-res, 140×192, sixteen hardware colours — one rendition, one
         // machine, and no filename or flag needed to tell them apart (SQ-0863).
         Flavour::Apple => "Apple II",
@@ -1006,9 +1045,12 @@ impl LaunchOptionsState {
         z_version: Option<u8>,
         disk_image: Option<crate::hints::DiskImage>,
     ) -> LaunchOptionsState {
-        let default_art = resolved_default_art(story_path, None);
-        let candidates =
-            without_the_default(discover_art_candidates(story_path, None), default_art.as_ref());
+        let known_machine = disk_image.and_then(crate::hints::DiskImage::machine);
+        let default_art = resolved_default_art(story_path, None, known_machine);
+        let candidates = without_the_default(
+            discover_art_candidates(story_path, None, known_machine),
+            default_art.as_ref(),
+        );
         // A sidecar naming an archive that is not in the list (an absolute path,
         // or a file that no longer parses) still deserves to be the baseline —
         // "inherit" is what it is, and the dialog must not silently re-point the
@@ -1110,11 +1152,12 @@ impl LaunchOptionsState {
         self.disk_entry = disk_entry.map(str::to_string);
         if self.disk_entry.is_some() {
             let entry = self.disk_entry.as_deref();
-            self.default_art = resolved_default_art(&self.story_path, entry);
+            let known_machine = self.disk_image.and_then(crate::hints::DiskImage::machine);
+            self.default_art = resolved_default_art(&self.story_path, entry, known_machine);
             // …and the LIST too, not only the default row: a compilation offers
             // one game's archives, not the whole platter's (SQ-0876).
             self.candidates = without_the_default(
-                discover_art_candidates(&self.story_path, entry),
+                discover_art_candidates(&self.story_path, entry, known_machine),
                 self.default_art.as_ref(),
             );
             self.art = self
@@ -1486,19 +1529,48 @@ mod tests {
     /// The Macintosh disk carries two `Flavour::AmigaMac` archives, so the label
     /// is the only thing that can tell them apart in a list (SQ-0843). The
     /// two-colour one names the machine bocfel's `0x0e` heuristic names, and the
-    /// colour one stays honestly ambiguous because there the codec really cannot
-    /// say. A two-colour PC archive is a `.cg1` and is unaffected.
+    /// colour one stays honestly ambiguous when no medium is in scope, because
+    /// there the codec really cannot say. A two-colour PC archive is a `.cg1`
+    /// and is unaffected.
     #[test]
     fn the_two_colour_amiga_mac_archive_is_labelled_as_the_macintoshs() {
-        assert_eq!(rendition_label(Flavour::AmigaMac, 480, "Pic.data", true), "Mac B&W");
-        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "CPic.data", false), "Amiga");
-        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "zork0.pic", false), "Amiga");
+        assert_eq!(rendition_label(Flavour::AmigaMac, 480, "Pic.data", true, None), "Mac B&W");
+        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "CPic.data", false, None), "Amiga/Mac");
+        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "zork0.pic", false, None), "Amiga/Mac");
         // The PC arm reads its extension exactly as before; CGA is two-colour
         // too and must not be relabelled by the new axis.
-        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.cg1", true), "CGA");
-        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.eg1", false), "EGA");
-        assert_eq!(rendition_label(Flavour::Pc, 320, "zork0.mg1", false), "MCGA");
-        assert_eq!(rendition_label(Flavour::Pc, 640, "mystery.dat", false), "EGA/CGA");
+        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.cg1", true, None), "CGA");
+        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.eg1", false, None), "EGA");
+        assert_eq!(rendition_label(Flavour::Pc, 320, "zork0.mg1", false, None), "MCGA");
+        assert_eq!(rendition_label(Flavour::Pc, 640, "mystery.dat", false, None), "EGA/CGA");
+    }
+
+    /// SQ-1650: when the caller knows which machine the story was mounted out
+    /// of — a disk image whose [`blorb::medium::DiskImage::machine`] resolves —
+    /// the same colour AmigaMac ambiguity above is no longer a guess. The mono
+    /// case is unaffected either way, since `EF_MONO` already settles it alone.
+    #[test]
+    fn a_known_medium_resolves_the_colour_amiga_mac_ambiguity() {
+        assert_eq!(
+            rendition_label(Flavour::AmigaMac, 320, "CPic.data", false, Some(Machine::Macintosh)),
+            "Mac"
+        );
+        assert_eq!(
+            rendition_label(Flavour::AmigaMac, 320, "Pic.data", false, Some(Machine::Amiga)),
+            "Amiga"
+        );
+        // A machine that is neither Amiga nor Macintosh (e.g. an Atari ST medium
+        // beside a loose AmigaMac archive) is not evidence about THIS codec, so
+        // it stays honestly ambiguous rather than picking one at random.
+        assert_eq!(
+            rendition_label(Flavour::AmigaMac, 320, "CPic.data", false, Some(Machine::AtariSt)),
+            "Amiga/Mac"
+        );
+        assert_eq!(
+            rendition_label(Flavour::AmigaMac, 480, "Pic.data", true, Some(Machine::Macintosh)),
+            "Mac B&W",
+            "monochrome stays unaffected by the new axis"
+        );
     }
 
     #[test]
@@ -1510,7 +1582,7 @@ mod tests {
         let dir = tmp("bogus");
         std::fs::write(dir.join("story.z6"), b"not a story").unwrap();
         std::fs::write(dir.join("story.mg1"), b"nowhere near an archive").unwrap();
-        assert!(discover_art_candidates(&dir.join("story.z6"), None).is_empty());
+        assert!(discover_art_candidates(&dir.join("story.z6"), None, None).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1520,7 +1592,7 @@ mod tests {
         if !z0.is_file() {
             return; // gitignored fixtures; skip vacuously (CI-safe)
         }
-        let found = discover_art_candidates(&z0, None);
+        let found = discover_art_candidates(&z0, None, None);
         let by_name = |n: &str| found.iter().find(|c| c.filename.eq_ignore_ascii_case(n)).cloned();
         // Every rendition the SQ-0734 note tabulates, each labelled from its own
         // codec and picture-space width rather than from its name.
@@ -1552,7 +1624,9 @@ mod tests {
             assert!(c.caveat().is_none(), "CGA line art draws correctly at 1:1");
         }
         if let Some(c) = by_name("zork0.pic") {
-            assert_eq!(c.rendition, "Amiga");
+            // No known medium in scope for a loose story file, so the colour
+            // AmigaMac archive stays honestly ambiguous (SQ-1650).
+            assert_eq!(c.rendition, "Amiga/Mac");
             assert_eq!(c.flavour, Flavour::AmigaMac);
             assert!(c.caveat().is_none());
         }

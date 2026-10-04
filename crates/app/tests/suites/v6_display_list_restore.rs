@@ -58,6 +58,7 @@ fn meta() -> app::archive::Meta {
         format_version: app::archive::CURRENT_FORMAT_VERSION,
         ifid: None, name: None, turns: 0, saved_at: String::new(),
         location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+        source: app::archive::SaveSource::default(),
     }
 }
 

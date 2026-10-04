@@ -82,7 +82,12 @@ pub fn draw_history(
         let marker = if i == replay.idx { ">" } else { " " };
         let cmd_trunc: String = rec.command.chars().take(40).collect();
         let map_tag = if rec.map_snapshot.is_some() { "*" } else { " " };
-        let line = format!("{} T{:<5} {} {}", marker, rec.turn, map_tag, cmd_trunc);
+        // `location_name` (SQ-1621) names the room this turn ended in, when known —
+        // "Turn 6: east · Kitchen" — clipped along with the rest of the row.
+        let line = match rec.location_name.as_deref() {
+            Some(room) => format!("{} T{:<5} {} {} · {}", marker, rec.turn, map_tag, cmd_trunc, room),
+            None => format!("{} T{:<5} {} {}", marker, rec.turn, map_tag, cmd_trunc),
+        };
         crate::render::draw_str_clipped(buf, row_area.x, row_y, &line, style, row_area);
     }
 

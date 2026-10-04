@@ -169,6 +169,7 @@ fn host_prose(cols: u16, rows: u16) -> (MainText, RasterMetrics) {
         viewport_rows: budget,
         max_scroll: total.saturating_sub(budget),
         first_visible_row: 0,
+        top_anchored_fits: false,
     };
     (main, metrics)
 }
@@ -225,6 +226,8 @@ fn host_compose_full(
         more_prompt_pair: (HOST_INK, HOST_PAGE),
         text,
         bottom_anchor_menu: false,
+        hybrid_text_rows: std::collections::HashSet::new(),
+        extend_flanks_under_story_grid: false,
     };
     compose_v6_frame(&layout, RasterFrame::native(native), &inputs)
 }
@@ -365,7 +368,7 @@ fn empty_prose(_cols: u16, rows: u16) -> (MainText, RasterMetrics) {
         awaiting: false,
         floats: Vec::new(),
     };
-    let metrics = RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0 };
+    let metrics = RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0, top_anchored_fits: false };
     (main, metrics)
 }
 
@@ -730,6 +733,8 @@ fn fmvpoker_compose(session: &GameSession, text: V6TextMode, input: Option<&str>
         more_prompt_pair: (HOST_INK, HOST_PAGE),
         text,
         bottom_anchor_menu: false,
+        hybrid_text_rows: std::collections::HashSet::new(),
+        extend_flanks_under_story_grid: false,
     };
     compose_v6_frame(&layout, RasterFrame::native(native), &inputs)
 }
@@ -1110,6 +1115,8 @@ fn drop_cap_margin_px_matches_where_the_raster_path_places_the_text_pixel() {
             more_prompt_pair: (HOST_INK, HOST_PAGE),
             text: V6TextMode::RecordOnly,
             bottom_anchor_menu: false,
+            hybrid_text_rows: std::collections::HashSet::new(),
+            extend_flanks_under_story_grid: false,
         };
         let f = compose_v6_frame(&layout, RasterFrame::native(native), &inputs);
         let s = f.story.unwrap_or_else(|| panic!("honor={honor}: no story box on Zork Zero's boot frame"));
@@ -1420,5 +1427,464 @@ fn hybrid_bottom_plan_for_raster_fallback_matches_the_tuis_own_decision() {
         let (oracle, answer) = raster_fallback_oracle_and_answer(&session);
         assert_eq!(oracle, "raster", "premise: fmvpoker's table renders through the composite (got {oracle:?})");
         assert!(answer, "fmvpoker's table: hybrid_bottom_plan_for must report the raster fall-through");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQ-1609 Gap 2: `V6FrameInputs::hybrid_text_rows` — a Hybrid host's opt-in to
+// keep `compose_v6_frame`'s reversed-gap fill (`fill_reverse_row_gaps`) off
+// rows it already draws itself in terminal cells (`hybrid_chrome_layout`'s own
+// `runs`).
+//
+// Arthur's status bar (`arthur-r74-s890714.z6`, release 74) is the specimen:
+// at the Churchyard's first line-read prompt, the bare cell before "St Anne's
+// Day" is a pure reverse-video gap at native row-top 192, and
+// `compose_v6_frame_into` used to bake an opaque host-ink (`#dcdcdc`) block
+// there under `V6TextMode::RecordOnly` regardless of whether a Hybrid-drawing
+// host's OWN cell layout already put something on that exact row.
+// ---------------------------------------------------------------------------
+
+/// Boot Arthur to the Churchyard's first line-read prompt — the same 12-tap
+/// sequence `command_band.rs`'s `arthurs_crystal_reaches_the_band_once_the_
+/// story_has_named_it` and `v6_hybrid_chrome_layout.rs`'s `arthur_pc` both
+/// use, because Arthur's boot menu needs more than a blank line or a space to
+/// clear and this file's own generic `tap`/[`boot`] never reaches it — this
+/// file's house style duplicates the small boot helper rather than sharing it
+/// (CLAUDE.md testing conventions).
+fn boot_arthur_at_churchyard() -> Option<Booted> {
+    let mut b = boot_at("arthur-r74-s890714.z6", 74)?;
+    for _ in 0..12 {
+        let r = match b.session.pending_input() {
+            InputKind::Line | InputKind::Event => b.session.submit(""),
+            InputKind::Char => b.session.submit_char(13),
+        };
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = b.session.submit_char(b'n');
+        }
+    }
+    Some(b)
+}
+
+/// [`V6FrameInputs::hybrid_text_rows`]'s own derivation rule, spelled once so
+/// the acceptance case and the agreement cross-check below cannot compute it
+/// two different ways: [`V6HybridChromeLayout::text_rows`] (SQ-1611) — every
+/// [`hybrid_chrome_layout`] run's AND story-overlay run's native pixel `y`,
+/// mapped through `run.y.max(1) - 1` — the same key `text_run_tops`/
+/// `over_art_runs` use inside `build_hybrid_frame_with` for the terminal's own
+/// `glyph_rows`. Also returns the layout itself so a caller can cross-check
+/// the runs it came from.
+fn hybrid_rows(
+    b: &Booted,
+    state: &app::state::AppState,
+) -> (std::collections::HashSet<u16>, app::render::screen::V6HybridChromeLayout) {
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("arthur churchyard: a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &state.v6_text);
+    let cell = state.v6_text.cell();
+    let layout = v6::classify_windows(items, cell);
+    let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+    let hyb = app::render::screen::hybrid_chrome_layout(&layout, native, area, (cell.w(), cell.h()), state)
+        .unwrap_or_else(|| panic!("arthur churchyard: expected a hybrid chrome layout for this frame"));
+    let rows = hyb.text_rows();
+    (rows, hyb)
+}
+
+/// Compose Arthur's current frame under `V6TextMode::RecordOnly`, with
+/// `rows` in [`V6FrameInputs::hybrid_text_rows`] — `host_compose_full`'s exact
+/// shape, but taking that one field directly instead of always defaulting it.
+fn arthur_compose_record_only(
+    b: &Booted,
+    honor: bool,
+    rows: std::collections::HashSet<u16>,
+) -> app::render::screen::V6Frame {
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("arthur churchyard: a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &b.face);
+    let layout = v6::classify_windows(items, b.face.cell());
+    let colors = app::colors::ColorScheme::terminal_default_in(b.palette);
+    let paint = Engine::paint_surface(&b.session);
+    let inputs = V6FrameInputs {
+        host_pair: (HOST_INK, HOST_PAGE),
+        honor_game_colours: honor,
+        colors: &colors,
+        face: &b.face,
+        paint: paint.as_deref(),
+        panel_input: None,
+        input: None,
+        prose: &empty_prose,
+        reveal: None,
+        pager_active: false,
+        more_prompt_pair: (HOST_INK, HOST_PAGE),
+        text: V6TextMode::RecordOnly,
+        bottom_anchor_menu: false,
+        hybrid_text_rows: rows,
+        extend_flanks_under_story_grid: false,
+    };
+    compose_v6_frame(&layout, RasterFrame::native(native), &inputs)
+}
+
+/// **The acceptance case.** With `hybrid_text_rows` left at its default
+/// (empty), `compose_v6_frame` bakes the opaque `#dcdcdc` gap-fill block at
+/// native (414, 200) — inside the status-bar row `hybrid_chrome_layout`
+/// itself reports at row-top 192. Populated with that same row set, the same
+/// pixel comes back transparent instead, so a Hybrid host's own cell-drawn
+/// bar no longer gets a stray reversed block baked in under it.
+#[test]
+fn hybrid_text_rows_clears_the_status_bar_gap_fill_arthur_reproduces() {
+    let Some(b) = boot_arthur_at_churchyard() else { return };
+    for honor in [true, false] {
+        let state = tui_state(&b, honor);
+        let (rows, _hyb) = hybrid_rows(&b, &state);
+        assert!(
+            rows.contains(&192),
+            "arthur churchyard honor={honor}: derived row set does not contain the status-bar row 192 — premise failed: {rows:?}"
+        );
+
+        let baked = arthur_compose_record_only(&b, honor, std::collections::HashSet::new());
+        let cleared = arthur_compose_record_only(&b, honor, rows);
+
+        // `V6Frame::canvas` is always flattened opaque onto the story page (its own
+        // doc comment), so every pixel's ALPHA is 255 whether or not the fill baked
+        // in — the fill/no-fill difference is a COLOUR difference: `default_fg`
+        // (`HOST_INK`, `#dcdcdc`) when `fill_reverse_row_gaps` painted the gap,
+        // whatever the page underneath is otherwise.
+        let px_baked = *baked.canvas.get_pixel(414, 200);
+        let px_cleared = *cleared.canvas.get_pixel(414, 200);
+        assert_eq!(
+            px_baked, HOST_INK,
+            "arthur churchyard honor={honor}: baseline (empty hybrid_text_rows) pixel (414,200) is not the \
+             expected host-ink gap-fill colour — premise failed: {px_baked:?}"
+        );
+        assert_ne!(
+            px_cleared, HOST_INK,
+            "arthur churchyard honor={honor}: hybrid_text_rows still bakes the host-ink block at (414,200)"
+        );
+        assert_ne!(
+            px_baked, px_cleared,
+            "arthur churchyard honor={honor}: hybrid_text_rows had no effect on the composite at all"
+        );
+    }
+}
+
+/// **Default-unchanged guard.** Every existing caller leaves `hybrid_text_rows`
+/// empty, so this must keep baking the block exactly as it always has —
+/// separate from the acceptance case above so a regression that silently
+/// changed the DEFAULT (rather than the opt-in path) fails its own test.
+#[test]
+fn hybrid_text_rows_left_empty_still_bakes_the_gap_fill_by_default() {
+    let Some(b) = boot_arthur_at_churchyard() else { return };
+    for honor in [true, false] {
+        let baked = arthur_compose_record_only(&b, honor, std::collections::HashSet::new());
+        let px = *baked.canvas.get_pixel(414, 200);
+        assert_eq!(
+            px, HOST_INK,
+            "arthur churchyard honor={honor}: default hybrid_text_rows (empty) no longer bakes the status-bar \
+             gap fill — default behaviour changed: {px:?}"
+        );
+    }
+}
+
+/// **Agreement cross-check.** `hybrid_rows`' derivation (`hybrid_chrome_layout`'s
+/// own `runs`, `run.y.max(1) - 1`) must name rows the TERMINAL's real Hybrid
+/// render actually draws with glyphs, not rows `hybrid_chrome_layout` merely
+/// classifies but the real draw skips for some other reason — the same
+/// cross-render agreement `v6_hybrid_chrome_layout.rs`'s `verify_agreement`
+/// pins, repeated here because that suite never calls `compose_v6_frame` and
+/// this one never renders through a real `Buffer`, so neither alone proves the
+/// two agree. `hybrid_chrome_layout`'s internal `glyph_rows` `HashSet` itself
+/// is private to `build_hybrid_frame_with` and unreachable from here — this is
+/// the closest public-API check on the SAME claim: every run this derivation
+/// counts must land on a non-blank cell in the real render.
+#[test]
+fn hybrid_text_rows_agree_with_what_the_real_hybrid_render_draws() {
+    let Some(b) = boot_arthur_at_churchyard() else { return };
+    let mut state = tui_state(&b, true);
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let cell = state.v6_text.cell();
+    state.game_picker = Some(app::render::graphics::kitty_picker(cell.w(), cell.h()));
+    let (rows, hyb) = hybrid_rows(&b, &state);
+    assert!(
+        rows.contains(&192),
+        "arthur churchyard: premise failed, row 192 missing from the derived set: {rows:?}"
+    );
+
+    let model = b.session.screen();
+    let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+    let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, area.right() + 1, area.bottom() + 1));
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let mut checked = 0;
+    for r in &hyb.runs {
+        if r.run.text.trim().is_empty() {
+            continue;
+        }
+        if r.col < area.x as i32 || r.row < area.y as i32 || r.col >= area.right() as i32 || r.row >= area.bottom() as i32 {
+            continue;
+        }
+        let blank = buf.cell((r.col as u16, r.row as u16)).map(|c| c.symbol().trim().is_empty()).unwrap_or(true);
+        assert!(
+            !blank,
+            "arthur churchyard: run {:?} at ({},{}) fed hybrid_text_rows but the real Hybrid render is blank there",
+            r.run.text, r.col, r.row
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "arthur churchyard: no in-bounds non-blank run to check — premise failed");
+}
+
+/// **SQ-1612 regression.** `hybrid_text_rows_clears_the_status_bar_gap_fill_arthur_reproduces`
+/// above proves the CANVAS half of the row-skip contract: a row it names no
+/// longer gets the reversed gap-fill block baked under it. But
+/// `build_chrome_canvas_into`'s glyph loop is also the ONE place a chrome
+/// run's characters ever reach `GlyphSink::blit`, which is the only place a
+/// [`V6TextRun`] is ever pushed — before
+/// SQ-1612 that loop walked the same skip-FILTERED list the two flood fills
+/// use, so a row `hybrid_text_rows` named vanished from `V6Frame::text`
+/// entirely, not merely from the canvas. A host reading `V6Frame::text` to
+/// draw Arthur's status bar itself (per this composite's whole reason for
+/// existing) got nothing for it.
+///
+/// So this asserts the row's runs come back **byte-identical** whether
+/// `hybrid_text_rows` is empty or names row 192 — same text, boxes, colours,
+/// style, `over_art` and `bar` — while the canvas at the same pixel still
+/// differs (baked vs. transparent), confirming paint and recording were
+/// decoupled rather than recording simply never having regressed.
+#[test]
+fn hybrid_text_rows_still_records_the_status_bar_row_it_stops_painting() {
+    let Some(b) = boot_arthur_at_churchyard() else { return };
+    for honor in [true, false] {
+        let state = tui_state(&b, honor);
+        let (rows, _hyb) = hybrid_rows(&b, &state);
+        assert!(
+            rows.contains(&192),
+            "arthur churchyard honor={honor}: premise failed, row 192 missing from the derived set: {rows:?}"
+        );
+
+        let baked = arthur_compose_record_only(&b, honor, std::collections::HashSet::new());
+        let cleared = arthur_compose_record_only(&b, honor, rows);
+
+        // The canvas half of the existing fix must stay intact: naming the row
+        // still clears the baked block at (414, 200).
+        assert_ne!(
+            *cleared.canvas.get_pixel(414, 200),
+            HOST_INK,
+            "arthur churchyard honor={honor}: hybrid_text_rows no longer clears the canvas at (414,200) — \
+             the SQ-1609/1611 fix regressed"
+        );
+
+        // The recording half (SQ-1612): every run this composite recorded at
+        // native row-top 192 in the baseline (empty `hybrid_text_rows`) must
+        // still be there, unchanged, once that row is named.
+        let baked_192: Vec<&V6TextRun> = baked.text.iter().filter(|r| r.y == 192).collect();
+        let cleared_192: Vec<&V6TextRun> = cleared.text.iter().filter(|r| r.y == 192).collect();
+        assert!(
+            !baked_192.is_empty(),
+            "arthur churchyard honor={honor}: premise failed, no baseline run recorded at row 192: {:?}",
+            baked.text
+        );
+        assert_eq!(
+            baked_192, cleared_192,
+            "arthur churchyard honor={honor}: hybrid_text_rows dropped or altered row 192's recorded runs \
+             (baseline: {baked_192:?})"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQ-1611: `hybrid_rows`/`V6FrameInputs::hybrid_text_rows`'s derivation above
+// walked only `hyb.runs` — the chrome ring's own text. Arthur (this file's only
+// specimen so far) never populates `V6HybridChromeLayout::story_overlay`
+// (SQ-1608, chrome printed OVER the story slot itself), so that gap went
+// untested: a host that derived `hybrid_text_rows` by hand, exactly the way
+// this file's own `hybrid_rows` used to, would silently miss any row
+// `story_overlay` owns on a frame that DOES populate it.
+//
+// Shogun's boot menu (`shogun-r322-s890706.z6`, release 322) is the specimen
+// named throughout `story_overlay`'s own docs and `v6_hybrid_chrome_layout.rs`'s
+// `shogun_boot_menu_story_overlay_matches_the_real_render*` tests: window 0
+// stays an ordinary `Buffer` there, and "START the game"/"RESTORE a saved
+// game"/"QUIT the game" plus their reverse-video selection bar are printed as
+// `story_overlay` runs on top of it.
+// ---------------------------------------------------------------------------
+
+/// Boot Shogun and reach its boot menu — the same one-space-keypress sequence
+/// `v6_hybrid_chrome_layout.rs`'s own `shogun_boot_menu` uses, duplicated
+/// rather than shared (this file's house style, see `boot_arthur_at_churchyard`
+/// above) since that helper boots through a different `boot_z6` than this
+/// file's own `boot_at`.
+fn boot_shogun_at_boot_menu() -> Option<Booted> {
+    let mut b = boot_at("shogun-r322-s890706.z6", 322)?;
+    let r = b.session.submit_char(b' ');
+    assert!(r.transcript.contains("You may choose to:"), "shogun boot menu: menu prompt missing");
+    Some(b)
+}
+
+/// [`arthur_compose_record_only`]'s shape for Shogun's `Booted` instead — a
+/// separate function rather than generalising that one, since neither its name
+/// nor its panic messages should pretend to cover a specimen it was never
+/// written against. Takes `paint` directly rather than reading
+/// `Engine::paint_surface` itself: Shogun's boot menu paints no ground at all
+/// (confirmed below), and the disagreement this suite needs can only appear on
+/// a row that HAS painted ground under it (see the test's own doc), so the
+/// caller supplies it — this file's own house style is every input built BY
+/// HAND (see the file's header comment), and a synthetic ground is no
+/// different from this file's synthetic colours, face or prose.
+fn shogun_compose_record_only(
+    b: &Booted,
+    honor: bool,
+    rows: std::collections::HashSet<u16>,
+    paint: Option<&image::RgbaImage>,
+) -> app::render::screen::V6Frame {
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("shogun boot menu: a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &b.face);
+    let layout = v6::classify_windows(items, b.face.cell());
+    let colors = app::colors::ColorScheme::terminal_default_in(b.palette);
+    let inputs = V6FrameInputs {
+        host_pair: (HOST_INK, HOST_PAGE),
+        honor_game_colours: honor,
+        colors: &colors,
+        face: &b.face,
+        paint,
+        panel_input: None,
+        input: None,
+        prose: &empty_prose,
+        reveal: None,
+        pager_active: false,
+        more_prompt_pair: (HOST_INK, HOST_PAGE),
+        text: V6TextMode::RecordOnly,
+        bottom_anchor_menu: false,
+        hybrid_text_rows: rows,
+        extend_flanks_under_story_grid: false,
+    };
+    compose_v6_frame(&layout, RasterFrame::native(native), &inputs)
+}
+
+/// **The falsification target.** `V6HybridChromeLayout::text_rows()` (SQ-1611)
+/// must fold in `story_overlay` rows that a `runs`-only walk — the OLD
+/// derivation `hybrid_rows` used before this quest — cannot see.
+///
+/// Getting a VISIBLE disagreement out of `compose_v6_frame` for a
+/// `story_overlay`-only row took tracing the mechanism, not guessing at it:
+/// `V6FrameInputs::hybrid_text_rows`'s `text_layer` reaches three sites inside
+/// `compose_v6_frame_into` (`build_chrome_canvas_into`'s
+/// `fill_reverse_row_gaps`, `fill_window_pages`, `blit_paint_ground`), and the
+/// first two are SCOPED TO CHROME WINDOWS ONLY — `fill_window_pages` explicitly
+/// skips anything overlapping the story box (`fill_pages_where`'s own
+/// `boxes_overlap` guard), and `build_chrome_canvas_into` only ever walks a
+/// chrome `Grid`'s own `px_texts`. A `story_overlay` row sits entirely INSIDE
+/// the story box, so neither can ever see it — confirmed empirically: composing
+/// this exact specimen's real (paint-free) frame with `hybrid_text_rows` at the
+/// OLD `runs`-only set versus the NEW `text_rows()` set produces byte-identical
+/// canvases, 0 pixels differing anywhere in the frame, because
+/// `Engine::paint_surface` returns `None` for Shogun's boot menu (asserted
+/// below) — the game paints no ground behind its menu text at all.
+///
+/// The THIRD site, `blit_paint_ground`, is the one that CAN reach a
+/// `story_overlay` row, but only together with
+/// `fill_story_page_under_chrome_text` — the story box's own opaque page fill,
+/// which is NOT gated by `hybrid_text_rows` at all and instead asks `paint`
+/// directly, independent of any row skip, whether a pixel is "already
+/// painted" and so should be left for the ground rather than the page. Where
+/// `paint` has real content at a row `text_rows()` skips: `blit_paint_ground`
+/// withholds it (leaving the pixel transparent, for a real Hybrid host's own
+/// glyph to show through), and `fill_story_page_under_chrome_text` ALSO
+/// withholds the opaque page fill there (its own `painted()` check still says
+/// yes) — so the pixel stays fully transparent. Where the SAME row is not
+/// skipped (the old, runs-only derivation): `blit_paint_ground` paints the
+/// ground's own colour in, opaque, and `fill_story_page_under_chrome_text`
+/// leaves it alone. That opaque-ground-colour vs. fully-transparent pair is
+/// the concrete disagreement this test finds — real machinery, a synthetic
+/// ground standing in for a release that actually paints one behind its menu.
+///
+/// Revert `text_rows()` to a `runs`-only walk (drop its `story_overlay` chain)
+/// and this test must fail: `rows` becomes identical to `runs_only`, so old
+/// and new compose with the SAME skip set and the search below finds no
+/// disagreeing pixel at all.
+#[test]
+fn hybrid_text_rows_folds_in_story_overlay_rows_shogun_boot_menu_reproduces() {
+    let Some(b) = boot_shogun_at_boot_menu() else { return };
+    let paint = Engine::paint_surface(&b.session);
+    assert!(
+        paint.is_none(),
+        "shogun boot menu: premise failed — this specimen now paints its own ground \
+         ({paint:?}), so the synthetic override below is no longer needed and this test's \
+         own reasoning about `blit_paint_ground` needs revisiting"
+    );
+
+    for honor in [true, false] {
+        let state = tui_state(&b, honor);
+        let (rows, hyb) = hybrid_rows(&b, &state);
+        assert!(
+            !hyb.story_overlay.is_empty(),
+            "shogun boot menu honor={honor}: no story_overlay runs published — premise failed"
+        );
+
+        // The OLD derivation `hybrid_rows` used before SQ-1611: `runs` only.
+        let runs_only: std::collections::HashSet<u16> = hyb.runs.iter().map(|r| r.run.y.max(1) - 1).collect();
+        let overlay_only_rows: Vec<u16> = rows.iter().copied().filter(|r| !runs_only.contains(r)).collect();
+        assert!(
+            !overlay_only_rows.is_empty(),
+            "shogun boot menu honor={honor}: text_rows() adds no row a runs-only walk would have missed \
+             — the fold-in is not exercised by this specimen: rows={rows:?} runs_only={runs_only:?}"
+        );
+
+        // A synthetic painted ground (SQ-0704's mechanism, a game colour
+        // erase_window would leave) covering the frame's whole width across the
+        // first overlay-only row — a stand-in for a release that actually paints
+        // one behind its boot-menu text, which this specimen does not.
+        let model = b.session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("shogun boot menu: a v6 frame has a Layered root") };
+        let native = v6::native_extent(items, &b.face);
+        let probe_row = overlay_only_rows[0];
+        const GROUND: image::Rgba<u8> = image::Rgba([10, 20, 30, 255]);
+        let mut synth_ground = image::RgbaImage::new(native.0 as u32, native.1 as u32);
+        for y in probe_row..probe_row.saturating_add(b.face.cell().h()).min(native.1) {
+            for x in 0..native.0 {
+                synth_ground.put_pixel(x as u32, y as u32, GROUND);
+            }
+        }
+
+        let old = shogun_compose_record_only(&b, honor, runs_only, Some(&synth_ground));
+        let new = shogun_compose_record_only(&b, honor, rows, Some(&synth_ground));
+        assert_eq!(
+            old.canvas.dimensions(),
+            new.canvas.dimensions(),
+            "shogun boot menu honor={honor}: old/new composites disagree on canvas size — not a fair comparison"
+        );
+
+        let mut found = None;
+        'search: for y in probe_row..probe_row.saturating_add(b.face.cell().h()).min(old.canvas.height() as u16) {
+            for x in 0..old.canvas.width() as u16 {
+                let po = *old.canvas.get_pixel(x as u32, y as u32);
+                let pn = *new.canvas.get_pixel(x as u32, y as u32);
+                if po != pn {
+                    found = Some((x, y, po, pn));
+                    break 'search;
+                }
+            }
+        }
+        let (x, y, po, pn) = found.unwrap_or_else(|| {
+            panic!(
+                "shogun boot menu honor={honor}: old (runs-only) and new (text_rows) composites agree \
+                 everywhere on the synthetic-ground probe row {probe_row} — the fold-in has no \
+                 observable effect on the composite, so this does not falsify a runs-only regression"
+            )
+        });
+        eprintln!("shogun boot menu honor={honor}: old/new disagree at ({x},{y}): old={po:?} new={pn:?}");
+        assert_eq!(
+            po, GROUND,
+            "shogun boot menu honor={honor}: old (runs-only) composite at ({x},{y}) is not the synthetic \
+             ground colour — the runs-only row set failed to withhold the skip, premise failed"
+        );
+        // `V6Frame::canvas` is always flattened opaque onto the story page (its own
+        // doc comment, and the fact `hybrid_text_rows_clears_the_status_bar_gap_fill_
+        // arthur_reproduces` above already established) — a withheld pixel reads back
+        // as `HOST_PAGE`, not literal `(0,0,0,0)`.
+        assert_eq!(
+            pn, HOST_PAGE,
+            "shogun boot menu honor={honor}: new (text_rows) composite at ({x},{y}) is not the bare \
+             host page — text_rows() failed to skip a row it claims to own"
+        );
     }
 }

@@ -73,6 +73,9 @@ pub enum BrowserAction {
     RefreshLibrary,
     /// Point the selected story at an IFDB page by hand.
     SetIfdbUrl,
+    /// Create the selected story's documents folder (SQ-1679); only meaningful for
+    /// a story linked to IFDB whose folder does not exist yet.
+    CreateDocumentsFolder,
     /// Open a story straight from a URL, downloading it into this library
     /// (SQ-1086) — the UI half of "a URL is accepted wherever a path is".
     OpenUrl,
@@ -80,6 +83,8 @@ pub enum BrowserAction {
     SearchIfdb,
     /// Download an InvisiClues hint file for the selected story.
     DownloadHints,
+    /// Open the documents chooser for the selected story (SQ-1680).
+    DownloadDocuments,
     /// Cycle the sort column, keeping the direction.
     SortLibrary,
     /// Reverse the sort direction, keeping the column.
@@ -114,6 +119,9 @@ pub fn action_for_key(km: &KeyMap, k: KeyEvent) -> Option<BrowserAction> {
 pub fn action_for_command(command: &str) -> Option<BrowserAction> {
     match parse_in_context(command, '/', Context::Browser) {
         SlashOutcome::Browser(a) => Some(a),
+        SlashOutcome::DownloadDocuments => Some(BrowserAction::DownloadDocuments),
+        SlashOutcome::CreateDocumentsFolder => Some(BrowserAction::CreateDocumentsFolder),
+        SlashOutcome::DownloadHints => Some(BrowserAction::DownloadHints),
         _ => None,
     }
 }
@@ -411,7 +419,11 @@ mod tests {
         for it in crate::story_menu::STORY_MENU {
             let spec = crate::slash::find_command(it.command)
                 .unwrap_or_else(|| panic!("story menu names unknown command '{}'", it.command));
-            assert_eq!(spec.context, Context::Browser, "'{}' is not a browser command", it.command);
+            assert!(
+                spec.context == Context::Browser || crate::slash::in_both_worlds(spec),
+                "'{}' is not a browser command",
+                it.command
+            );
             assert!(
                 action_for_command(it.command).is_some(),
                 "story menu item '{}' does not resolve to an action",

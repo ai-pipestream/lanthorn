@@ -1560,6 +1560,7 @@ fn a_game_saved_in_extended_still_extends_a_move_after_it_is_restored() {
             location: None,
             score: None,
             trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &b.session.pictures_png(),

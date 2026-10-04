@@ -217,7 +217,7 @@ fn the_refusal_names_the_archive_and_both_builds() {
 #[test]
 fn the_launch_dialog_names_exactly_what_the_boot_will_draw() {
     if let Some(disk) = media(IIGS_ARTHUR) {
-        let row = app::launch_options::resolved_default_art(&disk, None)
+        let row = app::launch_options::resolved_default_art(&disk, None, None)
             .expect("the boot draws, so the dialog must say what with");
         assert_eq!(row.filename, "ARTHUR.1/ARTHUR.D1");
         assert_eq!(row.pictures, 168);
@@ -227,7 +227,7 @@ fn the_launch_dialog_names_exactly_what_the_boot_will_draw() {
     }
     if let Some(disk) = media(IIGS_JOURNEY) {
         assert_eq!(
-            app::launch_options::resolved_default_art(&disk, None),
+            app::launch_options::resolved_default_art(&disk, None, None),
             None,
             "the default row must not name an archive the boot refuses"
         );

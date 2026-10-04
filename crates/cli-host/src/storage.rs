@@ -45,6 +45,41 @@
 //! [`StoryOrigin`] is what carries the three facts to the one function that
 //! applies the rules, because a caller holding two of them must get a compile
 //! error rather than a plausible key.
+//!
+//! ## A loose file that is secretly a known release (SQ-1635)
+//!
+//! Rule one above is a promise about the KEY SHAPE surviving — the basename —
+//! not a claim that a loose file and a disk image of the identical build ought
+//! to keep separate saves. They shouldn't: a loose `zork1.z3` and an Amiga
+//! floppy pressing the exact same release+serial hold a save-compatible game,
+//! and today they land in two directories purely because nobody read the
+//! loose file's own header. [`known_loose_build`] (via [`build_for_key`]) is
+//! the carve-out — a loose file whose header names a KNOWN, CATALOGUED
+//! commercial release ([`crate::titles::title_for_build`]) now keys exactly
+//! the way a disk-mounted copy of that build would, so the two SHARE one save
+//! folder. An unrecognized release (homebrew, a competition entry, an
+//! unreleased/beta build — anything not in `known_titles.tsv`) is completely
+//! unaffected: still the basename, exactly as rule one always promised.
+//!
+//! This is a going-forward change only, by deliberate choice: an existing
+//! player's save under the OLD basename key is not moved, merged, or
+//! discovered by any fallback — it simply stays where it is, and a fresh
+//! launch of the same known release resolves to the new, unified directory
+//! instead. No migration code exists here on purpose.
+//!
+//! **Version 6 is excluded from this carve-out entirely.** `disk_story_key`
+//! suffixes a v6 key with the MEDIUM (Amiga, Macintosh, …) because the archive
+//! carries the screen in native pixels plus the palette, and those differ by
+//! machine (see that function's docs). A loose v6 file has no real medium to
+//! name: `InterpreterProfile::resolve` renders it through `IbmPc` by
+//! `ProfileSource::Fallback`, which is a MEASURABLY different answer from a
+//! real DOS floppy's `ProfileSource::Medium` (`licenses_machine_colours`
+//! differs between the two), so it is not proven to render identically to any
+//! one historical disk medium's bucket — and every value `blorb::medium::DiskImage`
+//! offers names a real, specific historical machine. Claiming one here would be
+//! an unmeasured assertion the corpus does not back. The conservative,
+//! reversible answer is to leave a bare v6 file out of the unification and
+//! keep it on its basename, same as an unrecognized release.
 
 use std::path::{Path, PathBuf};
 
@@ -108,6 +143,52 @@ impl DiskBuild {
         }
         Some((bytes[0], u16::from_be_bytes([bytes[0x02], bytes[0x03]]), serial))
     }
+}
+
+/// The build a loose file's own header identity unifies with, when it is
+/// allowed to (SQ-1635) — see the module docs, "A loose file that is secretly
+/// a known release". `None` leaves the caller to fall back to the basename
+/// key, which is every unrecognized release and every Version 6 story.
+///
+/// Two gates, both load-bearing:
+/// - **Not Version 6.** See the module docs for the full reasoning — in short,
+///   a bare v6 file has no real disk medium and every value
+///   `blorb::medium::DiskImage` offers names one anyway.
+/// - **The release+serial is a KNOWN, CATALOGUED commercial title**
+///   ([`crate::titles::title_for_build`]). Homebrew, competition entries, and
+///   unreleased/beta builds are not in `known_titles.tsv` and must answer
+///   `None` here — this is the regression this function exists not to cause.
+pub fn known_loose_build(version: u8, release: u16, serial: &str) -> Option<DiskBuild> {
+    if version == 6 {
+        return None;
+    }
+    crate::titles::title_for_build(release, serial)?;
+    Some(DiskBuild {
+        version,
+        // Never read as a claim about a real disk: `disk_story_key` only
+        // consults `medium` in its `version == 6` arm, which the guard above
+        // rules out before this value is ever constructed.
+        medium: blorb::medium::DiskImage::Fat12Dos,
+        release,
+        serial: serial.to_string(),
+    })
+}
+
+/// The [`DiskBuild`] a story's save directory should key on, given its own
+/// bytes and — when it really was mounted out of one — the disk image it came
+/// off.
+///
+/// `disk_image: Some(medium)` is exactly [`DiskBuild::of`], unaffected by this
+/// function's existence: a real mount always wins. `disk_image: None` is the
+/// loose-file case, where this reads the header directly and hands it to
+/// [`known_loose_build`] — see that function's docs for exactly when it
+/// answers `Some`.
+pub fn build_for_key(bytes: &[u8], disk_image: Option<blorb::medium::DiskImage>) -> Option<DiskBuild> {
+    if let Some(medium) = disk_image {
+        return DiskBuild::of(bytes, medium);
+    }
+    let (version, release, serial) = DiskBuild::header_of(bytes)?;
+    known_loose_build(version, release, &serial)
 }
 
 /// A story file's basename, sanitized into a directory-name token.
@@ -307,7 +388,15 @@ fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuil
     // of calls are about an ordinary story file. Its answer is only a
     // pre-filter here — see the per-story lookup below for why the medium
     // itself is not taken from it.
-    blorb::medium::DiskImage::detect(&raw)?;
+    if blorb::medium::DiskImage::detect(&raw).is_none() {
+        // Not a disk image at all. A story named inside a CONTAINER (a zip
+        // entry) has no build to find in these bytes — they are the archive's,
+        // not any one entry's — so that case is left to `story_key_for`'s
+        // `(None, Some(entry))` arm, unaffected. A genuinely loose file
+        // (`disk_entry: None`) may still be a KNOWN commercial release read
+        // straight off its own header (SQ-1635) — see `build_for_key`'s docs.
+        return if disk_entry.is_some() { None } else { build_for_key(&raw, None) };
+    }
     // Across the SET, exactly as the launch path mounts (SQ-0952). This used to
     // be `MountedDisk::mount` — the platter alone — so a volume whose story comes
     // from the RELEASE rather than from itself found nothing, returned `None`,
@@ -788,8 +877,13 @@ mod tests {
         assert_eq!(DiskImage::Hfs.label().to_ascii_lowercase(), "hfs");
     }
 
-    /// **Guard 1, the promise.** A loose story file keys on its basename and
-    /// nothing else, so no save anybody already has is orphaned by this change.
+    /// **Guard 1, the promise.** `story_key_for` — the PURE dispatcher, given a
+    /// `StoryOrigin` whose `build` is already `None` — keys on the basename and
+    /// nothing else. This is unaffected by SQ-1635 by construction: that change
+    /// lives entirely upstream, in what a caller passes as `build`, never in
+    /// this function. [`story_key_at_unifies_a_known_loose_release_and_leaves_an_unknown_one_alone`]
+    /// below is the guard on the door that actually reads a file and can tell
+    /// the two cases apart.
     #[test]
     fn a_loose_story_file_still_keys_on_its_basename() {
         for name in ["zork1-r88-s840726.z3", "Zork1.z5", "advent.gblorb", "a b?.z5"] {
@@ -805,6 +899,110 @@ mod tests {
             game_dir(Path::new("/games/zork1-r88-s840726.z3"), None),
             PathBuf::from("/games/zork1-r88-s840726.z3.save"),
         );
+    }
+
+    // ── SQ-1635: a loose file that is secretly a known release ──────────────
+
+    /// **The critical regression guard.** An unrecognized release+serial — every
+    /// homebrew game, competition entry, and unreleased/beta build, which is the
+    /// overwhelming majority of Z-code that exists — must be COMPLETELY
+    /// unaffected by this feature: [`known_loose_build`] and [`build_for_key`]
+    /// both answer `None`, so the key is still the plain basename, exactly as it
+    /// was before SQ-1635 existed.
+    #[test]
+    fn an_unrecognized_release_leaves_the_old_basename_key_untouched() {
+        // Nothing in known_titles.tsv answers to this release+serial.
+        assert_eq!(known_loose_build(3, 9999, "999999"), None, "unrecognized build");
+        assert_eq!(build_for_key(&header(3, 9999, "999999"), None), None);
+
+        // …so the key `story_key_for` computes for it is the ordinary basename,
+        // same as if this feature did not exist at all.
+        let p = PathBuf::from("/games/my-untitled-homebrew.z3");
+        assert_eq!(
+            story_key_for(loose(&p)),
+            story_key(&p),
+            "an unrecognized build must still key on its basename",
+        );
+    }
+
+    /// **The unification.** A loose file whose header names a KNOWN, CATALOGUED
+    /// commercial release now keys exactly the way a disk-mounted copy of that
+    /// same build would key — so the two SHARE one save folder, because the
+    /// underlying save is compatible between them.
+    #[test]
+    fn a_known_release_read_off_a_loose_files_header_matches_the_disk_key() {
+        // Zork I release 88 / serial 840726, Version 3 — not Version 6, and
+        // cataloged (see `a_disk_story_keys_on_its_release_and_serial` above).
+        let want = disk_story_key(&build(88, "840726"));
+        let got = known_loose_build(3, 88, "840726").expect("a known, non-v6 release");
+        assert_eq!(disk_story_key(&got), want);
+
+        // The bytes-based door answers the same thing.
+        let via_bytes = build_for_key(&header(3, 88, "840726"), None).expect("known release");
+        assert_eq!(disk_story_key(&via_bytes), want);
+    }
+
+    /// **Version 6 is excluded outright, even for a known release** — see the
+    /// module docs, "A loose file that is secretly a known release", for why. The
+    /// key must still fall back to the basename, exactly like an unrecognized
+    /// release.
+    #[test]
+    fn a_known_version_six_release_still_keeps_the_basename_key() {
+        // Arthur release 54 / serial 890606 is cataloged (see
+        // `a_version_six_key_names_its_medium_and_a_v5_key_does_not` above) — and
+        // Version 6, which this must exclude regardless.
+        assert_eq!(known_loose_build(6, 54, "890606"), None, "v6 is excluded even when known");
+        assert_eq!(build_for_key(&header(6, 54, "890606"), None), None);
+    }
+
+    /// `build_for_key` with a REAL mount (`disk_image: Some`) is exactly
+    /// [`DiskBuild::of`], unaffected by any of the loose-file logic above — a
+    /// real disk mount always wins and is never routed through
+    /// [`known_loose_build`].
+    #[test]
+    fn build_for_key_on_a_real_mount_is_exactly_disk_build_of() {
+        use blorb::medium::DiskImage;
+        let bytes = header(5, 88, "840726");
+        assert_eq!(
+            build_for_key(&bytes, Some(DiskImage::Adf)),
+            DiskBuild::of(&bytes, DiskImage::Adf),
+        );
+    }
+
+    /// End to end through the door that actually reads a file
+    /// (`story_key_at`/`mounted_build`), not just the pure functions above: a
+    /// loose file named ANYTHING, holding a known release's header, resolves to
+    /// the disk-style key; an unknown release beside it, through the same door,
+    /// keeps its basename; and a known-but-Version-6 release also keeps its
+    /// basename.
+    #[test]
+    fn story_key_at_unifies_a_known_loose_release_and_leaves_an_unknown_one_alone() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("cli-host-storage-sq1635-{}-{nth}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A known release (Zork I r88/840726), written under a filename that
+        // states nothing about it — the point being that the KEY comes from the
+        // header, never the name on disk.
+        let known_path = dir.join("whatever-i-called-it.z3");
+        std::fs::write(&known_path, header(3, 88, "840726")).unwrap();
+        assert_eq!(story_key_at(&known_path), disk_story_key(&build(88, "840726")));
+
+        // An unrecognized release, through the same door, stays on its basename.
+        let unknown_path = dir.join("my-homebrew.z3");
+        std::fs::write(&unknown_path, header(3, 9999, "999999")).unwrap();
+        assert_eq!(story_key_at(&unknown_path), "my-homebrew.z3");
+
+        // A known release that is Version 6 also stays on its basename.
+        let v6_path = dir.join("arthur-somewhere.z6");
+        std::fs::write(&v6_path, header(6, 54, "890606")).unwrap();
+        assert_eq!(story_key_at(&v6_path), "arthur-somewhere.z6");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The shape the key takes, and where each half comes from: a readable slug

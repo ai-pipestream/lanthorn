@@ -50,6 +50,7 @@ fn seed_meta(ifid: &str, turns: u32) -> Meta {
         location: None,
         score: None,
         trigger: SaveTrigger::HostState,
+        source: app::archive::SaveSource::default(),
     }
 }
 
@@ -95,7 +96,7 @@ fn a_clean_quit_clears_the_save_but_keeps_the_mapper_and_command_history() {
         vec!["look".to_string(), "north".to_string(), "quit".to_string(), "y".to_string()];
     write_cleared_resume_archive(
         &arc_file, &mapper, &session.save_state(), session.aux_data(), "MINIZORK", "later".to_string(),
-        &command_history,
+        &command_history, &app::archive::SaveSource::default(),
     ).expect("the clearing write must succeed");
 
     let ac = load_archive(&arc_file).expect("cleared archive readable");

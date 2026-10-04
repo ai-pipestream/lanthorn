@@ -6,12 +6,15 @@ kinds of save, and they solve two different problems.
 
 **Save State / Restore State** is lanthorn's own snapshot. Press `Ctrl+S`
 (`/save-state`) and it freezes everything — the game's exact state, the map
-you've drawn, every open window, and your scrollback — into one file. `Ctrl+R`
-(`/restore-state`) thaws it back. It's the emulator's save-anywhere: bail out
-mid-sentence or mid-puzzle, on any of the three engines, and land right back
-in it, exactly as you left it. Keep as many named slots as you like — the
-saves manager (`Enter` to load, `s` to save-as, `d` to delete, `i` to import)
-lists every one, with its name, type, turn count, and timestamp.
+you've drawn, every open window, and your scrollback — into its own quick-save
+slot. `Ctrl+R` (`/restore-state`) thaws it back. It's the emulator's
+save-anywhere: bail out mid-sentence or mid-puzzle, on any of the three
+engines, and land right back in it, exactly as you left it. The quick-save
+slot is separate from auto-save's (below), so hitting `Ctrl+S` is never
+immediately overwritten by the very next turn. Keep as many named slots as
+you like too — the saves manager (`Enter` to load, `s` to save-as, `d` to
+delete, `i` to import) lists every one, with its name, type, turn count, and
+timestamp.
 
 **The game's own SAVE/RESTORE** is what you type at the prompt — the same
 command Infocom and its contemporaries always understood. Under the hood it
@@ -26,11 +29,13 @@ portable, another interpreter can open it; **State** means it's a Save State,
 host-only, and lanthorn marks it that way honestly rather than pretending it
 travels.
 
-Turn on auto-save and lanthorn snapshots after every turn; leave auto-load on
-(the default) and opening a story drops you straight back where you quit, map
-included. Switch auto-load off to start a session fresh while keeping the map
-you've already drawn. That resume only applies when YOU leave — finishing the
-story or typing `quit` from inside the game starts it fresh next time, map
+Auto-save is on by default: lanthorn snapshots after every turn (into its own
+slot, separate from a manual `Ctrl+S`) and again on the way out; leave
+auto-load on (also the default) and opening a story drops you straight back
+where you quit, map included. Switch auto-save off if you'd rather save only
+when you ask; switch auto-load off to start a session fresh while keeping the
+map you've already drawn. That resume only applies when YOU leave — finishing
+the story or typing `quit` from inside the game starts it fresh next time, map
 still intact, rather than dropping you back a turn before the ending.
 
 **Rewind further than the game's own `undo`.** Switch on
@@ -42,7 +47,8 @@ a game you quit mid-replay is still steppable when you come back to it.
 
 Everything lands under `~/.lanthorn/saves/<story-filename>.save/` by
 default; `--data-dir <path>` moves just the saves and sidecars elsewhere
-without relocating your config or style.
+without relocating your config or style. Sharing an install between several
+players? See [the command line](command-line.md#sharing-one-install-between-players).
 
 And it isn't only the full TUI — `zvm-cli`, `gvm-cli` and `scott-cli` play
 the same games with the game's own SAVE/RESTORE intact, useful over a slow

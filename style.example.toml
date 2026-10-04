@@ -58,10 +58,41 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # tidy_progress = { parent = "accent" }
 # meta_marker = { parent = "muted" }
 # inventory_panel = { parent = "accent" }
+# "journal.tabbar" = { parent = "text" }
+# "journal.tab" = { parent = "muted" }
+# "journal.tab:active" = { parent = "accent", bold = true }
+# "journal.map.card" = { parent = "text" }
+# "journal.map.card.border" = { parent = "chrome" }
+# "journal.map.card.name" = { parent = "heading" }
+# "journal.map.card.layer" = { parent = "muted" }
+# "journal.map.card.description" = { parent = "text" }
+# "journal.map.card.seen" = { parent = "muted" }
+# "journal.map.card.button" = { parent = "accent", bold = true, reversed = true }
+# "journal.hints.transcript" = { parent = "text" }
+# "journal.hints.input" = { parent = "text" }
+# "journal.hints.input:unfocused" = { parent = "muted", dim = true }
+# "journal.hints.builtin" = { parent = "muted", italic = true }
+# "journal.hints.nohint" = { parent = "muted" }
+# "journal.hints.button" = { parent = "accent", bold = true, reversed = true }
+# "journal.hints.tab:focused" = { parent = "accent", bold = true }
+# "journal.docs.row" = { parent = "text" }
+# "journal.docs.row:selected" = { parent = "accent", reversed = true }
+# "journal.docs.meta" = { parent = "muted" }
+# "journal.docs.desc" = { parent = "muted" }
+# "journal.docs.spoiler" = { parent = "alert", bold = true }
+# "journal.docs.header" = { parent = "muted" }
+# "journal.docs.button" = { parent = "accent", bold = true, reversed = true }
+# "journal.docs.hint" = { parent = "muted", italic = true }
+# "journal.docs.pager" = { parent = "text" }
+# "journal.docs.pager_title" = { parent = "heading" }
+# "journal.docs.pager_notice" = { parent = "alert" }
+# "inventory_panel.header" = { parent = "heading" }
+# "inventory_panel.meta" = { parent = "muted" }
 # room_panel = { parent = "text" }
 # "room_panel.header" = { parent = "heading" }
 # "room_panel.header:pinned" = { parent = "accent", reversed = true }
 # "room_panel.aliases" = { parent = "muted" }
+# "room_panel.description" = { parent = "muted", italic = true }
 # story_info_title = { parent = "heading" }
 # terminal_dump_heading = { parent = "heading", bold = true }
 # terminal_dump_assumed = { parent = "alert" }
@@ -72,7 +103,10 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # story_info_continuation = { parent = "muted" }
 # story_info_artwork = { parent = "story_info_value" }
 # "story_info_artwork:active" = { parent = "accent", bold = true }
+# story_info_documents = { parent = "story_info_value" }
+# story_info_documents_button = { parent = "accent", bold = true, reversed = true }
 # graphics = { parent = "chrome" }
+# glk_mask_outside = { parent = "graphics" }
 # inline_image = { parent = "chrome" }
 # story_header = { parent = "muted" }
 # story_header_active = { parent = "accent", bold = true }
@@ -105,6 +139,10 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # ifdb_download_marker = { parent = "accent", glyph = "⭳" }
 # ifdb_download_present = { parent = "muted", glyph = "✓" }
 # ifdb_attribution = { parent = "muted", italic = true }
+# documents_checked = { parent = "accent", glyph = "✓" }
+# documents_spoiler = { parent = "alert", italic = true }
+# documents_title_match = { parent = "accent", bold = true }
+# documents_preview = { parent = "muted" }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }
 # "command_panel.column_header" = { parent = "muted" }

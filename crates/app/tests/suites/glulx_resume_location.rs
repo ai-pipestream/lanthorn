@@ -38,7 +38,7 @@ fn advent_image() -> Option<Vec<u8>> {
 }
 
 fn boot(image: Vec<u8>) -> GlulxSession {
-    GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("Adventure (Glulx) boots")
+    GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("Adventure (Glulx) boots")
 }
 
 #[test]
@@ -79,6 +79,7 @@ fn a_resumed_glulx_game_reports_the_room_it_was_saved_in() {
             location: Some(saved.name.clone()),
             score: None,
             trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &[],

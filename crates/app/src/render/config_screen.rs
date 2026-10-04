@@ -53,7 +53,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("show_status_bar",      ConfigRowKind::Bool, "Show the top status bar (location, score, moves, time)."),
     ("watch_style",          ConfigRowKind::Bool, "Live-reload style.toml automatically whenever the file changes on disk."),
     ("record_turn_history",  ConfigRowKind::Bool, "Record a per-turn rewind/replay history — enables Rewind, but grows the archive and holds per-turn blobs in memory."),
-    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust. Takes effect on next launch (or after @restart): the running story keeps the cap it booted with."),
+    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory snapshots the game's own in-game UNDO command keeps (0 disables undo). Use ← / → to adjust. Takes effect on next launch (or after @restart): the running story keeps the cap it booted with."),
     ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust. Takes effect on next launch (or after @restart): the header byte is written when the story boots."),
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),

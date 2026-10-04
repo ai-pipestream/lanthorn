@@ -155,7 +155,7 @@ pub fn handle_save_as(
     // be recoloured.
     let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
     for d in &v6_diags { state.note_v6_save(d); }
-    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &crate::archive::SessionRecord::of(state));
+    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &crate::archive::SessionRecord::of(state), &state.source);
     match result {
         Ok(()) => {
             state.push_notice(&format!("[Saved as: {}]", buf));
@@ -558,6 +558,32 @@ mod tests {
         // Host-save bookkeeping is unchanged by the unification.
         assert!(!state.unsaved_progress, "a host Save State captures progress");
         assert_eq!(state.ingame_resume_save, None, "no suspended VM to resume");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1633: `handle_save_as` — the save-name dialog's submit handler, for
+    /// both a host Save State slot and an in-game `@save` — is a SECOND
+    /// production caller of `persist_files::save_named`, distinct from the
+    /// slash `/save <name>` path (`write_named_save`), and must carry the
+    /// booted session's `source` too — informational only, never touching the
+    /// trigger or archive layout asserted above.
+    #[test]
+    fn handle_save_as_names_the_booted_sessions_source_sq1633() {
+        let dir = temp_dir("host-write-source");
+        let mut sess = minizork();
+        let mut state = state_with_session(None); // host Save State, as above
+        state.source = crate::archive::SaveSource {
+            story_file: Some("Zork I - The Great Underground Empire.adf".to_string()),
+            disk_entry: None,
+            machine: Some(crate::archive::MachineDto::Amiga),
+        };
+        let mut mapper = mapper_with_room();
+
+        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
+
+        let meta = crate::archive::read_archive_meta(&dir.join("chapter-one.lanthorn")).expect("meta");
+        assert_eq!(meta.source, state.source, "a save-as write must name the booted copy's own source");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

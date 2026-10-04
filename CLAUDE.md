@@ -54,6 +54,28 @@ CI is exempt — both workflows export `CARGO_BUILD_JOBS` from the runner's own 
 count before installing Rust, because a 3-4 core runner running six or eight rustc
 processes is slower AND puts a crate the size of `app` near the memory ceiling.
 
+**The VM engines and the 6502 depacker are built at `opt-level = 3` even in dev/test
+(SQ-1702).** `[profile.dev.package.*]` in the root `Cargo.toml` covers `lanthorn-gvm`,
+`lanthorn-zvm`, `lanthorn-scott`, `mos6502` and `regenerator2000-core`; `test` inherits
+`dev`, so nextest and CI get it. Debug-assertions and overflow-checks stay ON for them
+(only the opt-level moves). Measured 2026-10-03, same machine, engines binary: the
+Anchorhead walkthrough 279s -> 32s, its `_is_deterministic_` twin 630s -> 61s (single
+files, so unaffected by the corpus bug below). `-p lanthorn-gvm` tests 47s -> 6s,
+`-p lanthorn-zvm` 8s -> 9s (already fast), `-p lanthorn-scott` 90s -> 12s. Cost: a cold
+`--tests` build of `lanthorn` went 43s -> 54s, and touching an engine and rebuilding `app`
+is unchanged (~9-13s); the in-crate `t-all` run is unchanged (~50s incl. build).
+**The first-published `story_identity_sweep` (1017s -> 161s) and `cover_frontispiece`
+(~240s) numbers were inflated ~32x by a `stories/stories` self-symlink that the suites'
+recursive walkers followed to ELOOP (SQ-1708); the suites now share a loop-safe
+`fixture_paths::files_under` and the corpus is 44 frontispiece blorbs, not 1,408.**
+Clean-corpus numbers: with the depacker optimised the whole `binary(engines)` run is
+**156s** (630/630), `story_identity_sweep` 5.1s, `cover_frontispiece` 4.4s; with ONLY
+`mos6502`/`regenerator2000-core` back at opt-level 0 (engines still optimised) the
+sweep is **31s** (79 C64 depacks) and the engines binary 203s (the machine was busier
+for that run, load ~5 against ~2.3, but the sweep delta is far past noise;
+`cover_frontispiece` is unchanged at 4.4s, since `load_cover` never reaches the
+depacker). So the depacker overrides still earn their keep, and stay.
+
 **`app`'s ~3,271 in-crate `#[test]`s (SQ-1242) sit behind `t-*` Cargo features, not
 bare `cfg(test)`.** `crates/app/Cargo.toml`'s `[features]` table names nine groups
 following the module tree (`t-input`, `t-render`, `t-picker`, `t-session`,

@@ -19,6 +19,10 @@ mod sq1462_hint_echo_contrast;
 
 #[path = "suites/host_boot.rs"]
 mod host_boot;
+#[path = "suites/multi_player.rs"]
+mod multi_player;
+#[path = "suites/sq1633_save_source.rs"]
+mod sq1633_save_source;
 #[path = "suites/host_probe.rs"]
 mod host_probe;
 #[path = "suites/host_session.rs"]
@@ -29,6 +33,18 @@ mod sq1564_command_bar_prompt;
 mod host_turn;
 #[path = "suites/sq1586_host_hints_open.rs"]
 mod sq1586_host_hints_open;
+#[path = "suites/sq1596_min_story_screen_floor.rs"]
+mod sq1596_min_story_screen_floor;
+#[path = "suites/sq1654_scrollback_preserves_screens.rs"]
+mod sq1654_scrollback_preserves_screens;
+#[path = "suites/sq1710_restore_syncs_current_room.rs"]
+mod sq1710_restore_syncs_current_room;
+#[path = "suites/sq1656_preserve_clear_top_anchor.rs"]
+mod sq1656_preserve_clear_top_anchor;
+#[path = "suites/sq1661_topanchor_followease.rs"]
+mod sq1661_topanchor_followease;
+#[path = "suites/sq1666_continuous_anchor_scroll.rs"]
+mod sq1666_continuous_anchor_scroll;
 
 #[path = "suites/adf_disk_image.rs"]
 mod adf_disk_image;
@@ -38,6 +54,8 @@ mod apple_disk_set_release;
 mod art_build_pairing;
 #[path = "suites/colour_regime_media.rs"]
 mod colour_regime_media;
+#[path = "suites/corpus_walk_guard.rs"]
+mod corpus_walk_guard;
 #[path = "suites/cover_frontispiece.rs"]
 mod cover_frontispiece;
 #[path = "suites/disk_set_rows.rs"]
@@ -190,4 +208,30 @@ mod sq1515_kerkerkruip_restore_arrange;
 mod sq1529_kerkerkruip_grid_fg_ground;
 #[path = "suites/sq1565_kerkerkruip_title_rule_pixel_height.rs"]
 mod sq1565_kerkerkruip_title_rule_pixel_height;
+#[path = "suites/sq1598_glk_cell_px.rs"]
+mod sq1598_glk_cell_px;
+#[path = "suites/sq1703_glk_design_screen.rs"]
+mod sq1703_glk_design_screen;
+#[path = "suites/sq1703_glk_stretch.rs"]
+mod sq1703_glk_stretch;
+#[path = "suites/sq1703_glk_stretch_pixels.rs"]
+mod sq1703_glk_stretch_pixels;
+#[path = "suites/sq1703_glk_mask.rs"]
+mod sq1703_glk_mask;
+#[path = "suites/sq1707_glk_fit.rs"]
+mod sq1707_glk_fit;
+#[path = "suites/walkthroughs.rs"]
+mod walkthroughs;
+#[path = "suites/walkthrough_adventureland.rs"]
+mod walkthrough_adventureland;
+#[path = "suites/walkthrough_lostpig.rs"]
+mod walkthrough_lostpig;
+#[path = "suites/walkthrough_hhgg.rs"]
+mod walkthrough_hhgg;
+#[path = "suites/walkthrough_zork0.rs"]
+mod walkthrough_zork0;
+#[path = "suites/walkthrough_lurking_horror.rs"]
+mod walkthrough_lurking_horror;
+#[path = "suites/walkthrough_glulx_graphics_sound.rs"]
+mod walkthrough_glulx_graphics_sound;
 

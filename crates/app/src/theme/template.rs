@@ -486,6 +486,10 @@ mod tests {
     fn style_example_matches_generated_template() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        if std::env::var("LANTHORN_REGEN_DOCS").as_deref() == Ok("1") {
+            std::fs::write(&path, commented_template()).unwrap();
+            return;
+        }
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
         assert_eq!(text, commented_template(), "style.example.toml is stale — regenerate it from commented_template()");

@@ -1198,6 +1198,87 @@ pub(crate) fn anchor_row_at(starts: &[usize], total: usize, clear_anchor: Option
 /// Returns (visible rows oldest-first, total wrapped-row count, first visible
 /// absolute row). This does NOT wrap — the wrapping is done once by the caller
 /// (cached across frames), so windowing/scroll is cheap. (SQ-0305)
+/// Whether [`window_wrapped_rows`] would take its top-anchor branch for this
+/// `(anchor_row, total, rows, scroll)`: at the bottom (`scroll == 0`), an
+/// anchor set, and the post-anchor content still fitting `rows`. Mirrors that
+/// function's own `scroll == 0` branch condition exactly (SQ-1661) — a caller
+/// that needs to know this WITHOUT windowing (the pager's follow-ease, which
+/// must not arm an animation computed in the wrong coordinate space while a
+/// top-anchored view is showing fully; see `pager::apply_frame`) calls this
+/// instead of re-deriving the condition by hand, so the two can never drift
+/// apart the way the bug it fixes did.
+pub(crate) fn top_anchor_fits(anchor_row: Option<usize>, total: usize, rows: usize, scroll: u16) -> bool {
+    scroll == 0 && anchor_row.is_some_and(|a| total.saturating_sub(a.min(total)) <= rows)
+}
+
+/// The `[start, end)` index window into an `n`-row array for a given standing
+/// top-anchor and scroll position — the pure index arithmetic behind
+/// [`window_wrapped_rows`], factored out so the v6 raster path
+/// (`render::screen::build_main_text`, which windows a differently-typed row
+/// array and so cannot call `window_wrapped_rows` directly) can share it rather
+/// than re-deriving the same formula by hand (SQ-1666; that duplication is
+/// exactly how this bug's shape bit twice).
+///
+/// When the anchor's own post-anchor content (`n - anchor_row`) fits `rows`,
+/// scrolling through it is made CONTINUOUS rather than a cutover at scroll==0
+/// vs. scroll>=1 (the bug): `scroll == 0` returns exactly `[anchor_row, n)`
+/// (today's pinned, possibly-short view). Each further unit of `scroll` reveals
+/// one more row of pre-anchor history immediately above the current top, by
+/// decrementing `start` while `end` stays pinned at `n` — so the still-pinned
+/// anchored content never moves or disappears — until the window has grown to
+/// fill all `rows` (at `scroll == pad`, where `pad = rows - (n - anchor_row)`
+/// is exactly how many rows of growing room the pinned view had below it).
+/// From there, further scrolling hands off to the ordinary backward-sliding
+/// window (an `end` that recedes from `n` too), continuing from exactly where
+/// the growth phase left off rather than restarting at `scroll == 0` of it —
+/// which is what [`anchored_max_scroll`] accounts for the `pad` steps of.
+pub(crate) fn anchored_window_bounds(n: usize, anchor_row: Option<usize>, rows: usize, scroll: usize) -> (usize, usize) {
+    // Clamped: the anchor indexes THESE rows, and an anchor past their end would
+    // slice out of range rather than merely mis-anchor (SQ-0640).
+    if let Some(anchor_row) = anchor_row.map(|a| a.min(n)) {
+        let anchored_len = n - anchor_row;
+        if anchored_len <= rows {
+            let pad = rows - anchored_len;
+            if scroll <= pad {
+                return (anchor_row.saturating_sub(scroll), n);
+            }
+            let max_scroll = n.saturating_sub(rows);
+            let generic_scroll = (scroll - pad).min(max_scroll);
+            let end = n.saturating_sub(generic_scroll);
+            let start = end.saturating_sub(rows);
+            return (start, end);
+        }
+    }
+    // Clamp scroll so it never exceeds the top: past `n - rows` the window would
+    // otherwise shrink from the bottom, blanking viewport rows.
+    let max_scroll = n.saturating_sub(rows);
+    let scroll = scroll.min(max_scroll);
+    let end = n.saturating_sub(scroll);
+    let start = end.saturating_sub(rows);
+    (start, end)
+}
+
+/// The largest meaningful scroll offset for an `n`-row array windowed by `rows`
+/// with an optional standing top-anchor — the counterpart callers that clamp a
+/// scroll offset (page/half-page scroll, the mouse-wheel step, `apply_frame`'s
+/// post-frame clamp) must use instead of the anchor-blind `n.saturating_sub(rows)`
+/// once an anchor is in play (SQ-1666). When the anchor's content fits `rows`,
+/// [`anchored_window_bounds`] spends `pad = rows - (n - anchor_row)` extra scroll
+/// units growing the pinned view before it starts sliding — a caller still
+/// clamping to the old `n - rows` would cut the reachable range `pad` rows short
+/// of the true top of the transcript, silently losing the oldest `pad` rows to
+/// scrolling (even though the jump itself is fixed).
+pub(crate) fn anchored_max_scroll(n: usize, anchor_row: Option<usize>, rows: usize) -> usize {
+    if let Some(anchor_row) = anchor_row.map(|a| a.min(n)) {
+        let anchored_len = n - anchor_row;
+        if anchored_len <= rows {
+            let pad = rows - anchored_len;
+            return pad + n.saturating_sub(rows);
+        }
+    }
+    n.saturating_sub(rows)
+}
+
 pub(crate) fn window_wrapped_rows(
     display_rows: &[WrappedRow],
     anchor_row: Option<usize>,
@@ -1208,21 +1289,7 @@ pub(crate) fn window_wrapped_rows(
         return (Vec::new(), 0, 0);
     }
     let n = display_rows.len();
-    if scroll == 0 {
-        // Clamped: the anchor indexes THESE rows, and an anchor past their end would
-        // slice out of range rather than merely mis-anchor (SQ-0640).
-        if let Some(anchor_row) = anchor_row.map(|a| a.min(n)) {
-            if n.saturating_sub(anchor_row) <= rows {
-                return (display_rows[anchor_row..n].to_vec(), n, anchor_row);
-            }
-        }
-    }
-    // Clamp scroll so it never exceeds the top: past `n - rows` the window would
-    // otherwise shrink from the bottom, blanking viewport rows.
-    let max_scroll = n.saturating_sub(rows);
-    let scroll = (scroll as usize).min(max_scroll);
-    let end = n.saturating_sub(scroll);
-    let start = end.saturating_sub(rows);
+    let (start, end) = anchored_window_bounds(n, anchor_row, rows, scroll as usize);
     (display_rows[start..end].to_vec(), n, start)
 }
 
@@ -1743,6 +1810,50 @@ pub fn inventory_items(
     }
 }
 
+/// Like [`inventory_items`], but keeps each entry's engine id — the Z-machine
+/// object number / Glulx address / Scott Adams item index, exactly
+/// [`mapper::graph::ItemKey`]'s identity space (SQ-1630) — alongside its
+/// display name, so `render::inventory_dock` can cross-reference each carried
+/// item against the mapper's whole-game item registry
+/// (`mapper::graph::MapGraph::item`). `None` in the inventory-fallback path
+/// (no live object tree to ask) — the parsed inventory line has no id to give,
+/// and the dock falls back to showing the name alone.
+///
+/// Same order and same filter as [`inventory_items`] and
+/// [`inventory_click_words`] (both walk the identical `intro.contents(obj)`
+/// list), so an index into this list is always the same item as the same
+/// index into either of those.
+///
+/// `vocab` is the same story vocabulary [`inventory_click_words`] takes, and
+/// is used the same way (SQ-1662): each entry prefers
+/// [`crate::vocab::typeable_name`]'s short, single word over the raw
+/// `display_name()` join, falling back to `display_name()` only when
+/// `typeable_name` cannot resolve anything. Without this, an item with no
+/// hardware short name (every Inform 7 object) showed every parser word
+/// joined into one run-on string until the item's registry record caught up
+/// — visible at boot on a returning player whose avatar resolves instantly
+/// from a persisted sidecar (SQ-1655/SQ-1657), before any turn has run.
+pub fn inventory_items_with_keys(
+    player_obj: Option<u16>,
+    inventory_fallback: &[String],
+    introspect: Option<&dyn Introspect>,
+    vocab: Option<&crate::vocab::StoryVocabulary>,
+) -> Vec<(Option<u32>, String)> {
+    let player = player_obj.or_else(|| introspect.and_then(|i| i.player_object()));
+    match (player, introspect) {
+        (Some(obj), Some(intro)) => intro
+            .contents(obj)
+            .iter()
+            .filter_map(|o| {
+                let display = o.display_name()?;
+                let name = crate::vocab::typeable_name(o, vocab).unwrap_or(display);
+                Some((Some(o.id), name))
+            })
+            .collect(),
+        _ => inventory_fallback.iter().cloned().map(|s| (None, s)).collect(),
+    }
+}
+
 /// The word a click on each [`inventory_items`] row composes into the
 /// prompt, in the SAME order and over the SAME filter (SQ-1244) — so the two
 /// lists always line up index-for-index and a click can never grab the wrong
@@ -1804,6 +1915,15 @@ pub struct TranscriptRender {
     pub prompt_rows: u16,
     /// Per-frame map from rendered cell `(col, row)` to Glk hyperlink value.
     pub links: Vec<((u16, u16), u32)>,
+    /// Whether THIS frame is showing a top-anchored post-clear screen in full
+    /// (see [`window_wrapped_rows`]) — the view is at the bottom, a clear
+    /// anchor is set, and its content still fits the viewport with no
+    /// overflow. `pager::apply_frame` (SQ-1661) must not arm a follow-ease
+    /// while this holds: the ease's FROM/TO values are computed against the
+    /// FULL transcript's row count, a coordinate space `window_wrapped_rows`
+    /// only uses once this stops being true, and animating through it briefly
+    /// shows pre-clear content the anchor is supposed to hide.
+    pub top_anchored_fits: bool,
 }
 
 /// Render the GAME pane into `buf` within `area`:
@@ -2188,8 +2308,10 @@ fn render_input_content(
     }
 
     // Not focus-gated: the caret shows what you typed and where, which stays true
-    // while the keyboard is on the map. A modal still suppresses it.
-    if !state.any_modal_overlay_open() {
+    // while the keyboard is on the map. A modal still suppresses it — and so does
+    // the Hints tab holding the keyboard (SQ-1685): the cursor is drawn only in
+    // the input that has focus.
+    if !state.any_modal_overlay_open() && !state.hints_have_keyboard() {
         // Draw the caret where it actually IS, not always after the last char (SQ-0354). Clamped to
         // the drawn text: a long line is truncated to fit, and the caret must not be painted past
         // what is on screen.
@@ -2674,10 +2796,10 @@ fn render_middle(
         // unmoved anchor keeps the filtered position it already had; only a
         // genuine move (or a Rebuild, where `starts_before` is 0 and
         // `visible_indices` is the whole transcript) recomputes it.
-        cache.clear_anchor_filtered = if !matches!(plan, WrapPlan::Rebuild) && old_anchor == state.clear_anchor {
+        cache.clear_anchor_filtered = if !matches!(plan, WrapPlan::Rebuild) && old_anchor == state.top_anchor {
             old_anchor_filtered
         } else {
-            state.clear_anchor.map(|a| starts_before + visible_indices.iter().filter(|&&i| i < a).count())
+            state.top_anchor.map(|a| starts_before + visible_indices.iter().filter(|&&i| i < a).count())
         };
         // The anchor is where that line STARTS in the wrap just built (SQ-0640) — a
         // separate wrap of the prefix would count a margin float's strips twice
@@ -2725,6 +2847,10 @@ fn render_middle(
     state.graphics_render.borrow_mut().queue_external_deletes(evicted_bands);
     // Window the cached rows to the visible viewport (cheap; no re-wrap). The
     // top-anchor only applies at the bottom, handled inside `window_wrapped_rows`.
+    // Captured before windowing (same inputs, mirrored condition) so the pager
+    // (SQ-1661) knows whether THIS frame is showing a top-anchored view in
+    // full, without reaching into the wrap cache itself.
+    let top_anchored_fits = top_anchor_fits(entry.anchor_row, entry.rows.len(), transcript_rows, effective_scroll);
     let (lines, total_rows, first_abs_row) =
         window_wrapped_rows(&entry.rows, entry.anchor_row, transcript_rows, effective_scroll);
     // Search highlight style, themed via the `transcript_search_highlight`
@@ -2943,7 +3069,7 @@ fn render_middle(
             // display width of the text before it, not that text's char count.
             let cursor_x = start_col
                 + crate::textwidth::cols_of_chars(input_trunc, state.input.cursor.min(drawn)) as u16;
-            if cursor_x < body_area.right() {
+            if cursor_x < body_area.right() && !state.hints_have_keyboard() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
                     // Mid-line, or over the ghost's first glyph: restyle the char
                     // the caret sits on (keep it readable); at the end of the line
@@ -3065,7 +3191,12 @@ fn render_middle(
             }
         }
     }
-    let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
+    // Anchor-aware (SQ-1666): with a standing top-anchor whose content still
+    // fits, `window_wrapped_rows` spends extra scroll units growing the pinned
+    // view before it starts sliding (`anchored_window_bounds`'s `pad`) — the
+    // plain `total_rows - transcript_rows` cuts the reachable range short by
+    // exactly that much, stranding the oldest `pad` rows unreachable by scroll.
+    let max_scroll = anchored_max_scroll(total_rows, entry.anchor_row, transcript_rows).min(u16::MAX as usize) as u16;
     let total = total_rows.min(u16::MAX as usize) as u16;
     TranscriptRender {
         scrollbar: drew_scrollbar,
@@ -3074,6 +3205,7 @@ fn render_middle(
         viewport_rows: transcript_rows.min(u16::MAX as usize) as u16,
         prompt_rows,
         links,
+        top_anchored_fits,
     }
 }
 
@@ -3834,9 +3966,17 @@ mod tests {
             (0, 3, 3),
             "the post-clear screen is blank; the three erased rows stay in scrollback"
         );
-        // Scrolling back still reaches them.
-        let (back, _, _) = window_wrapped_rows(&rows, anchor, 2, 1);
-        assert_eq!(back.len(), 2, "the erased screen is still reachable above the anchor");
+        // Scrolling back still reaches them, one row at a time (SQ-1666): with a
+        // fully blank anchored screen (`anchored_len == 0`), `pad == rows == 2`,
+        // so scroll=1 reveals just "c" (not a 2-row jump straight to ["a","b"] —
+        // the bug this quest fixes) and scroll=2 fills the 2-row viewport with
+        // "b","c" before scroll=3 starts the ordinary backward slide onto "a","b".
+        let (back1, _, _) = window_wrapped_rows(&rows, anchor, 2, 1);
+        assert_eq!(back1.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["c"]);
+        let (back2, _, _) = window_wrapped_rows(&rows, anchor, 2, 2);
+        assert_eq!(back2.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["b", "c"]);
+        let (back3, _, _) = window_wrapped_rows(&rows, anchor, 2, 3);
+        assert_eq!(back3.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "the erased screen is still reachable above the anchor");
     }
 
     #[test]
@@ -5950,7 +6090,7 @@ mod tests {
             let mut state = AppState::default();
             state.config.command_bar = true;
             state.input.set("hi", true);
-            state.room_dock.toggle_to(true, true);
+            state.open_room_dock(crate::state::RoomDockView::Info);
             state.room_dock_view = mode;
             assert!(!state.any_overlay_open(), "the room panel is not an overlay at all…");
             assert!(!state.any_modal_overlay_open(), "…and certainly not a MODAL one");
@@ -6532,10 +6672,10 @@ mod tests {
     #[test]
     fn render_transcript_never_shows_inventory_strip() {
         // The inventory moved to the docked panel (render::inventory_dock); this
-        // pane must never draw an "Inv:" strip regardless of show_inventory.
+        // pane must never draw an "Inv:" strip regardless of the Inventory tab.
         let machine = minimal_machine();
         let mut state = AppState::default();
-        state.show_inventory = true;
+        state.set_journal_tab(crate::journal::JournalTab::Inventory);
         state.inventory_fallback = vec!["brass lamp".to_string(), "sword".to_string()];
 
         let area = Rect::new(0, 0, 40, 10);
@@ -6560,6 +6700,18 @@ mod tests {
         assert_eq!(inventory_items(None, &items, None), items);
         assert_eq!(inventory_items(Some(7), &items, None), items);
         assert!(inventory_items(None, &[], None).is_empty());
+    }
+
+    /// SQ-1630: the fallback path (no live object tree) has no ids to give —
+    /// every entry comes back `None` — but still carries every fallback name,
+    /// so `inventory_dock` still has something to show even when it cannot
+    /// cross-reference the registry.
+    #[test]
+    fn inventory_items_with_keys_fallback_has_no_ids() {
+        let items = vec!["brass lamp".to_string(), "rusty key".to_string()];
+        let got = inventory_items_with_keys(None, &items, None, None);
+        assert_eq!(got, vec![(None, "brass lamp".to_string()), (None, "rusty key".to_string())]);
+        assert!(inventory_items_with_keys(None, &[], None, None).is_empty());
     }
 
     /// SQ-1244: with no introspection, `inventory_click_words` falls back to
@@ -7593,6 +7745,7 @@ mod tests {
         let restore = |state: &mut AppState| {
             state.transcript = archived.iter().map(|s| s.to_string()).collect();
             state.clear_anchor = None;
+            state.top_anchor = None;
             state.transcript_kinds = vec![TranscriptKind::Story; archived.len()];
             state.transcript_runs = vec![Vec::new(); archived.len()];
             state.transcript_para = vec![ParaFmt::default(); archived.len()];
@@ -7675,12 +7828,17 @@ mod tests {
 
     #[test]
     fn wrap_cache_invalidates_on_anchor_change() {
+        // `top_anchor` (SQ-1656), not `clear_anchor` — the render-facing
+        // top-anchor is what `WrapShape` actually tracks here; `clear_anchor`
+        // alone moving (a preserving clear) must NOT force a rewrap, which is
+        // exactly what `a_preserving_clear_leaves_anchor_row_untouched_but_
+        // an_ordinary_clear_still_moves_it` above proves from the other side.
         let mut state = AppState::default();
         state.push_transcript_kind("hello world", TranscriptKind::Story);
         let area = Rect::new(0, 0, 20, 8);
         wrap_render(&state, area);
         poison_wrap_cache(&state);
-        state.clear_anchor = Some(0); // screen-clear boundary moved
+        state.top_anchor = Some(0); // top-anchor boundary moved
         wrap_render(&state, area);
         assert_ne!(cached_first_text(&state), "SENTINEL", "anchor change must re-wrap");
     }
@@ -7728,8 +7886,65 @@ mod tests {
         let (vis2, _t, first2) = window_wrapped_rows(&rows, Some(4), 3, 0);
         assert_eq!(first2, 4);
         assert_eq!(vis2.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["R4", "R5"]);
-        // While scrolled (scroll != 0) the anchor does not apply.
-        let (_v3, _t3, first3) = window_wrapped_rows(&rows, Some(4), 3, 1);
-        assert_eq!(first3, 2);
+        // SQ-1666: scrolling through the anchor boundary is CONTINUOUS, not a
+        // cutover at scroll==0 vs. scroll>=1. `pad = rows - (n - anchor_row) = 3
+        // - 2 = 1`, so scroll=1 is still the anchor-growth phase (one more row of
+        // history revealed above the still-pinned R4/R5, nothing dropped from the
+        // bottom) and scroll=2 is the first step of the ordinary backward slide
+        // (continuing from exactly where growth left off, not restarting at its
+        // own scroll==0). Walking scroll=1..5 reaches every older row one at a
+        // time and then clamps at the true top (anchored_max_scroll == 4).
+        let at = |scroll: u16| {
+            let (v, _t, first) = window_wrapped_rows(&rows, Some(4), 3, scroll);
+            (first, v.iter().map(|r| r.text.clone()).collect::<Vec<_>>())
+        };
+        assert_eq!(at(1), (3, vec!["R3".into(), "R4".into(), "R5".into()]), "one more row revealed above, nothing lost at the bottom");
+        assert_eq!(at(2), (2, vec!["R2".into(), "R3".into(), "R4".into()]), "window now full (3 rows); slides, R5 recedes");
+        assert_eq!(at(3), (1, vec!["R1".into(), "R2".into(), "R3".into()]));
+        assert_eq!(at(4), (0, vec!["R0".into(), "R1".into(), "R2".into()]), "reached the very start of the transcript");
+        assert_eq!(at(5), at(4), "scrolling past the top clamps, does not go out of range");
+        assert_eq!(
+            anchored_max_scroll(6, Some(4), 3),
+            4,
+            "pad (1) + the ordinary n-rows max_scroll (3) — callers that clamp a scroll \
+             offset must use this, not the anchor-blind n-rows formula, or the oldest \
+             `pad` rows become unreachable by scroll"
+        );
+    }
+
+    /// SQ-1660 (reverting SQ-1656): the render-pipeline counterpart of the
+    /// state-level `mark_screen_clear_always_moves_top_anchor_in_lockstep`
+    /// (`state.rs`) proves directly — this shows it is actually
+    /// `window_wrapped_rows`' own `anchor_row` input that moves, not just a
+    /// field nobody reads. EVERY `mark_screen_clear` call — there is no
+    /// preserve/collapse split in the render-facing anchor any more — moves
+    /// `cache.anchor_row`, which is exactly the `anchor_row`
+    /// [`window_wrapped_rows`] is called with at draw time (line 2756
+    /// above), so every clear pins the new content to the top of the pane.
+    #[test]
+    fn every_screen_clear_moves_anchor_row_and_top_anchors() {
+        let area = Rect::new(0, 0, 34, 12);
+        let mut state = script_state();
+        drive_script(&mut state, area, true);
+        wrap_render(&state, area);
+        assert_eq!(wrap_bookkeeping(&state).0, None, "premise: nothing has cleared yet, so there is no anchor row");
+
+        state.mark_screen_clear();
+        state.push_transcript_kind("a fresh screen's content", TranscriptKind::Story);
+        wrap_render(&state, area);
+        assert_eq!(
+            wrap_bookkeeping(&state).0,
+            Some(wrap_product(&state).len() - 1),
+            "a clear must top-anchor the render to the fresh content, same as every clear \
+             before SQ-1656 and again after SQ-1660"
+        );
+
+        state.mark_screen_clear();
+        wrap_render(&state, area);
+        assert_eq!(
+            wrap_bookkeeping(&state).0,
+            Some(wrap_product(&state).len()),
+            "a second clear with nothing printed since anchors past the last row, still top-anchored"
+        );
     }
 }

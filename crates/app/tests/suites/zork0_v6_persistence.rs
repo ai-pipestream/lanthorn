@@ -114,6 +114,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &pics,
@@ -225,6 +226,7 @@ fn inline_transcript_images_survive_archive_roundtrip_sq0518() {
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::of(&state),
         &session.pictures_png(),

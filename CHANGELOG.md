@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.7.2`) versions every crate and every
+version in `Cargo.toml` (currently `0.9.0`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -16,6 +16,298 @@ measurements and the history belong in the commit that made the change and in
 the quest that tracked it. And use no RELATIVE links — `[x](docs/internals/…)`
 resolves against the release page rather than the repository and 404s there.
 Absolute URLs or no link.
+
+---
+
+## Unreleased
+
+*This section is drained when a version is cut. README.md describes the
+RELEASED build; prose for a feature that is in `main` but not yet released
+goes into the README in place, at its normal destination, marked with the
+visible tag `*Next release:*`. `release.yml` refuses to cut a release
+while any such tag, or this Unreleased section, still exists.*
+
+## v0.9.0 — 2026-10-03
+
+### Added
+
+- **The Journal.** The panel beside the story is now a tabbed Journal: **Map**,
+  **Room**, **Inventory**, **Hints** and **Documents**. Click a tab, press
+  `Alt+1` to `Alt+5`, or use `/journal-tab` (`/journal-next-tab` and
+  `/journal-prev-tab` step through them). The story pane keeps the rows the
+  inventory strip used to take, and the tab you were on comes back the next time
+  you open that story. Clicking a room on the map still selects it without
+  leaving the map.
+- **Room card on the map.** Click a room and a card appears under the map with
+  its name, layer, the description the game last printed there, when you saw it,
+  and **Rename…**, **Notes…**, **Move to another layer…** and **Details**
+  buttons. Esc or a click on empty map space puts it away. Click a dotted
+  "to/from" room to jump to that room's layer with it selected.
+- **Documents folders.** Every game linked to IFDB can have a documents folder
+  for its manual, feelies and maps, named `<Title> [<IFDB id>]` under
+  `~/.lanthorn/documents/` and shared by every release of the game and every
+  player. The story info panel shows its path or offers **Create documents
+  folder** (also `m`, the story menu, or `/create-documents-folder`, which now
+  works in a running game too). The story list's info panel also lists
+  the folder's files, each with its kind, size and a spoiler mark, and a click
+  opens one the way the Documents tab does: text and pictures in a preview, PDFs
+  in your system viewer, spoilers asking first. `create_documents_folders = true` makes them
+  automatically, and `documents_dir` moves them; both are read from the shared
+  `config.toml` only.
+- **Documents tab.** Lists the folder with each file's kind and size. Text opens
+  in a pager that wraps to the pane, reads old Mac and DOS text files and
+  re-wraps on resize; pictures are shown in place; PDFs open in your system
+  viewer. Files named like a walkthrough or hint sheet are marked as spoilers
+  and ask before they open. Reach it with a click, `Alt+5` or
+  `/journal-tab documents`; Shift+Up/Down and Shift+Left/Right move through it
+  without touching the command line. A file's kind is judged by what is in it,
+  not its name, so a transcript called `zorkI.step1` shows as text.
+- **Fetch documents from IFDB.** Press `Shift+D` on a story (or use the story
+  menu's **Download documents from IFDB…**, the **Download documents…** button in
+  the info panel, or `/download-documents` in a running game) and pick from the
+  files IFDB lists: PDFs, scans, text files and zips. A zip opens to show what is
+  inside without being downloaded, so you can take one entry from a bundle, and
+  a text file can be previewed first. Each file keeps IFDB's description and says
+  which zip it came from. Nothing is fetched until you ask; files over 100 MB are
+  refused, and a game that is not linked to IFDB says so. A document you already
+  have (same contents, any name) is not copied again; a different file with the
+  same name gets a `(2)` suffix. The chooser marks what you
+  already have: a file in the folder at the same size shows "In your documents"
+  and cannot be ticked or downloaded again, while one whose size has changed
+  since you downloaded it shows "In your documents — different size" and stays
+  tickable.
+- **Hint files in the documents folder.** Drop an *InvisiClues* file there and
+  the Hints tab uses it for that game whatever it is called, across every release
+  and disk image; the old places still work and nothing is moved. **Download
+  hints** saves into the documents folder for a game linked to IFDB. When several
+  hint files could be the game's, the Hints tab lists them so you can pick one
+  (click, or Tab / Up / Down / Enter) and remembers your choice.
+- **Glulx games in the frame their author drew.** Games that ship a Windows Glk
+  `.cfg` (*Photopia* 2.01 and *Narcolepsy* among them) are laid out at the
+  size their author designed and stretched over the story pane, so the border art
+  meets the text with no gaps. Window masks are honoured too: cells outside the
+  shape are left blank (style it with `glk_mask_outside`). Put
+  `glk_design = false` in a story's `config.toml` to keep the old layout, or in
+  the shared `config.toml` to turn it off for every game.
+- **`/set-glk-fit aspect`** keeps a designed frame's proportions instead of
+  stretching: it fits the largest whole-cell frame at the design's proportions,
+  centred. A bare `/set-glk-fit` (or a click on the render icon on the story
+  pane's top border, shown only for these games) toggles; it is remembered per
+  game, and `glk_design_fit` in `config.toml` sets the default.
+- **The Guiding Light spells out modern shorthands on older games.** Type
+  `x lamp` in a game that has never heard of `x` and it suggests `examine`
+  (keeping `lamp`); likewise `z` for `wait`, `g` for `again`, `l` for `look` and
+  `i` for `inventory`, whenever that game really knows the full word.
+- **Several players on one install.** `--player <name>` (or the
+  `LANTHORN_PLAYER` environment variable) gives each player their own saves, map,
+  history, settings and look, while story titles, blurbs and covers are fetched
+  once and shared. Leave it out and nothing changes. Lanthorn only takes the
+  name; it does not check who you are.
+- **Docker browser mode behind a login proxy.** Set `LANTHORN_WEB_AUTH_HEADER` to
+  the header a login-aware reverse proxy (Authelia, Authentik, Caddy
+  `forward_auth`) fills in with the user's name, and each user gets their own
+  saves, map and settings, with their running game kept separate. The container
+  does no login of its own, so the proxy must be the only way to reach it. Sound
+  works in this mode too, through a second proxy route.
+
+### Changed
+
+- **Hints moved from a pop-up into the Journal.** `/open-hints` no longer covers
+  the story: the hint file runs in the **Hints** tab (`Alt+4`, or
+  `/journal-tab hints`), starts by itself the first time you show it, and keeps
+  its place in the hint menu while you look at other tabs. The keyboard stays
+  with the story until you click inside the hint window (or press Tab on an empty
+  prompt); Esc, Tab on an empty hint line, or a click on the story or another tab
+  hands it back. With no hint file the tab says so and offers **Download
+  hints…**, and `/download-hints` now works in a running game as well as in the
+  story browser. The "no hint file" message names the game's documents folder, or
+  tells you to link the game to IFDB first.
+- `/toggle-room-panel` and `/toggle-inventory-panel` are replaced by
+  `/journal-tab`, the leader keys `k` and `i` now switch to those tabs, and the
+  `inv_dock_pct` and `room_dock_pct` settings are gone. The border control that
+  cycled the command panel and inventory now just opens and closes the command
+  panel.
+- Story downloads from IFDB are limited to 100 MB per file, the same as
+  documents (raised from 50 MB); a file over the limit is refused with "Too large
+  to download (over 100 MB)".
+
+### Fixed
+
+- **Up/down rooms and the dotted links to other map layers no longer cut across
+  other paths.** The "to ..." boxes standing for other layers now sit beside the
+  room whose passage leads there, and a room reached by stairs is tucked in where
+  its connector crosses nothing.
+- **Folders of Commodore 64 disks list much faster.** Crunched disk images with
+  no playable game are now unpacked once, and lanthorn remembers which disks held
+  no game (until the file changes), so a folder of C64 disks that took 12.4
+  seconds to list now takes 4.2 seconds the first time and 0.07 seconds after
+  that.
+- **Hints are found in game for a story played from a disk image.** Zork I from
+  an Amiga disk showed its hint file in the story list but the in-game hints said
+  none was available; the game and the story list now pick the same file.
+- Walkthroughs, hints and solution files are marked as spoilers in the document
+  downloader even when IFDB files them somewhere else, and so are files inside a
+  zip that are named that way.
+- The room inspector now shows room descriptions in Zork Zero, Shogun and Arthur
+  too, instead of leaving them blank in every graphical (Version 6) game. Journey
+  prints no room names, so it still has none to show.
+
+## v0.8.3 — 2026-10-01
+
+### Fixed
+
+- Autocomplete no longer offers words with stray punctuation picked up from the
+  story's output, like "sword:" after a multi-object "take all".
+- Typing "use sword on troll" (or "employ", "utilize", "wield", "operate") in a
+  game that has never heard the word now gets a real suggestion, such as "attack
+  troll with sword" in Zork I, instead of silence. The Guiding Light tries the
+  sentence the other way round and tests it in a hidden copy of the game before
+  offering it, and it now keeps looking when its first guess fails that test.
+- The map's tidy now honours one-way compass hints it used to leave bent: a room
+  a passage leads west to now ends up west of it, even when that takes a long
+  slide or moving a whole stairwell or corridor together, and a room draws its
+  plain compass exit rather than a diagonal one leading to the same place.
+
+## v0.8.2 — 2026-10-01
+
+### Added
+
+- lanthorn's Guiding Light can now also suggest a verb for a command with no
+  preposition at all — a plain "verb noun", like a one-word "pickup" instead
+  of "get" — but only once it has actually confirmed the suggestion works
+  here, since a bare command shape like that is too common to guess about
+  otherwise.
+- The Guiding Light can now also spot a two-word command typed as one
+  running-together word, like "pickup" for "pick up", when the story's own
+  grammar confirms that verb really does use that exact word — again only
+  once confirmed, for the same reason.
+- The room inspector now shows a room's own description, when lanthorn has
+  captured one — the game's own last-seen text for that room, above your
+  own notes on it.
+- The inventory panel now also lists every item lanthorn has tracked
+  elsewhere in the game — where it was last seen, and whether it's fixed in
+  place — under what you're currently carrying, and both lists can be
+  searched with a new `filter-items` command.
+- Tracked items with no formal in-game name now show a real word from the
+  story's own text — spelled out in full, not cut off mid-word — instead of
+  a run-on string listing every word the parser would have accepted for them.
+- Tracked items no longer show up under a bare "it" or "thing", or under a raw
+  internal placeholder name like "Brick_1" — a handful of games give an
+  object one of those instead of a real name, and the tracker now shows a
+  proper word from the story's own vocabulary there too.
+- Fixed a bug where a game could fail to recognize your own character as the
+  player, which showed your character up as a bogus tracked item that
+  followed you into every room, and meant nothing you carried ever showed up
+  in the tracked-items list at all (*The Hitchhiker's Guide to the Galaxy* was
+  affected this way for its whole length).
+- The inventory panel's "found"/"last seen" details for each item now draw
+  dimmed, so the item's own name stands out from its metadata.
+
+### Fixed
+
+- The launch options dialog and story info panel now say which machine a
+  colour Mac/Amiga picture archive is from — "Mac" or "Amiga" — when you
+  opened it from a known Mac or Amiga disk image, instead of always saying
+  "Amiga" even for the Mac's own colour art.
+- Fixed: the intro/title screens and picture full-view no longer disappear
+  from scrollback — an opening sequence of "press any key" screens (like
+  Anchorhead's intro and quote splash) now all stay readable, and clicking a
+  picture and returning no longer risks wiping everything you played since
+  the last screen change.
+- Fixed a bug where examining one tracked item could rename an unrelated one
+  in the same turn — if both items' vocabularies happened to share a word (an
+  adjective like "green" describing two different things), examining the
+  first could relabel the second to that shared word too, even though
+  nothing about the second item was actually printed.
+- Fixed the automap picking up a phantom room whenever a game's own screen —
+  a status display like *Superluminal Vagrant Twin*'s `map` or `prospects` —
+  printed a bolded page title over a bolded list entry, which looked exactly
+  like a real room heading over its description. Checking your own in-game
+  status screens no longer moves your marker on the map.
+- Fixed carried items never showing up in the tracker for some Inform games
+  whose player character can't be spotted by name alone — *Counterfeit
+  Monkey* and the full commercial release of *Anchorhead* were affected this
+  way for their whole length, with everything you picked up going untracked
+  even though the game's own replies confirmed you were carrying it.
+- Fixed the story screen briefly jumping backward then snapping forward on an
+  early action, even with plenty of room to show everything — *Counterfeit
+  Monkey*'s opening accessibility questions and *Anchorhead*'s intro/quote
+  sequence were the two games this showed up on most. (A screen clear always
+  scrolls the previous screen off the top instantly, same as before — what's
+  fixed is the stray jump-and-snap, not the clear itself. Anything typed
+  since is still reachable by scrolling up, per the entry above.)
+- Fixed the same tracker gap for the items you start the game already
+  holding, before you've ever typed TAKE — *Anchorhead*'s trenchcoat,
+  wedding ring and umbrella, and *Counterfeit Monkey*'s R-remover, now show
+  up as carried the moment you check your own INVENTORY, instead of staying
+  invisible until you drop and re-take them.
+- Fixed the story screen staying scrolled up after you typed a command and
+  hit Return, with inline prompts, if you'd scrolled back through earlier
+  text first — submitting your own command now jumps you straight back to
+  what just happened, the way most terminal and chat apps already treat your
+  own input. Scrolling up to read backlog while the game prints something on
+  its own (a timer, a delayed event) still leaves your view exactly where you
+  left it, same as before.
+- Fixed the inventory panel's "Carrying:" row showing a jumbled run-on of
+  every word a game answers to for an item, instead of its clean name — a
+  game object with no proper printed name (some *Anchorhead* items, among
+  others) could read "umbrella things green handle brolly bumbersho"
+  instead of "umbrella". This also showed up right at the start of a brand
+  new game, before you'd typed a single command, if you'd played the same
+  story before — the panel now reads cleanly from the very first frame.
+- Fixed *Counterfeit Monkey*'s opening questions silently dropping a line of
+  story text the moment you answered the first one — the reply to "Can you
+  hear me?" and the lead-in to the next question could vanish entirely
+  instead of printing, making the second question look blank.
+- Fixed scrolling up through a recent screen clear jumping a whole screen's
+  worth of text at once instead of revealing it line by line — most
+  noticeable right after an intro sequence, or after viewing a full-screen
+  picture and returning to the game, before you'd played long enough to
+  fill the screen with your own commands.
+- Fixed `/reset-game`'s "Delete saved progress" option not actually
+  deleting your saved progress — your auto-save and quick-save could both
+  survive a reset and be picked back up later, even with the box checked.
+- Fixed a new command right after a screen clear (like the end of
+  *Anchorhead*'s intro) briefly jumping the story screen back to whatever was
+  hidden before the clear, then scrolling quickly back down to the fresh
+  line — your next move now just appears below the cleared screen with no
+  stray jump at all.
+
+## v0.8.1 — 2026-09-29
+
+### Added
+
+- **Linux ARM64 (Raspberry Pi 64-bit and other ARM Linux) builds now ship**
+  alongside x86_64, macOS and Windows.
+- lanthorn's Guiding Light can now suggest a completely different verb than
+  the one you typed, as a last resort, when the story's own grammar shows it
+  accepts the same sentence shape you already wrote — helpful in a story that
+  only implements an unfamiliar verb for a common action.
+
+## v0.8.0 — 2026-09-28
+
+### Added
+
+- **Auto-save is on by default now, and has its own save slot separate from
+  your manual quick-save (Ctrl+S).** A deliberate quick-save is never
+  immediately overwritten by the next auto-save the way it used to be.
+
+### Changed
+
+- **Verified commercial Z-machine games (Infocom titles) now share one save
+  folder whether you're playing the raw story file or a disk image of the
+  same release.** If you already had separate saves for each, they stay
+  exactly as they were — this only applies to saves made from now on.
+- Laid groundwork for upcoming map features (room descriptions, item
+  tracking) — not yet visible in the map view.
+
+### Fixed
+
+- **The automatic map layout no longer mis-scores certain one-way
+  passages**, which could leave a room positioned in the wrong spot relative
+  to its neighbors.
+- **Resuming a game now correctly picks up your most recent save** between
+  auto-save and quick-save, even right after a normal quit.
 
 ---
 

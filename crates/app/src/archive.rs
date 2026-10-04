@@ -301,6 +301,73 @@ pub struct Meta {
     /// [`SaveTrigger::HostState`] — the only kind that existed before the field.
     #[serde(default)]
     pub trigger: SaveTrigger,
+    /// Which physical copy of the story release wrote this save (SQ-1633) —
+    /// informational only, for display (e.g. "Continue on the Amiga version").
+    /// `storage::game_dir`'s IFID-keyed grouping of every copy of one release
+    /// into a single shared save folder, and which slot a boot resumes from,
+    /// never read this field. Defaults to [`SaveSource::default`] (all `None`)
+    /// for saves written before this field existed.
+    #[serde(default)]
+    pub source: SaveSource,
+}
+
+/// Which physical copy of a story release a session was booted from (SQ-1633):
+/// the file (or disk image entry) on disk, and the real-world machine it was
+/// presented as, when known. Several copies of the same release — an Amiga
+/// floppy, an Atari ST floppy, a bare `.z3` — share one save folder via
+/// `storage::game_dir`'s IFID-keyed grouping, because the save itself is
+/// compatible across any of them; this struct records which COPY happened to
+/// write one particular save, purely for display, and never feeds into that
+/// grouping or into which slot a boot resumes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SaveSource {
+    /// The booted story file's name (just the name, not a full path — an
+    /// archive is meant to travel between machines, and a filesystem path
+    /// baked into it would not). `None` for a save written before this field
+    /// existed.
+    #[serde(default)]
+    pub story_file: Option<String>,
+    /// Which story on a multi-story disk image this was
+    /// ([`crate::host::BootRequest::disk_entry`], SQ-0859) — `None` for a
+    /// loose file, a single-story image, or a save written before this field
+    /// existed.
+    #[serde(default)]
+    pub disk_entry: Option<String>,
+    /// The real-world machine the story was booted from, when it came off a
+    /// release disk image with one ([`blorb::medium::DiskImage::machine`]).
+    /// `None` for a bare file with no disk medium (or a hybrid medium naming
+    /// no single machine), or a save written before this field existed.
+    #[serde(default)]
+    pub machine: Option<MachineDto>,
+}
+
+/// serde mirror of [`blorb::medium::Machine`] (SQ-1633). Spelled out here
+/// rather than derived on the blorb type because `blorb` otherwise keeps
+/// serde off its own public types — the same reasoning [`ImageRuleDto`] gives
+/// for `gvm::glk::ImageRule`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MachineDto {
+    Amiga,
+    Macintosh,
+    AtariSt,
+    AppleII,
+    Atari8Bit,
+    Commodore64,
+    IbmPc,
+}
+
+impl From<blorb::medium::Machine> for MachineDto {
+    fn from(m: blorb::medium::Machine) -> MachineDto {
+        match m {
+            blorb::medium::Machine::Amiga => MachineDto::Amiga,
+            blorb::medium::Machine::Macintosh => MachineDto::Macintosh,
+            blorb::medium::Machine::AtariSt => MachineDto::AtariSt,
+            blorb::medium::Machine::AppleII => MachineDto::AppleII,
+            blorb::medium::Machine::Atari8Bit => MachineDto::Atari8Bit,
+            blorb::medium::Machine::Commodore64 => MachineDto::Commodore64,
+            blorb::medium::Machine::IbmPc => MachineDto::IbmPc,
+        }
+    }
 }
 
 /// Transcript payload written to `transcript.json` inside the archive.
@@ -390,6 +457,13 @@ struct HistoryIndexEntry {
     turn: u32,
     command: String,
     has_map: bool,
+    /// [`crate::history::TurnRecord::location`] / `location_name` (SQ-1621).
+    /// `#[serde(default)]`: an archive written before these existed has
+    /// neither key, which deserializes as `None` for both.
+    #[serde(default)]
+    location: Option<mapper::graph::RoomId>,
+    #[serde(default)]
+    location_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -647,6 +721,7 @@ pub fn save_archive(
         location: None,
         score: None,
         trigger: SaveTrigger::HostState,
+        source: SaveSource::default(),
     }, transcript, transcript_kinds, transcript_runs, transcript_para, history, command_history)
 }
 
@@ -749,6 +824,10 @@ pub fn save_archive_meta_pics(
 /// in them) — pass the live `Engine::save_state()` so the tag matches the
 /// engine that just quit; `restore_engine_allowed` reads it on a later
 /// restore attempt the same as any other archive.
+///
+/// `source` is the physical copy this session was booted from (SQ-1633,
+/// informational only — see [`SaveSource`]); pass `&state.source`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_cleared_resume_archive(
     path: &Path,
     mapper: &Mapper,
@@ -757,6 +836,7 @@ pub fn write_cleared_resume_archive(
     ifid: &str,
     saved_at: String,
     command_history: &[String],
+    source: &SaveSource,
 ) -> io::Result<()> {
     let empty_save = EngineSave { engine: save.engine.clone(), format_version: save.format_version, bytes: Vec::new() };
     let meta = Meta {
@@ -768,6 +848,7 @@ pub fn write_cleared_resume_archive(
         location: None,
         score: None,
         trigger: SaveTrigger::HostState,
+        source: source.clone(),
     };
     let session = SessionRecord {
         transcript: &[],
@@ -965,6 +1046,8 @@ pub(crate) fn build_archive_bytes(
                 turn: r.turn,
                 command: r.command.clone(),
                 has_map: r.map_snapshot.is_some(),
+                location: r.location,
+                location_name: r.location_name.clone(),
             })
             .collect();
         let index_json =
@@ -1410,6 +1493,8 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
                     save,
                     map_snapshot,
                     transcript,
+                    location: e.location,
+                    location_name: e.location_name,
                 }));
             }
             out
@@ -1533,6 +1618,37 @@ pub fn read_archive_meta(path: &Path) -> io::Result<Meta> {
         ));
     }
     Ok(meta)
+}
+
+/// Whether the archive at `path` has a real resume point — i.e. its
+/// `game.<ext>` entry (the `EngineSave::bytes` `load_archive`/`ArchiveContents`
+/// would hand back as `save`) is non-empty (SQ-1626). `write_cleared_resume_archive`
+/// (`exit_clear_resume_save`'s doc) is the writer that produces the empty case:
+/// a fresh `meta.json` with no resume point, on every clean game-driven quit.
+///
+/// Reads only `engine.txt` (to know which entry name to look at) and that
+/// entry's SIZE from the zip directory — no decompression, so this is cheap
+/// enough to call on both reserved slots at every boot, unlike `load_archive`
+/// (which would also unzip the map, transcript, history, screen and pictures
+/// just to answer one bool).
+pub fn archive_has_resume_point(path: &Path) -> io::Result<bool> {
+    let file = std::fs::File::open(path)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let engine = match zip.by_name(ENTRY_ENGINE) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            let _ = entry.read_to_string(&mut buf);
+            let t = buf.trim();
+            if t.is_empty() { DEFAULT_ENGINE.to_string() } else { t.to_string() }
+        }
+        Err(_) => DEFAULT_ENGINE.to_string(),
+    };
+    let name = format!("game.{}", save_ext(&engine));
+    let entry = zip.by_name(&name).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("missing {name}: {e}"))
+    })?;
+    Ok(entry.size() > 0)
 }
 
 /// Rewrite `old_path`'s `meta.json` with a new display `name` and write the
@@ -1761,7 +1877,7 @@ mod tests {
         let machine = dummy_machine();
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() },
             &SessionRecord { transcript: &transcript, kinds: &kinds, images: &images, ..SessionRecord::empty() },
             &[],
             None,
@@ -1796,7 +1912,7 @@ mod tests {
         let machine = dummy_machine();
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() },
             &SessionRecord { transcript: &transcript, kinds: &kinds, ..SessionRecord::empty() },
             &[],
             None,
@@ -1858,7 +1974,7 @@ mod tests {
             &zvm_es(&machine),
             Some(&machine.screen),
             &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() },
             &transcript,
             &kinds,
             &[],
@@ -1895,9 +2011,11 @@ mod tests {
         let map_json = mapper::persist::to_json(&mapper);
         let history = vec![
             std::sync::Arc::new(TurnRecord { turn: 1, command: "look".into(), save: vec![1, 2, 3],
-                map_snapshot: Some(map_json.clone()), transcript: "West of House".into() }),
+                map_snapshot: Some(map_json.clone()), transcript: "West of House".into(),
+                location: Some(1), location_name: Some("West of House".into()) }),
             std::sync::Arc::new(TurnRecord { turn: 2, command: "wait".into(), save: vec![4, 5, 6, 7],
-                map_snapshot: None, transcript: "Time passes.".into() }),
+                map_snapshot: None, transcript: "Time passes.".into(),
+                location: None, location_name: None }),
         ];
 
         let path = temp_archive_path("history-rt");
@@ -1912,9 +2030,13 @@ mod tests {
         assert_eq!(ac.history[0].save, vec![1, 2, 3], "save bytes byte-identical");
         assert_eq!(ac.history[0].map_snapshot.as_deref(), Some(map_json.as_str()));
         assert_eq!(ac.history[0].transcript, "West of House");
+        // SQ-1621: `location`/`location_name` round-trip through the archive too.
+        assert_eq!(ac.history[0].location, Some(1));
+        assert_eq!(ac.history[0].location_name.as_deref(), Some("West of House"));
         assert_eq!(ac.history[1].save, vec![4, 5, 6, 7]);
         assert!(ac.history[1].map_snapshot.is_none(), "no-change turn has no map");
         assert_eq!(ac.history[1].transcript, "Time passes.");
+        assert!(ac.history[1].location.is_none(), "a record built with no location loads as None");
     }
 
     #[test]
@@ -1998,6 +2120,7 @@ mod tests {
         Meta {
             format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0,
             saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState,
+            source: SaveSource::default(),
         }
     }
 
@@ -2017,10 +2140,12 @@ mod tests {
             std::sync::Arc::new(TurnRecord {
                 turn: 1, command: "look".into(), save: vec![1, 2, 3],
                 map_snapshot: None, transcript: "West of House".into(),
+                location: None, location_name: None,
             }),
             std::sync::Arc::new(TurnRecord {
                 turn: 2, command: "wait".into(), save: vec![4, 5, 6, 7],
                 map_snapshot: None, transcript: "Time passes.".into(),
+                location: None, location_name: None,
             }),
         ];
         let path = temp_archive_path("reuse-basic");
@@ -2045,6 +2170,7 @@ mod tests {
             std::sync::Arc::new(TurnRecord {
                 turn: 3, command: "north".into(), save: vec![8, 9],
                 map_snapshot: None, transcript: "Forest".into(),
+                location: None, location_name: None,
             }),
         ];
         let session2 = SessionRecord { history: &history2, ..SessionRecord::empty() };
@@ -2107,6 +2233,7 @@ mod tests {
         let history: Vec<std::sync::Arc<TurnRecord>> = vec![std::sync::Arc::new(TurnRecord {
             turn: 1, command: "look".into(), save: vec![9, 9, 9],
             map_snapshot: None, transcript: "A room.".into(),
+            location: None, location_name: None,
         })];
         let session = SessionRecord { history: &history, ..SessionRecord::empty() };
 
@@ -2137,6 +2264,7 @@ mod tests {
         let other_history: Vec<std::sync::Arc<TurnRecord>> = vec![std::sync::Arc::new(TurnRecord {
             turn: 1, command: "xyzzy".into(), save: vec![1, 1, 1, 1, 1],
             map_snapshot: None, transcript: "Somewhere else entirely, a long way from here.".into(),
+            location: None, location_name: None,
         })];
         let other_session = SessionRecord { history: &other_history, ..SessionRecord::empty() };
         let other_bytes = build_archive_bytes(
@@ -2202,10 +2330,12 @@ mod tests {
             std::sync::Arc::new(TurnRecord {
                 turn: 1, command: "one".into(), save: save1.clone(),
                 map_snapshot: None, transcript: "First turn text.".into(),
+                location: None, location_name: None,
             }),
             std::sync::Arc::new(TurnRecord {
                 turn: 2, command: "two".into(), save: save2.clone(),
                 map_snapshot: None, transcript: "Second turn text.".into(),
+                location: None, location_name: None,
             }),
         ];
         let path = temp_archive_path("reuse-rewind-replay");
@@ -2524,6 +2654,7 @@ mod tests {
             location: None,
             score: None,
             trigger: SaveTrigger::HostState,
+            source: SaveSource::default(),
             },
             &[],
             &[],
@@ -2571,7 +2702,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write only meta.json; omit map.json and game.sav
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -2624,6 +2755,59 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // archive_has_resume_point (SQ-1626): a real save's bytes are non-empty,
+    // a cleared one's are empty — and the answer must agree with what
+    // `load_archive` itself hands back as `save`.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn archive_has_resume_point_is_true_for_a_real_save() {
+        let path = temp_archive_path("has-resume-true");
+        let save = EngineSave::new(DEFAULT_ENGINE, 1, vec![1, 2, 3, 4]);
+        let meta = Meta {
+            format_version: CURRENT_FORMAT_VERSION,
+            ifid: None,
+            name: None,
+            turns: 0,
+            saved_at: String::new(),
+            location: None,
+            score: None,
+            trigger: SaveTrigger::HostState,
+            source: SaveSource::default(),
+        };
+        save_archive_meta(&path, &Mapper::default(), &save, None, &BTreeMap::new(), meta, &[], &[], &[], &[], &[], &[])
+            .expect("save_archive_meta");
+
+        let ac = load_archive(&path).expect("loads");
+        assert!(!ac.save.is_empty(), "premise: this archive's save bytes are non-empty");
+        assert!(archive_has_resume_point(&path).expect("readable"), "a real save has a resume point");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn archive_has_resume_point_is_false_for_a_cleared_save() {
+        let path = temp_archive_path("has-resume-false");
+        let save = EngineSave::new(DEFAULT_ENGINE, 1, Vec::new());
+        let meta = Meta {
+            format_version: CURRENT_FORMAT_VERSION,
+            ifid: None,
+            name: None,
+            turns: 0,
+            saved_at: String::new(),
+            location: None,
+            score: None,
+            trigger: SaveTrigger::HostState,
+            source: SaveSource::default(),
+        };
+        save_archive_meta(&path, &Mapper::default(), &save, None, &BTreeMap::new(), meta, &[], &[], &[], &[], &[], &[])
+            .expect("save_archive_meta");
+
+        let ac = load_archive(&path).expect("loads");
+        assert!(ac.save.is_empty(), "premise: this archive's save bytes are empty");
+        assert!(!archive_has_resume_point(&path).expect("readable"), "an empty save has no resume point");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // -------------------------------------------------------------------------
     // transcript round-trip: lines + kinds survive write-read cycle
     // -------------------------------------------------------------------------
     #[test]
@@ -2639,7 +2823,7 @@ mod tests {
                 .compression_method(zip::CompressionMethod::Deflated);
 
             // meta.json
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -2744,7 +2928,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write an archive with no transcript.json entry.
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -2799,6 +2983,7 @@ mod tests {
                 location: None,
                 score: None,
                 trigger: SaveTrigger::HostState,
+                source: SaveSource::default(),
             },
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
@@ -2890,6 +3075,20 @@ mod tests {
         assert_eq!(bare.trigger, SaveTrigger::HostState);
     }
 
+    /// SQ-1633: a `meta.json` written before `Meta::source` existed has no
+    /// `source` key at all — it must still load, with every field of `source`
+    /// `None`, the same back-compat shape `trigger` above and `Room::description`
+    /// (`mapper::persist`'s own `a_pre_sq1625_map_file_has_no_description_field_and_loads_fine`)
+    /// already establish for this repo.
+    #[test]
+    fn a_meta_json_with_no_source_field_loads_with_default_source() {
+        let bare: Meta = serde_json::from_str(r#"{"format_version":5,"ifid":null}"#).unwrap();
+        assert_eq!(bare.source, SaveSource::default());
+        assert!(bare.source.story_file.is_none());
+        assert!(bare.source.disk_entry.is_none());
+        assert!(bare.source.machine.is_none());
+    }
+
     // The trigger survives a real archive write/read, not just serde in memory.
     #[test]
     fn trigger_round_trips_through_a_written_archive() {
@@ -2905,6 +3104,7 @@ mod tests {
                 location: None,
                 score: None,
                 trigger,
+                source: SaveSource::default(),
             };
             save_archive_meta(&path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen),
                 &machine.aux_data, meta, &[], &[], &[], &[], &[], &[]).expect("write");
@@ -2926,7 +3126,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
 
-            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
+            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -3041,7 +3241,7 @@ mod tests {
             let file = std::fs::File::create(&path).unwrap();
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
-            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
+            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() };
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(serde_json::to_string(&meta).unwrap().as_bytes()).unwrap();
             zip.start_file(ENTRY_MAP, options).unwrap();
@@ -3073,7 +3273,7 @@ mod tests {
         let path = temp_archive_path("pics");
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState, source: SaveSource::default() },
             &SessionRecord::empty(),
             &[(7, png_a.clone()), (1, png_b.clone())],
             None,
@@ -3114,6 +3314,7 @@ mod tests {
         let meta = |turns: u32| Meta {
             format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns,
             saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState,
+            source: SaveSource::default(),
         };
         save_archive_meta(&path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen),
             &machine.aux_data, meta(1), &[], &[], &[], &[], &[], &[]).expect("first save");

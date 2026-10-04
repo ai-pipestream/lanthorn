@@ -307,6 +307,7 @@ mod tests {
             location: None,
             score: None,
             trigger: SaveTrigger::HostState,
+            source: Default::default(),
         }
     }
 

@@ -427,10 +427,17 @@ fn edges_respected_at(
         };
         if axis_side_respected(actual.0, delta.0) && axis_side_respected(actual.1, delta.1) {
             // Reciprocal (bidirectional) links weigh more than one-way exits.
+            // Keyed off `c`'s own origin/dest (swapped), not the derived `other`/`id` pair:
+            // checking `other`/`id` directly re-finds this SAME one-way edge whenever `id`
+            // happens to be `c`'s destination, since `other == c.origin && id == c.dest` is
+            // trivially true of `c` itself — scoring one edge as reciprocal from one end and
+            // one-way from the other (SQ-1636). A genuine reciprocal pair needs a real edge
+            // walked the other way, `c.dest -> c.origin`, not `c` read from its destination's
+            // side.
             let reciprocal = graph
                 .connections()
                 .iter()
-                .any(|r| r.origin == other && r.dest == id && grid_offset(r.dir).is_some());
+                .any(|r| r.origin == c.dest && r.dest == c.origin && grid_offset(r.dir).is_some());
             sat += if reciprocal { RECIPROCAL_WEIGHT } else { 1 };
         }
     }
@@ -460,10 +467,17 @@ pub fn room_side_score(graph: &MapGraph, id: RoomId) -> usize {
             (p.0 - op.0, p.1 - op.1)
         };
         if axis_side_respected(actual.0, delta.0) && axis_side_respected(actual.1, delta.1) {
+            // Keyed off `c`'s own origin/dest (swapped), not the derived `other`/`id` pair:
+            // checking `other`/`id` directly re-finds this SAME one-way edge whenever `id`
+            // happens to be `c`'s destination, since `other == c.origin && id == c.dest` is
+            // trivially true of `c` itself — scoring one edge as reciprocal from one end and
+            // one-way from the other (SQ-1636). A genuine reciprocal pair needs a real edge
+            // walked the other way, `c.dest -> c.origin`, not `c` read from its destination's
+            // side.
             let reciprocal = graph
                 .connections()
                 .iter()
-                .any(|r| r.origin == other && r.dest == id && grid_offset(r.dir).is_some());
+                .any(|r| r.origin == c.dest && r.dest == c.origin && grid_offset(r.dir).is_some());
             sat += if reciprocal { RECIPROCAL_WEIGHT } else { 1 };
         }
     }
@@ -495,10 +509,17 @@ pub fn room_alignment_score(graph: &MapGraph, id: RoomId) -> usize {
             (p.0 - op.0, p.1 - op.1)
         };
         if axis_sign_ok(actual.0, delta.0) && axis_sign_ok(actual.1, delta.1) {
+            // Keyed off `c`'s own origin/dest (swapped), not the derived `other`/`id` pair:
+            // checking `other`/`id` directly re-finds this SAME one-way edge whenever `id`
+            // happens to be `c`'s destination, since `other == c.origin && id == c.dest` is
+            // trivially true of `c` itself — scoring one edge as reciprocal from one end and
+            // one-way from the other (SQ-1636). A genuine reciprocal pair needs a real edge
+            // walked the other way, `c.dest -> c.origin`, not `c` read from its destination's
+            // side.
             let reciprocal = graph
                 .connections()
                 .iter()
-                .any(|r| r.origin == other && r.dest == id && grid_offset(r.dir).is_some());
+                .any(|r| r.origin == c.dest && r.dest == c.origin && grid_offset(r.dir).is_some());
             sat += if reciprocal { RECIPROCAL_WEIGHT } else { 1 };
         }
     }
@@ -1234,12 +1255,27 @@ fn open_gated_holes_for_hubs(
     }
 }
 
+/// Names of `contiguify`'s four internal sub-steps, in call order (SQ-1637). Shared between
+/// `contiguify` (which reports through them) and `relayout_auto_observed` (which uses them to
+/// index its per-sub-step snapshot/diff accumulators), so the two cannot drift apart.
+pub(crate) const CONTIGUIFY_SUB_STEPS: [&str; 4] =
+    ["open_gated_holes_for_hubs", "eject_interlopers", "tighten_runs", "snap_leaves"];
+
+/// One room's move: id, position before, position after (SQ-1637). Named so `contiguify`'s
+/// sub-step observer and `describe_contiguify_moves` don't each spell out the tuple.
+type ContiguifyMove = (RoomId, (i32, i32), (i32, i32));
+
+/// Reports after each of `contiguify`'s 4 internal sub-steps: the sub-step's name (one of
+/// `CONTIGUIFY_SUB_STEPS`), the component's room ids, and their current positions (SQ-1637).
+type ContiguifySubStepObserver<'a> = &'a mut dyn FnMut(&str, &[RoomId], &[(i32, i32)]);
+
 fn contiguify(
     chains: &Chains,
     comp: &[RoomId],
     index: &BTreeMap<RoomId, usize>,
     snapped: &mut [(i32, i32)],
     graph: &MapGraph,
+    mut sub_obs: Option<ContiguifySubStepObserver<'_>>,
 ) {
     // Eject foreign interlopers from between chain members; never move members (see
     // `eject_interlopers`). Chains may legitimately keep gaps between members — only a foreign
@@ -1263,6 +1299,9 @@ fn contiguify(
     // First: where a hub has no cell at all on a run's line, stretch the run at its most gated
     // link rather than throw the hub clear of its own bearings.
     open_gated_holes_for_hubs(&runs, &hubs, comp, index, &mut snapped_v, graph, chains);
+    if let Some(ref mut cb) = sub_obs {
+        cb(CONTIGUIFY_SUB_STEPS[0], comp, &snapped_v);
+    }
     let runs = chain_runs(chains, comp, index, &snapped_v);
     let protected = |q: usize, cell: (i32, i32)| {
         members.contains(&q) || (hubs.contains(&q) && !splits_a_run(&runs, q, cell))
@@ -1270,12 +1309,53 @@ fn contiguify(
     for r in &runs {
         eject_interlopers(&mut snapped_v, &protected, r.span, comp, index, graph);
     }
+    if let Some(ref mut cb) = sub_obs {
+        cb(CONTIGUIFY_SUB_STEPS[1], comp, &snapped_v);
+    }
     // Then close the runs' own gaps, and only then pull the leaves in — a leaf's doorstep is
     // computed against where its partner FINALLY stands, and tightening moves members.
     tighten_runs(&runs, comp, index, &mut snapped_v, graph);
+    if let Some(ref mut cb) = sub_obs {
+        cb(CONTIGUIFY_SUB_STEPS[2], comp, &snapped_v);
+    }
     let runs = chain_runs(chains, comp, index, &snapped_v);
     snap_leaves(&runs, comp, index, &mut snapped_v, graph);
+    if let Some(ref mut cb) = sub_obs {
+        cb(CONTIGUIFY_SUB_STEPS[3], comp, &snapped_v);
+    }
     snapped.copy_from_slice(&snapped_v);
+}
+
+/// Build a `contiguify` sub-step frame's description, naming the REAL sub-step that ran and
+/// which room(s) it moved and why (SQ-1637) — mirroring the "moved room N (name) from A to B"
+/// convention `app::render::map`'s `cleanup_overlaps_observed`/`repair_directional_hints_observed`
+/// already use for their own single-room-move frames, extended to list every room a sub-step
+/// moved in one call rather than just one (a sub-step call can move several).
+fn describe_contiguify_moves(
+    graph: &MapGraph,
+    sub_step: &str,
+    moves: &[ContiguifyMove],
+) -> String {
+    let reason = match sub_step {
+        "open_gated_holes_for_hubs" => "to open a gated hole on a run's line for a stuck hub room",
+        "eject_interlopers" => "to eject a foreign room from between a chain's members",
+        "tighten_runs" => "to tighten a chain run's own gap",
+        "snap_leaves" => "to snap a leaf onto its partner's doorstep",
+        _ => "for contiguity",
+    };
+    const SHOWN: usize = 4;
+    let mut parts: Vec<String> = moves
+        .iter()
+        .take(SHOWN)
+        .map(|&(id, from, to)| {
+            let name = graph.room(id).map(|r| r.label()).unwrap_or("?");
+            format!("room {id} ({name}) from {from:?} to {to:?}")
+        })
+        .collect();
+    if moves.len() > SHOWN {
+        parts.push(format!("and {} more", moves.len() - SHOWN));
+    }
+    format!("Contiguify ({sub_step}): moved {} {reason}.", parts.join("; "))
 }
 
 // ── Observer types ────────────────────────────────────────────────────────────
@@ -1459,6 +1539,14 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
     let mut snap_stress: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
     let mut snap_align: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
     let mut snap_contiguify: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    // One snapshot + one moved-room diff list per `CONTIGUIFY_SUB_STEPS` entry (SQ-1637), so a
+    // single "contiguify" stage can surface up to 4 frames — one per sub-step that actually
+    // moved a room — instead of one frame for the whole stage under a description that names
+    // whichever sub-step the comment-writer had in mind rather than whichever one actually fired.
+    let mut snap_substeps: [BTreeMap<RoomId, (i32, i32)>; CONTIGUIFY_SUB_STEPS.len()] =
+        Default::default();
+    let mut diffs_substeps: [Vec<ContiguifyMove>; CONTIGUIFY_SUB_STEPS.len()] =
+        Default::default();
     // x_constrained/y_constrained are needed for the pack stage; accumulate per-comp.
     let mut x_constrained_all: BTreeMap<RoomId, bool> = BTreeMap::new();
     let mut y_constrained_all: BTreeMap<RoomId, bool> = BTreeMap::new();
@@ -1529,7 +1617,35 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
             }
         }
 
-        contiguify(&chains_for_comp, comp, &index, &mut snapped, graph);
+        // Where each sub-step's diff list stood before this component ran, so the pack-shift
+        // fixup below can retroactively shift exactly THIS component's new diffs (everything
+        // appended from here on) without a per-room scan. Computed unconditionally (cheap) so
+        // it is still in scope down there regardless of which branch below runs.
+        let diff_starts: [usize; CONTIGUIFY_SUB_STEPS.len()] =
+            std::array::from_fn(|i| diffs_substeps[i].len());
+
+        if obs.is_some() {
+            // Reports after each of contiguify's 4 internal sub-steps with THIS component's
+            // current positions; `prev` starts as the post-align state (contiguify's own
+            // input) and advances after each sub-step, so each diff is against the position
+            // immediately before that sub-step ran, not against the whole stage's start.
+            let mut prev: BTreeMap<RoomId, (i32, i32)> =
+                comp.iter().copied().zip(snapped.iter().copied()).collect();
+            contiguify(&chains_for_comp, comp, &index, &mut snapped, graph, Some(&mut |name, comp, snapped_v| {
+                let idx = CONTIGUIFY_SUB_STEPS.iter().position(|&n| n == name)
+                    .expect("sub-step name must be one of CONTIGUIFY_SUB_STEPS");
+                for (i, &id) in comp.iter().enumerate() {
+                    let p = snapped_v[i];
+                    snap_substeps[idx].insert(id, p);
+                    if prev.get(&id) != Some(&p) {
+                        diffs_substeps[idx].push((id, prev[&id], p));
+                    }
+                    prev.insert(id, p);
+                }
+            }));
+        } else {
+            contiguify(&chains_for_comp, comp, &index, &mut snapped, graph, None);
+        }
 
         if obs.is_some() {
             for (i, &id) in comp.iter().enumerate() {
@@ -1540,9 +1656,40 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
         // Pack this component to the right of the previous, top-aligned.
         let min_x = snapped.iter().map(|p| p.0).min().unwrap();
         let min_y = snapped.iter().map(|p| p.1).min().unwrap();
+        let (dx, dy) = (pack_x - min_x, -min_y);
         for p in &mut snapped {
-            p.0 += pack_x - min_x;
-            p.1 -= min_y;
+            p.0 += dx;
+            p.1 += dy;
+        }
+
+        // Apply this component's pack shift retroactively to its own stress/align/contiguify
+        // snapshots too (SQ-1637), so a room's coordinates don't jump between consecutive
+        // animation frames purely because this component hadn't been packed into its final
+        // left-to-right slot yet when the earlier snapshot was taken — the same shift, applied
+        // to the same component's own rooms, in every frame that has recorded them so far.
+        if obs.is_some() {
+            for &id in comp {
+                for map in [&mut snap_stress, &mut snap_align, &mut snap_contiguify] {
+                    if let Some(p) = map.get_mut(&id) {
+                        p.0 += dx;
+                        p.1 += dy;
+                    }
+                }
+                for map in &mut snap_substeps {
+                    if let Some(p) = map.get_mut(&id) {
+                        p.0 += dx;
+                        p.1 += dy;
+                    }
+                }
+            }
+            for (idx, &start) in diff_starts.iter().enumerate() {
+                for (_, from, to) in &mut diffs_substeps[idx][start..] {
+                    from.0 += dx;
+                    from.1 += dy;
+                    to.0 += dx;
+                    to.1 += dy;
+                }
+            }
         }
 
         // Resolve residual same-cell collisions in ascending room-id order. Keep an
@@ -1581,9 +1728,49 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
         pack_x = max_x_used + 2; // 1-cell gap between components
     }
 
-    // Stage 2 observer snapshot: stress positions (unnormalized — no pack/anchor yet).
+    stats.constraints_dropped = dropped_all.len() as u32;
+
+    // Anchor the lowest-id room at (0,0) for a stable reference. Applied HERE, before the
+    // stress/align/contiguify observer snapshots below (SQ-1637) rather than only to
+    // `final_pos` afterwards: those snapshots are otherwise never anchored at all, so a
+    // room's coordinates could jump between the last pre-pack frame and the "pack" frame for
+    // no reason a viewer of the animation could see — the room didn't move, the reference
+    // frame did. The same single offset is applied to every stage's positions, pre-pack
+    // stages included, so the whole animation stays on one consistent coordinate system.
+    let anchor = final_pos.get(&ids[0]).copied();
+    if let Some((ax, ay)) = anchor {
+        for p in final_pos.values_mut() {
+            p.0 -= ax;
+            p.1 -= ay;
+        }
+        if obs.is_some() {
+            for map in [&mut snap_stress, &mut snap_align, &mut snap_contiguify] {
+                for p in map.values_mut() {
+                    p.0 -= ax;
+                    p.1 -= ay;
+                }
+            }
+            for map in &mut snap_substeps {
+                for p in map.values_mut() {
+                    p.0 -= ax;
+                    p.1 -= ay;
+                }
+            }
+            for diffs in &mut diffs_substeps {
+                for (_, from, to) in diffs.iter_mut() {
+                    from.0 -= ax;
+                    from.1 -= ay;
+                    to.0 -= ax;
+                    to.1 -= ay;
+                }
+            }
+        }
+    }
+
+    // Stage 2 observer snapshot: stress positions (packed + anchored, same as every other
+    // frame — SQ-1637; still ahead of the residual same-cell collision resolution that only
+    // the final "pack" stage runs).
     if obs.is_some() {
-        stats.constraints_dropped = dropped_all.len() as u32;
         for (&id, &p) in &snap_stress {
             graph.set_pos(id, p);
         }
@@ -1601,24 +1788,22 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
                "Align free axes: pull single-axis-free rooms onto their neighbour's row/column so cardinal edges render straight.",
                &stats);
         }
-        // Stage 4: contiguify snapshot.
-        for (&id, &p) in &snap_contiguify {
-            graph.set_pos(id, p);
-        }
-        if let Some(ref mut cb) = obs {
-            cb(graph, "contiguify",
-               "Contiguity: eject foreign rooms interleaved within a chain's span.",
-               &stats);
-        }
-    } else {
-        stats.constraints_dropped = dropped_all.len() as u32;
-    }
-
-    // Anchor the lowest-id room at (0,0) for a stable reference.
-    if let Some(&(ax, ay)) = final_pos.get(&ids[0]) {
-        for p in final_pos.values_mut() {
-            p.0 -= ax;
-            p.1 -= ay;
+        // Stage 4: contiguify — one frame PER SUB-STEP that actually moved a room (SQ-1637),
+        // in call order, instead of one frame for the whole stage under a description that
+        // cannot say which of the four sub-steps (if any) actually fired. A sub-step that
+        // moved nothing emits no frame, so an all-hard-edges graph with no chains at all still
+        // emits zero contiguify frames rather than four empty ones.
+        for (idx, &name) in CONTIGUIFY_SUB_STEPS.iter().enumerate() {
+            if diffs_substeps[idx].is_empty() {
+                continue;
+            }
+            for (&id, &p) in &snap_substeps[idx] {
+                graph.set_pos(id, p);
+            }
+            let desc = describe_contiguify_moves(graph, name, &diffs_substeps[idx]);
+            if let Some(ref mut cb) = obs {
+                cb(graph, "contiguify", &desc, &stats);
+            }
         }
     }
 
@@ -2353,7 +2538,7 @@ mod tests {
         // B sits squarely inside it, sharing no edge with either D or E.
         let mut snapped: Vec<(i32, i32)> = vec![(-1, 5), (0, 5), (1, 5), (0, 3), (0, 7)];
 
-        contiguify(&chains, &comp, &index, &mut snapped, &g);
+        contiguify(&chains, &comp, &index, &mut snapped, &g, None);
 
         assert_eq!(snapped[index[&2]], (0, 5), "B must stay put: it is a real E/W chain member, not an interloper");
         assert_eq!(snapped[index[&1]], (-1, 5), "A must stay put (never a victim's own chain)");
@@ -2376,7 +2561,10 @@ mod tests {
         assert_eq!(cells.len(), set.len(), "no overlap in the fallback layout");
     }
 
-    /// Observer emits the 5 stage labels in order on a small graph.
+    /// Observer emits the stage labels in order on a small graph: `seed`, `stress`, `align`,
+    /// zero or more `contiguify` (SQ-1637 — one per internal sub-step that actually moved a
+    /// room, so a graph this simple, which needs no contiguity fixup at all, may legitimately
+    /// emit none), then `pack`.
     #[test]
     fn observed_emits_five_stage_labels_in_order() {
         // A small 4-room graph with reciprocal edges to exercise all stages.
@@ -2393,10 +2581,13 @@ mod tests {
             labels.push(label.to_owned());
         }));
 
-        assert_eq!(
-            labels,
-            ["seed", "stress", "align", "contiguify", "pack"],
-            "observer must receive the 5 stage labels in order: got {labels:?}",
+        assert_eq!(labels.first().map(String::as_str), Some("seed"));
+        assert_eq!(labels.get(1).map(String::as_str), Some("stress"));
+        assert_eq!(labels.get(2).map(String::as_str), Some("align"));
+        assert_eq!(labels.last().map(String::as_str), Some("pack"), "got {labels:?}");
+        assert!(
+            labels[3..labels.len() - 1].iter().all(|l| l == "contiguify"),
+            "every label between align and pack must be contiguify: got {labels:?}",
         );
     }
 
@@ -2422,7 +2613,9 @@ mod tests {
         let obs_distorted: Vec<bool> =
             observed_g.connections().iter().map(|c| c.distorted).collect();
 
-        assert_eq!(call_count, 5, "observer called once per stage");
+        // 4 fixed stages (seed, stress, align, pack) plus one call per contiguify sub-step
+        // that actually moved a room (SQ-1637) — 0 or more, so `>= 5` rather than `== 5`.
+        assert!(call_count >= 5, "observer called at least once per fixed stage: got {call_count}");
         assert_eq!(
             plain_positions, obs_positions,
             "observed relayout must produce the same room positions as plain relayout",
@@ -2432,6 +2625,152 @@ mod tests {
             "observed relayout must produce the same distorted flags as plain relayout",
         );
     }
+
+    /// SQ-1637 Part 2: `contiguify` must emit one frame PER SUB-STEP THAT ACTUALLY MOVED
+    /// something, correctly labelled with the real sub-step name — not one frame for the
+    /// whole stage under a static description that can name the wrong mover.
+    ///
+    /// The A129 house graph (the same fixture `tidy::tests::
+    /// retidy_keeps_180_north_west_of_80_and_south_west_of_81` uses, and the shape the prior
+    /// SQ-1637 investigation traced by hand) is a real case where contiguify fires TWO
+    /// distinct sub-steps: `eject_interlopers` (room 180 is ejected from between a chain's
+    /// members) and `tighten_runs` (rooms 76/78/193 close a run's own gap). Before this fix,
+    /// both were reported as a single frame under the generic "Contiguity: eject foreign
+    /// rooms interleaved within a chain's span" description regardless of which one actually
+    /// ran — which, for the run-tightening half of this exact shape, named the wrong mover.
+    #[test]
+    fn contiguify_emits_one_correctly_labelled_frame_per_substep_that_moved_a_room() {
+        let mut g = a129_house_graph();
+        let mut frames: Vec<(String, String)> = Vec::new();
+        relayout_auto_observed(&mut g, Some(&mut |_g, label, desc, _s| {
+            frames.push((label.to_owned(), desc.to_owned()));
+        }));
+
+        let contiguify_frames: Vec<&(String, String)> =
+            frames.iter().filter(|(l, _)| l == "contiguify").collect();
+        assert_eq!(
+            contiguify_frames.len(),
+            2,
+            "A129 must produce exactly one contiguify frame per sub-step that actually fired: got {contiguify_frames:?}",
+        );
+        assert!(
+            contiguify_frames[0].1.starts_with("Contiguify (eject_interlopers):"),
+            "first contiguify frame must be correctly labelled eject_interlopers: {}",
+            contiguify_frames[0].1,
+        );
+        assert!(
+            contiguify_frames[1].1.starts_with("Contiguify (tighten_runs):"),
+            "second contiguify frame must be correctly labelled tighten_runs, not eject_interlopers \
+             or any other sub-step: {}",
+            contiguify_frames[1].1,
+        );
+        // No sub-step that moved nothing (open_gated_holes_for_hubs, snap_leaves) gets a frame:
+        // real per-substep granularity, not four frames regardless of whether each did anything.
+        assert!(
+            !contiguify_frames.iter().any(|(_, d)| d.contains("open_gated_holes_for_hubs")
+                || d.contains("snap_leaves")),
+            "a sub-step that moved nothing must not emit a frame: {contiguify_frames:?}",
+        );
+    }
+
+    /// SQ-1637 Part 2 companion: a graph with no chains at all (nothing for contiguify's four
+    /// sub-steps to do) must emit ZERO contiguify frames — not four empty ones. Noise
+    /// avoidance is as much the point as per-substep granularity.
+    #[test]
+    fn contiguify_emits_no_frames_when_no_substep_moves_anything() {
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2); // one-way: no chain, nothing for contiguify to touch
+
+        let mut labels: Vec<String> = Vec::new();
+        relayout_auto_observed(&mut g, Some(&mut |_g, label, _desc, _s| {
+            labels.push(label.to_owned());
+        }));
+
+        assert!(
+            !labels.iter().any(|l| l == "contiguify"),
+            "a graph with nothing for contiguify to do must emit zero contiguify frames: got {labels:?}",
+        );
+    }
+
+    /// SQ-1637 Part 3: a room's coordinates must be CONSISTENT across consecutive stage frames
+    /// (same normalization throughout), not just from `pack` onward.
+    ///
+    /// Component 1 is the A129 house graph, whose bounding box genuinely widens during
+    /// contiguify (per `contiguify_emits_one_correctly_labelled_frame_per_substep_that_moved_a_
+    /// room` above: room 180 ejected, rooms 76/78/193 shift) — so its ACTUAL final width isn't
+    /// known until contiguify has run, and differs from what `sort_layout`'s initial per-graph
+    /// seed guessed. Component 2 is a trivial reciprocal pair (900--E-->901).
+    ///
+    /// Before the fix, component 2's `align` snapshot used ITS OWN raw, never-packed local
+    /// x — closer to `sort_layout`'s own approximate spacing than to where `pack_x` (which
+    /// depends on component 1's ACTUAL post-contiguify width) finally lands it. After the fix,
+    /// the same per-component pack shift and global anchor `pack` uses are applied to every
+    /// earlier stage too, so room 900's X coordinate is identical in `align` and `pack`.
+    ///
+    /// **Deliberately X-only, not the full (x, y) cell** — see the `KNOWN LIMITATION` note
+    /// below this test for why the Y axis can still differ, and why that is a real, separate,
+    /// already-documented mechanism rather than a normalization bug.
+    #[test]
+    fn room_x_coordinate_stays_consistent_across_consecutive_stage_frames() {
+        let mut g = a129_house_graph();
+        g.upsert_room(900, "X".into());
+        g.upsert_room(901, "Y".into());
+        g.add_edge(900, Direction::E, 901);
+        g.add_edge(901, Direction::W, 900);
+
+        let mut by_label: BTreeMap<String, BTreeMap<crate::graph::RoomId, (i32, i32)>> = BTreeMap::new();
+        relayout_auto_observed(&mut g, Some(&mut |graph, label, _desc, _s| {
+            let snapshot: BTreeMap<crate::graph::RoomId, (i32, i32)> =
+                graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+            by_label.entry(label.to_owned()).or_insert(snapshot);
+        }));
+
+        let align_x = by_label["align"][&900].0;
+        let pack_x = by_label["pack"][&900].0;
+        assert_eq!(
+            align_x, pack_x,
+            "room 900's align-stage X must match its final pack-stage X: align.x={align_x} pack.x={pack_x}",
+        );
+        if let Some(contiguify_x) = by_label.get("contiguify").and_then(|m| m.get(&900)).map(|p| p.0) {
+            assert_eq!(
+                contiguify_x, pack_x,
+                "room 900's contiguify-stage X must also match pack: {contiguify_x} vs {pack_x}",
+            );
+        }
+        // Non-vacuity: room 900 really must already be past component 1's own bounding box in
+        // the align frame — not overlapping it near the origin, which is what the bug looked
+        // like (this also confirms the assertions above aren't vacuously true because nothing
+        // in this graph shape ever needed shifting).
+        let a129_max_x = by_label["align"]
+            .iter()
+            .filter(|&(&id, _)| id != 900 && id != 901)
+            .map(|(_, p)| p.0)
+            .max()
+            .expect("a129 has rooms");
+        assert!(
+            align_x > a129_max_x,
+            "room 900's align-stage X ({align_x}) must be past component 1's own max X \
+             ({a129_max_x}), i.e. in ITS OWN packed slot, not still overlapping component 1",
+        );
+    }
+
+    // KNOWN LIMITATION (documented, not fixed here — see the SQ-1637 quest report): comparing
+    // the FULL (x, y) cell (not just X) between `align`/`contiguify` and `pack` for THIS same
+    // graph shows the Y coordinate can still differ by a small amount. That is not a
+    // coordinate-frame/normalization bug — `seat_portal_leaves` (`layout/seat.rs`), which runs
+    // strictly AFTER every stage frame above has already been captured, can shift a BYSTANDER
+    // room (not just the portal-only leaf it is actually seating) to "open a line" on a shared
+    // row/column for that leaf (SQ-1356's `plane`/`seat_adjacent` mechanism, which rewrites
+    // every room's position on the seated leaf's row/column, not only the leaf's own). A129 has
+    // such a leaf (a stairwell-only room with no real compass bearing), and its seating can nudge
+    // an unrelated room like 900 by one cell on Y alone, after every pre-pack frame was already
+    // emitted. Normalizing pre-pack frames against `seat_portal_leaves`'s OWN effect would mean
+    // running that pass early for every stage too, which is a materially bigger change than
+    // "use the same shift" and arguably wrong besides — the whole point of a pre-pack frame is
+    // to show the state BEFORE the passes that only run once, at the very end.
+
 
     /// Observer stats: constraints_dropped is populated correctly after the stress stage.
     #[test]
@@ -2509,6 +2848,81 @@ mod tests {
             "up/down (={updown_score}) must score below a reciprocal N/S pair (={reciprocal_ns_score})");
     }
 
+    // ── SQ-1636 ───────────────────────────────────────────────────────────────
+
+    /// SQ-1636: the reciprocity check used to be asymmetric — a one-way edge scored
+    /// `RECIPROCAL_WEIGHT` (2) when evaluated from its DESTINATION's side (because the old
+    /// check `r.origin == other && r.dest == id` trivially re-matched the very same one-way
+    /// edge sitting in the graph) but only 1 when evaluated from its ORIGIN's side. Forest
+    /// (#76) in a real Zork I Amiga save had exactly this shape: a one-way edge IN from Canyon
+    /// View and a one-way edge OUT to South of House, each genuinely one-way (no real return
+    /// edge either way) — the incoming edge was wrongly scored as reciprocal (weight 2) while
+    /// the outgoing edge was correctly scored one-way (weight 1), purely because of which end
+    /// the check was run from. Build the same shape (one incoming one-way edge, one outgoing
+    /// one-way edge, no real return edge for either) and confirm both now score identically as
+    /// one-way (weight 1 each), regardless of which side of the connection `id` sits on.
+    #[test]
+    fn one_way_edges_score_identically_regardless_of_which_end_is_scored() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+
+        // A --W--> F (one-way in), F --NW--> B (one-way out). Neither has a real return edge.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "F".into()); // Forest-analog
+        g.upsert_room(2, "A".into()); // Canyon-View-analog (origin of the incoming edge)
+        g.upsert_room(3, "B".into()); // South-of-House-analog (dest of the outgoing edge)
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0)); // east of F, same row: satisfies A--W-->F
+        g.set_pos(3, (-3, -4)); // northwest of F: satisfies F--NW-->B
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(1, Direction::NW, 3);
+
+        // Both edges are satisfied at these positions, and both are genuinely one-way (no
+        // edge exists in the opposite direction for either pair) — so both must weigh 1, for
+        // a total of 2. Before the fix, the incoming edge scored 2 (wrongly "reciprocal") for
+        // a wrong total of 3.
+        assert_eq!(
+            room_alignment_score(&g, 1),
+            2,
+            "an incoming one-way edge must weigh the same (1) as an outgoing one-way edge"
+        );
+        assert_eq!(
+            room_side_score(&g, 1),
+            2,
+            "room_side_score must agree: both one-way edges weigh 1, not one of them weighing 2"
+        );
+    }
+
+    /// SQ-1636 companion: the fix must not collapse every edge to weight 1 — a GENUINE
+    /// reciprocal pair (a real edge walked in both directions) must still weigh
+    /// `RECIPROCAL_WEIGHT` (2), and must do so symmetrically from EITHER room's perspective,
+    /// not just the origin side that already happened to be correct before the fix.
+    #[test]
+    fn genuine_reciprocal_pair_still_scores_double_from_both_ends() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // B directly north of A
+        g.add_edge(1, Direction::N, 2); // A --N--> B
+        g.add_edge(2, Direction::S, 1); // B --S--> A (real return edge)
+
+        // Each room touches BOTH directed edges of the pair (once as that edge's origin, once
+        // as its destination), and a genuine reciprocal pair must weigh RECIPROCAL_WEIGHT from
+        // EITHER end — so each room's total is `2 * RECIPROCAL_WEIGHT`. Critically, this checks
+        // BOTH directions of the asymmetry the bug had: A's N-edge is scored with A as origin
+        // (the branch that was never buggy) and A's incoming S-edge with A as destination
+        // (exactly the branch that used to be wrong) — same for B, mirrored.
+        let want = 2 * RECIPROCAL_WEIGHT;
+        assert_eq!(room_alignment_score(&g, 1), want, "A's side of a genuine reciprocal pair");
+        assert_eq!(room_alignment_score(&g, 2), want, "B's side of the same genuine reciprocal pair");
+        assert_eq!(room_side_score(&g, 1), want);
+        assert_eq!(room_side_score(&g, 2), want);
+    }
+
     #[test]
     fn mark_distorted_never_marks_updown() {
         use crate::direction::Direction;
@@ -2559,7 +2973,7 @@ mod tests {
         // The row at y=0, and the leaf left three rows north with (0,-1) and (0,-2) free.
         let mut snapped: Vec<(i32, i32)> = vec![(-1, 0), (0, 0), (1, 0), (0, -3)];
 
-        contiguify(&chains, &comp, &index, &mut snapped, &g);
+        contiguify(&chains, &comp, &index, &mut snapped, &g, None);
 
         assert_eq!(snapped[index[&4]], (0, -1), "the leaf must sit directly north of its partner");
         assert_eq!(snapped[index[&1]], (-1, 0), "the row is untouched");
@@ -2593,7 +3007,7 @@ mod tests {
             comp.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let mut snapped: Vec<(i32, i32)> = vec![(-1, 0), (0, 0), (1, 0), (0, -3), (4, -3)];
 
-        contiguify(&chains, &comp, &index, &mut snapped, &g);
+        contiguify(&chains, &comp, &index, &mut snapped, &g, None);
 
         assert_eq!(
             snapped[index[&4]],
@@ -2871,7 +3285,7 @@ mod tests {
         //     2        row 2
         let mut snapped: Vec<(i32, i32)> = vec![(0, 0), (0, 2), (-2, 1), (-1, 0), (-3, 1)];
 
-        contiguify(&chains, &comp, &index, &mut snapped, &g);
+        contiguify(&chains, &comp, &index, &mut snapped, &g, None);
 
         assert_eq!(
             snapped[index[&2]],
@@ -2992,5 +3406,32 @@ mod tests {
             g.connections().iter().all(|c| !c.distorted),
             "a diagonal pins its endpoint to a quadrant, not to a cell",
         );
+    }
+
+    /// SQ-1670: tidy is a pure function of the graph — the same connections recorded in a
+    /// different order lay out identically.
+    #[test]
+    fn relayout_is_independent_of_connection_order() {
+        let edges = [
+            (1u32, Direction::N, 2u32),
+            (2, Direction::N, 1),
+            (1, Direction::E, 3),
+            (3, Direction::E, 2),
+            (2, Direction::S, 3),
+        ];
+        let laid_out = |order: Vec<usize>| {
+            let mut g = MapGraph::new();
+            for id in 1..=3 {
+                g.upsert_room(id, "r".into());
+            }
+            for i in order {
+                let (o, d, t) = edges[i];
+                g.add_edge(o, d, t);
+            }
+            relayout_auto(&mut g);
+            g.rooms().map(|r| (r.id, r.pos)).collect::<Vec<_>>()
+        };
+        assert_eq!(laid_out(vec![0, 1, 2, 3, 4]), laid_out(vec![4, 3, 2, 1, 0]));
+        assert_eq!(laid_out(vec![0, 1, 2, 3, 4]), laid_out(vec![1, 0, 3, 4, 2]));
     }
 }

@@ -1,0 +1,629 @@
+about
+score
+verbose
+knock on door
+southeast
+climb on garbage can
+hook ladder with umbrella
+up
+enter window
+down
+listen to answering machine
+up
+search cabinet for verlac
+down
+west
+west
+west
+northwest
+west
+talk to michael
+yes
+show keys to michael
+wait
+wait
+east
+southeast
+north
+north
+south
+south
+west
+southwest
+northeast
+east
+east
+south
+west
+southeast
+read notice
+open door
+in
+up
+south
+sleep
+wear clothes
+north
+down
+close door
+up
+south
+take keyring
+take umbrella
+take trenchcoat
+wear trenchcoat
+north
+down
+examine keys
+lock door with house key
+up
+south
+sleep
+z
+z
+z
+get up
+wear clothes
+take keyring
+take umbrella
+take trenchcoat
+wear trenchcoat
+north
+down
+east
+south
+take flashlight
+east
+take broom
+down
+turn on flashlight
+north
+search crates
+sweep web with broom
+take iron key
+south
+west
+search racks
+east
+up
+down
+west
+examine markings
+move rack
+examine markings
+examine mural
+east
+up
+west
+turn off flashlight
+west
+north
+west
+examine portrait
+take scrapbook
+read scrapbook
+read woodcut
+read photostatic copy
+read obituary
+read wedding announcement
+south
+examine paintings
+east
+go east
+east
+north
+up
+west
+up
+west
+pull cord
+north
+open jewelry box
+look in jewelry box
+examine crib
+take locket
+examine locket
+open locket
+south
+south
+take manuell
+read manuell
+west
+north
+north
+turn on flashlight
+up
+south
+up
+examine door
+open door
+down
+turn off flashlight
+north
+south
+south
+east
+north
+east
+south
+east
+west
+north
+down
+unlock door with house key
+open door
+out
+northwest
+east
+north
+west
+take newspaper
+read newspaper
+south
+south
+search records for verlac
+search records for edward verlac
+up
+north
+north
+east
+southeast
+north
+west
+northwest
+west
+north
+ring bell
+ask librarian about verlac
+read sign
+read register
+look up edward verlac in register
+ask librarian for stranger stars
+ask librarian for mechanics of metempsychosis
+show faculty id to librarian
+ask librarian about michael
+south
+east
+southeast
+north
+north
+west
+examine gate
+open gate
+north
+examine shacks
+knock on door
+knock on door 38
+ask woman about jeffrey
+show locket to woman
+south
+east
+east
+northeast
+open bronze door
+southwest
+west
+south
+east
+south
+south
+south
+examine display case
+examine violin
+talk to proprietor
+examine amulet
+ask proprietor about amulet
+buy amulet
+examine geode
+ask proprietor about geode
+examine tarot deck
+ask proprietor about tarot deck
+buy tarot deck
+north
+north
+south
+west
+southwest
+east
+north
+west
+south
+south
+west
+southwest
+east
+examine old man
+talk to old man
+west
+west
+west
+southwest
+east
+look
+northeast
+examine obelisk
+east
+south
+south
+south
+south
+north
+east
+examine church
+southeast
+open trap door
+down
+examine padlock
+break padlock
+break padlock with broom
+search underbrush
+examine fence
+southwest
+look
+examine gravestones
+west
+north
+west
+southeast
+south
+in
+east
+south
+south
+southeast
+examine mausoleum
+open mausoleum door
+open iron door
+turn on flashlight
+in
+examine child's coffin
+open child's coffin
+examine coffins
+examine nameplates
+open coffin
+search animal bones
+take skull
+north
+turn off flashlight
+close iron door
+lock iron door with iron key
+northwest
+north
+close back door
+lock back door with house key
+north
+west
+close door
+lock door with house key
+up
+south
+sleep
+score
+north
+down
+north
+south
+west
+east
+close door
+lock door with house key
+up
+west
+south
+west
+examine laptop
+read haermoniacon
+examine desk
+search desk
+examine fireplace
+call michael
+examine spheres
+turn spheres
+turn on flashlight
+northeast
+look
+north
+listen
+examine hole
+continue
+south
+east
+up
+examine charts
+examine telescope
+look through telescope
+down
+north
+look through hole
+north
+east
+south
+west
+south
+west
+north
+look
+down
+examine walls
+push wall
+east
+south
+west
+west
+south
+east
+north
+south
+south
+south
+south
+southwest
+north
+north
+north
+north
+north
+north
+northeast
+southeast
+northwest
+up
+down
+south
+south
+south
+south
+south
+south
+south
+south
+south
+south
+go back
+out
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+southwest
+north
+north
+north
+south
+up
+down
+west
+southwest
+east
+north
+east
+south
+south
+sleep
+z
+z
+z
+z
+z
+think
+think about michael
+north
+south
+sleep
+examine mirror
+look in mirror
+north
+down
+close door
+lock door with house key
+up
+south
+close door
+lock door with house key
+north
+south
+east
+southeast
+north
+east
+south
+north
+west
+north
+down
+unlock door with house key
+open door
+out
+northwest
+east
+north
+west
+east
+east
+ask old man about crypt
+show skull to old man
+west
+west
+north
+north
+east
+north
+take flask
+south
+south
+west
+south
+south
+east
+east
+north
+north
+west
+south
+east
+east
+east
+give flask to old man
+ask old man about crypt
+show skull to old man
+ask old man about manhole
+ask old man about himself
+give amulet to old man
+ask old man about anna
+ask old man about edward
+ask old man about verlac
+ask old man about brother
+give amulet to old man
+ask old man about william
+show skull to old man
+give amulet to old man
+west
+west
+south
+west
+southeast
+south
+up
+north
+east
+south
+west
+southeast
+south
+close door
+lock door with house key
+turn on flashlight
+up
+south
+turn off flashlight
+sleep
+east
+turn on flashlight
+take bath
+wear clothes
+turn off flashlight
+west
+sleep
+get up
+wear clothes
+turn on flashlight
+north
+down
+unlock door with house key
+up
+south
+turn off flashlight
+sleep
+get up
+inventory
+look
+wear clothes
+east
+look
+take all
+wear trenchcoat
+west
+look
+inventory
+take flashlight
+turn on flashlight
+north
+down
+unlock door with house key
+up
+south
+turn off flashlight
+sleep
+z
+z
+z
+get up
+wear clothes
+take flashlight
+take keyring
+take broom
+talk to michael
+north
+talk to michael
+west
+talk to michael
+south
+down
+open door
+out
+look
+north
+east
+down
+out
+examine sky
+examine hole
+northwest
+east
+north
+west
+east
+down
+unlock manhole with copper key
+open manhole
+examine manhole cover
+take copper key
+unlock manhole cover with copper key
+unlock manhole cover with thick copper key
+inventory
+southeast
+west
+north
+north
+west
+south
+south
+east
+south
+west
+southeast
+south
+up
+south
+take trenchcoat
+wear trenchcoat
+inventory
+north
+down
+out
+northwest
+east
+north
+west
+east
+south
+down
+north
+down
+unlock manhole cover with copper key
+open manhole cover
+turn on flashlight
+down
+southeast
+look
+up
+south
+northwest
+north
+examine shiny thing
+take shiny thing
+examine key
+open grating
+south
+south
+up

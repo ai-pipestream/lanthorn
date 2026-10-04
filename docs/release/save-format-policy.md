@@ -45,7 +45,7 @@ Pre-beta there is still **no obligation to read old files** (see the standing
 | Z-machine Quetzal (`@save`) | `game.qzl` inside `<slug>.lanthorn` (app); bare `<slug>.qzl` (`zvm-cli`) | `zvm/src/quetzal.rs` | none — IFF `FORM IFZS`, identity via `IFhd` | Public spec (Quetzal 1.4) | `quetzal::tests::round_trip_restores_full_state`, `…rejects_serial_mismatch` |
 | Glulx-Quetzal (`@save`) | `game.glksave` inside `<slug>.lanthorn` (app); bare `<slug>.qzl` (`gvm-cli`) | `gvm/src/exec.rs` `save_quetzal` | none — spec-defined `FORM IFZS` | Public spec (Glulx §1.8) | `exec::tests::save_quetzal_is_a_wellformed_ifzs_container`, `…omits_greg_and_glk_chunks` |
 | Host Save State — Z-machine | inside `.lanthorn` `game.qzl` | `zvm/src/quetzal.rs` (+ archive) | via archive `format_version` | Frozen (0.x) | archive round-trip tests |
-| Host Save State — Glulx | inside `.lanthorn` `game.glksave` | `gvm/src/exec.rs` `save_state` (adds `GReg` + `Glk `) | `Glk ` chunk: `GLK_SNAPSHOT_VERSION = 6` | Frozen (0.x) | `glk::tests::snapshot_version_constant_is_frozen`, `…serialize_stamps_current_snapshot_version`, `…deserialize_rejects_future_snapshot_version`, `exec::tests::save_state_is_the_same_container_plus_our_own_chunks` |
+| Host Save State — Glulx | inside `.lanthorn` `game.glksave` | `gvm/src/exec.rs` `save_state` (adds `GReg` + `Glk `) | `Glk ` chunk: `GLK_SNAPSHOT_VERSION = 7` | Frozen (0.x) | `glk::tests::snapshot_version_constant_is_frozen`, `…serialize_stamps_current_snapshot_version`, `…deserialize_rejects_future_snapshot_version`, `exec::tests::save_state_is_the_same_container_plus_our_own_chunks` |
 | `.lanthorn` archive (map + save + transcript + screen + v6 paint log + history + pictures + painted ground) | `<ifid>.lanthorn` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 10` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
 | Z-machine aux data (v5 `@save`/`@restore` table) | `default.aux` | `app/src/aux_store.rs` + `zvm-cli/src/auxiliary.rs` | `ZAUX` magic + `VERSION = 1` | Frozen (0.x), cross-host | `aux_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…encodes_canonical_zaux_bytes` |
 | Glk file VFS sidecar | `default.glkvfs` | `gvm/src/glk.rs` `encode_files`/`decode_files` (path: `app/src/vfs_store.rs`) | `GVFS` magic + `u32` version `1` | Frozen (0.x) | `glk::tests::encode_files_roundtrips_and_skips_temp`, `…decode_files_rejects_bumped_gvfs_version` |
@@ -56,6 +56,24 @@ Pre-beta there is still **no obligation to read old files** (see the standing
 | Theme / per-game config | `style.toml`, `<ifid>.config.toml` | `app/src/config.rs`, `styles.rs` | none (TOML, field-tolerant) | Tolerant (TOML) | — |
 
 ## Version history
+
+- **Glk chunk 6 → 7 (SQ-1616).** A window's line-input terminator set
+  (`glk_set_terminators_line_event`) and echo-line flag
+  (`glk_set_echo_line_event`) are now persisted. Before this bump,
+  `Model::serialize` never wrote either field and `Model::deserialize`
+  unconditionally rebuilt every window with `terminators: Vec::new(),
+  echo_line: true`, discarding whatever the game had registered. This bit far
+  more often than a player-triggered Save State: `GlulxSession::silent_look`
+  (the `look`-driven room-name probe `needs_a_room_name` uses) round-trips a
+  session through exactly this serialize/deserialize on every call, so a
+  game's registered line terminator silently stopped being recognized after
+  any such probe — `is_line_terminator(Func1)` read true, then false after one
+  round trip, with no player-visible save/restore at all.
+  *Accepted break, no migration (pre-release):* a pre-7 snapshot still restores
+  — it simply carries no terminators/echo-line setting, which is the same
+  `Vec::new()`/`true` default every snapshot before this fix actually meant.
+  A version-7 snapshot is rejected by older builds, as the freeze machinery
+  intends.
 
 - **`.lanthorn` archive 9 → 10 (SQ-1403).** `display.json`'s `windows` field — a
   serde mirror of `zvm`'s picture/erase events, maintained by hand across a

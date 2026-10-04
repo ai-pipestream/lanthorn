@@ -22,8 +22,12 @@ pub struct ResetOptions {
     /// Wipe the accumulated map (as `/reset map` does), so only the start room
     /// remains after the re-seed.
     pub clear_map: bool,
-    /// Delete the game's AUTO persistent data first (the Glk file VFS and the
-    /// other per-story sidecars), so the fresh boot re-initialises from nothing.
+    /// Delete the game's saved progress first: the AUTO persistent data (the
+    /// Glk file VFS and the other per-story sidecars) so the fresh boot
+    /// re-initialises from nothing, AND the player's quick-save slot
+    /// (SQ-1665) — unlike an ordinary per-turn auto-save, which deliberately
+    /// never touches a quick-save, this is an explicit request to wipe
+    /// everything the host could resume from.
     pub delete_data: bool,
 }
 
@@ -50,7 +54,22 @@ pub fn reset_game(
     // re-initializes: the on-disk sidecars go now, and the in-memory VFS carried
     // into the Glulx rebuild is suppressed below (an empty carry_vfs).
     if delete_data {
+        // Land any in-flight background per-turn auto-save first (SQ-1184/
+        // SQ-1665), the same ordering `write_save_state` uses before its own
+        // synchronous write to the same path: without it, a write enqueued by
+        // the turn just played can still be mid-flight on the archive-writer
+        // thread, and `delete_auto_persistent` racing ahead of it only looks
+        // like a deletion — the background write lands moments later and
+        // resurrects `default.lanthorn` with the old game's data, so "Delete
+        // saved progress" appeared to do nothing.
+        state.archive_worker.flush();
         crate::storage::delete_auto_persistent(game_dir);
+        // SQ-1665: "Delete saved progress" also wipes the quick-save slot.
+        // The quick-save is never written by the background archive worker
+        // (every write to it goes through `host::persist::write_save_state`,
+        // which flushes and writes synchronously), so no ordering race
+        // applies here the way it did above.
+        crate::storage::delete_quick_save(game_dir);
     }
     // Rebuild the engine from the original story bytes via the same factory used
     // at startup: classify the executable, then replace the concrete session in
@@ -235,7 +254,27 @@ pub fn reset_game(
                 // post-boot, which is exactly what SQ-0680 established is too
                 // late. The v6 arm never saw it, because that arm takes its
                 // screen from `boot.screen_px`.
-                terminal_size.and_then(|size| super::story_screen_in(state, size)),
+                // SQ-1602: the same floor the launch may have applied
+                // (`TerminalFacts::min_story_screen`, SQ-1596), carried onto
+                // `state.min_story_screen` and re-applied here exactly as
+                // `boot_story` applies it — else a restart of a story booted
+                // under a floor (Bureaucracy's 40x19) can hit its own
+                // `[Screen too small.]` refusal again, at the SAME real
+                // terminal size the launch already worked around.
+                terminal_size.and_then(|size| {
+                    let size = match state.min_story_screen {
+                        Some(floor) => super::boot::min_terminal_size_for_story_floor(
+                            &state.config,
+                            &state.colors,
+                            &state.garglk_overlay,
+                            state.layout,
+                            size,
+                            floor,
+                        ),
+                        None => size,
+                    };
+                    super::story_screen_in(state, size)
+                }),
                 // A restart re-draws the seed the same way the launch did
                 // (SQ-0811): a pinned `random_seed` replays the same game, and an
                 // unpinned one deals a fresh one — which is what restarting a
@@ -257,14 +296,24 @@ pub fn reset_game(
             // the stored game Picker for char-cell size, so graphics come back
             // enabled per config.images — matching the initial launch even for a
             // bare .ulx with a sidecar .blorb.
-            let char_px = state
-                .game_picker
-                .as_ref()
-                .map(|p| {
-                    let f = p.font_size();
-                    (f.width as u32, f.height as u32)
-                })
-                .unwrap_or((8, 16));
+            // SQ-1598: the host's own stated Glk cell size, carried from the
+            // launch's `TerminalFacts::glk_cell_px` onto `state.glk_cell_px`,
+            // wins over the picker/8×16 cascade here exactly as it did at boot
+            // (`host::boot::boot_story`) — so a restart agrees with the launch
+            // that preceded it rather than reverting to the fallback.
+            // SQ-1603: fractional, matching `state.glk_cell_px`'s type — the
+            // fallback arm casts up from the picker's whole-cell `u16` (or the
+            // 8×16 constant), introducing no rounding of its own.
+            let char_px: (f64, f64) = state.glk_cell_px.unwrap_or_else(|| {
+                state
+                    .game_picker
+                    .as_ref()
+                    .map(|p| {
+                        let f = p.font_size();
+                        (f.width as f64, f.height as f64)
+                    })
+                    .unwrap_or((8.0, 16.0))
+            });
             let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
             // Carry the current in-memory Glk file VFS (e.g. CM's boot cache,
             // kept in sync with the sidecar) into the restarted session so the
@@ -276,9 +325,11 @@ pub fn reset_game(
             // Preserve the per-game borderless-windows override across @restart
             // (SQ-0341); an explicit per-game value wins over a garglk.ini
             // `wborder`, else garglk's, else off (SQ-0344).
-            let borderless = crate::styles::read_per_game_borderless(game_dir)
-                .or_else(|| state.garglk_overlay.as_ref().and_then(|o| o.borderless))
-                .unwrap_or(false);
+            let borderless = crate::glk_cfg::resolve_borderless(
+                crate::styles::read_per_game_borderless(game_dir),
+                state.garglk_overlay.as_ref(),
+                state.glk_design.as_ref(),
+            );
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
                 bytes,
@@ -306,6 +357,9 @@ pub fn reset_game(
                     .as_any_mut()
                     .downcast_mut::<GlulxSession>()
                     .expect("restart re-runs the same Glulx story") = new_session;
+                // SQ-1703 P3: the fresh session boots in cell mode; stretch
+                // design mode is told again, as at launch.
+                crate::host::screen::apply_glk_design(session, state, game_dir);
             })
         }
         Ok(crate::hints::LoadedStory::Scott(bytes)) => {
@@ -358,6 +412,8 @@ pub fn reset_game(
             // its sink.)
             session.set_stream_files(game_dir);
             let start_loc = session.current_location();
+            // The opening room, not the pre-restart one (SQ-1710).
+            super::turn::sync_current_room(state, &*session);
             state.reset_sound_sidecars();
             // A restart is a new game: the death the old one left unresolved died with it, and so
             // did the `tried` record a fatal move there might still owe. Carried across, an
@@ -374,6 +430,7 @@ pub fn reset_game(
             state.suggestion_active = false;
             state.transcript.clear();
             state.clear_anchor = None;
+            state.top_anchor = None;
             state.transcript_kinds.clear();
             state.transcript_runs.clear();
             state.transcript_para.clear();
@@ -415,25 +472,11 @@ pub fn reset_game(
             crate::pager::arm_opening_banner(state, &*session);
             if let Some(snap) = start_loc {
                 let snap_number = snap.number;
-                let seed_result = TurnResult {
-                    transcript: String::new(),
-                    transcript_runs: Vec::new(),
-                    location: Some(snap),
-                    quit: false,
-                    erase_lower: false,
-                    info: None,
-                    sounds: Vec::new(),
-                    glulx_sound_ops: Vec::new(),
-                    diagnostics: vec![],
-                    fault: None,
-                    location_method: None,
-                    pending_io: None,
-                    timed_out: false,
-                    pictures: Vec::new(),
-                    transcript_elems: Vec::new(),
-                    prose_retired: None,
-                    declared_exit: None,
-                };
+                // Every other field here already matched `TurnResult::default()` by hand
+                // (SQ-1625: rather than add `description: None` as one more explicit line to
+                // this literal, use the helper that exists for exactly this "location only"
+                // seed shape — see its own doc).
+                let seed_result = TurnResult::observation(snap);
                 apply_turn(mapper, "", &seed_result, &mut state.death_watch);
                 let rid = snap_number as mapper::graph::RoomId;
                 state.select_room(Some(rid));

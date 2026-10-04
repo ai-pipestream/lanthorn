@@ -60,7 +60,7 @@ fn any_media_present() -> bool {
 /// arm is deliberately excluded: the corpus directory carries a `zorkzero.mg1`
 /// beside these images and it is not what this quest is about.
 fn on_medium(story: &Path) -> Vec<String> {
-    let mut v: Vec<String> = discover_art_candidates(story, None)
+    let mut v: Vec<String> = discover_art_candidates(story, None, None)
         .into_iter()
         .filter(|c| c.on_medium)
         .map(|c| c.filename)
@@ -70,7 +70,9 @@ fn on_medium(story: &Path) -> Vec<String> {
 }
 
 fn candidate(story: &Path, filename: &str) -> Option<ArtCandidate> {
-    discover_art_candidates(story, None).into_iter().find(|c| c.filename.eq_ignore_ascii_case(filename))
+    discover_art_candidates(story, None, None)
+        .into_iter()
+        .find(|c| c.filename.eq_ignore_ascii_case(filename))
 }
 
 /// A per-game sidecar directory carrying a `pictures` key.
@@ -158,7 +160,7 @@ fn the_two_presses_never_lend_each_other_artwork() {
 
         // Every archive offered off the medium comes off a volume of THIS press.
         let members = app::disk_set::members(&path).expect("each press is a set");
-        for c in discover_art_candidates(&path, None).iter().filter(|c| c.on_medium) {
+        for c in discover_art_candidates(&path, None, None).iter().filter(|c| c.on_medium) {
             assert!(
                 members.contains(&c.path),
                 "{name}: {} came off {}, which is not a volume of this press",
@@ -364,7 +366,7 @@ fn every_rendition_of_the_release_lands_on_one_screen() {
     for name in DOS_PRESS {
         let Some(path) = media(name) else { continue };
         let dir = game_dir_with("geometry", "");
-        for c in discover_art_candidates(&path, None).iter().filter(|c| c.on_medium) {
+        for c in discover_art_candidates(&path, None, None).iter().filter(|c| c.on_medium) {
             let Some(want) =
                 GEOMETRY.iter().find(|g| g.archive.eq_ignore_ascii_case(&c.filename))
             else {

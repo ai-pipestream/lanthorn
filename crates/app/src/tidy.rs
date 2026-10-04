@@ -80,7 +80,13 @@ fn replay_build_and_placement(
         rebuild.set_room_layer(id, layer);
     }
     for c in conns {
-        rebuild.add_edge(c.origin, c.dir, c.dest);
+        // Preserve the real gated/Hard weighting (SQ-1637): `add_edge` always mints a Hard
+        // edge, which would make every replayed connection's own claim on geometry look
+        // stronger than it really is — a gated passage is the first thing `creates_cycle`
+        // drops in the real (production) tidy, and reconstructing it as Hard can make a
+        // DIFFERENT edge give way instead, diverging from what `tidy_layer_silent` actually
+        // computes on the same graph.
+        rebuild.add_edge_weighted(c.origin, c.dir, c.dest, c.weight);
     }
     let manifest: Vec<String> = conns.iter()
         .map(|c| format!("{} \u{2192}{:?}\u{2192} {}", name_of(sub, c.origin), c.dir, name_of(sub, c.dest)))
@@ -306,6 +312,15 @@ pub(crate) fn run_tidy_pipeline(
     }
 
     // Frame cap: if the layout is extremely large, frames are silently truncated at MAX_TIDY_FRAMES.
+
+    // Re-derive every `distorted` flag from the FINAL positions, exactly as `run_layer_ops_silent`
+    // does for the production (silent) path (SQ-1637). Without this, the flags written back below
+    // are whatever `relayout_auto_observed`'s own internal `mark_distorted` left them at — BEFORE
+    // the four stages above (cleanup_overlaps, repair_directional_hints, cleanup_overlaps again,
+    // compact_empty_lines) had a chance to move a room and either honour a dropped bearing or
+    // break a satisfied one. See `remark_distorted`'s doc comment (SQ-1377) for why this must run
+    // last, after every stage that can move a room.
+    mapper::layout::remark_distorted(&mut sub);
 
     // Write the tidied positions back into the live graph for this layer's rooms.
     for id in graph.rooms_in_layer(layer) {
@@ -733,6 +748,62 @@ mod tests {
         }
     }
 
+    /// SQ-1637 Part 1: the animated replay (`run_tidy_pipeline`) must produce IDENTICAL final
+    /// positions and distortion flags to the real background tidy (`tidy_layer_silent`) on a
+    /// graph with a GATED passage. Before the fix, `replay_build_and_placement` reconstructed
+    /// every edge as `PassageWeight::Hard` via `add_edge` regardless of the real graph's
+    /// weighting, so the replay's constraint solver could give up on a DIFFERENT edge than the
+    /// production path does when a cycle has to give.
+    ///
+    /// Three rooms in a same-direction cycle (1--N-->2--N-->3--N-->1) always forces one of the
+    /// three N constraints to be dropped (`creates_cycle`). The 3--N-->1 edge is marked
+    /// `Conditional` (gated) and inserted FIRST, so the correct (weight-aware) solver drops it
+    /// regardless of insertion order — but the buggy all-Hard reconstruction falls back to
+    /// insertion-order tie-breaking and drops the 2--N-->3 edge instead, a real divergence (not
+    /// just a coincidental match), which is what this test would catch.
+    #[test]
+    fn animated_replay_matches_silent_tidy_with_a_gated_passage() {
+        use mapper::direction::Direction;
+        use mapper::graph::{MapGraph, PassageWeight};
+
+        let build = || {
+            let mut g = MapGraph::new();
+            g.upsert_room(1, "A".into());
+            g.upsert_room(2, "B".into());
+            g.upsert_room(3, "C".into());
+            // Insertion order deliberately does NOT match the weight-based drop order: the
+            // gated edge is added first, so a bug that discards weight and falls back to
+            // insertion-order tie-breaking drops a DIFFERENT (real) edge than the correct
+            // weight-aware solver does.
+            g.add_edge_weighted(3, Direction::N, 1, PassageWeight::Conditional);
+            g.add_edge(1, Direction::N, 2);
+            g.add_edge(2, Direction::N, 3);
+            g
+        };
+
+        let mut animated = build();
+        let mut silent = build();
+        let layer = animated.layer_of(1);
+
+        let _ = run_tidy_pipeline(&mut animated, layer, None);
+        tidy_layer_silent(&mut silent, layer);
+
+        for id in [1u32, 2, 3] {
+            assert_eq!(
+                animated.room(id).unwrap().pos,
+                silent.room(id).unwrap().pos,
+                "room {id} final position must match between the animated replay and the real background tidy"
+            );
+        }
+        for (a, s) in animated.connections().iter().zip(silent.connections().iter()) {
+            assert_eq!(
+                a.distorted, s.distorted,
+                "connection {:?}/{:?}/{:?} distortion flag must match between the animated replay and the real background tidy",
+                a.origin, a.dir, a.dest
+            );
+        }
+    }
+
     #[test]
     fn pipeline_progress_counter_counts_every_frame() {
         use mapper::mapper::Mapper;
@@ -1047,5 +1118,266 @@ mod tests {
         // Positions must be untouched.
         assert_eq!(real.room(1).and_then(|r| r.pos), Some((100, 100)), "stale result must not overwrite position 1");
         assert_eq!(real.room(2).and_then(|r| r.pos), Some((200, 200)), "stale result must not overwrite position 2");
+    }
+
+    // ── SQ-1669 / SQ-1672: hint repair slides along lines and moves Up/Down stacks ──────────
+
+    fn sq1669_fixture(name: &str) -> mapper::graph::MapGraph {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../unit_tests").join(name);
+        let json = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        mapper::persist::from_json(&json).expect("valid map file").graph
+    }
+
+    fn tidied(name: &str) -> mapper::graph::MapGraph {
+        let mut g = sq1669_fixture(name);
+        let layers: Vec<_> = g.layers().keys().copied().collect();
+        for l in layers {
+            tidy_layer_silent(&mut g, l);
+        }
+        g
+    }
+
+    fn pos(g: &mapper::graph::MapGraph, id: u32) -> (i32, i32) {
+        g.room(id).and_then(|r| r.pos).expect("room placed")
+    }
+
+    /// Overlaps, and reciprocal runs that no longer share their row or column.
+    fn assert_clean(g: &mapper::graph::MapGraph) {
+        let cells: std::collections::BTreeSet<_> = g.rooms().filter_map(|r| r.pos).collect();
+        assert_eq!(cells.len(), g.rooms().filter(|r| r.pos.is_some()).count(), "no two rooms share a cell");
+        let ch = mapper::layout::detect_chains(g);
+        for m in &ch.ew_members {
+            assert!(m.iter().all(|&r| pos(g, r).1 == pos(g, m[0]).1), "E/W run split: {m:?}");
+        }
+        for m in &ch.ns_members {
+            assert!(m.iter().all(|&r| pos(g, r).0 == pos(g, m[0]).0), "N/S run split: {m:?}");
+        }
+    }
+
+    /// SQ-1693 specimen (Zork I r88, ADF save): the Up/Down connectors of #88 Up a Tree and of
+    /// the "to Cellar" ghost used to cut across other paths.
+    fn sq1693_layer0(g: &mapper::graph::MapGraph) -> mapper::layer::LayerId {
+        g.layer_of(193)
+    }
+
+    #[test]
+    fn sq1693_cellar_ghost_sits_on_living_rooms_doorstep() {
+        let g = tidied("zork1_r88_sq1693_updown.json");
+        let rm = mapper::render::render_layer(&g, sq1693_layer0(&g));
+        let cell = |id: u32| rm.rooms.iter().find(|r| r.id == id).expect("room drawn").cell;
+        assert_eq!(cell(72), (cell(193).0, cell(193).1 + 1), "to Cellar ghost below Living Room");
+    }
+
+    #[test]
+    fn sq1693_specimen_has_no_crossings_and_keeps_its_hints() {
+        let g = tidied("zork1_r88_sq1693_updown.json");
+        let (overlaps, crossings) = crate::render::map::layer_overlap_stats(&g, sq1693_layer0(&g));
+        assert_eq!((overlaps, crossings), (0, 0), "layer 0 overlaps/crossings");
+        let score = mapper::layout::directional_hint_score(&g);
+        assert!(score >= 3286, "hint score {score}");
+        let bent = g
+            .connections()
+            .iter()
+            .filter(|c| mapper::direction::grid_offset(c.dir).is_some() && !mapper::layout::edge_is_satisfied(&g, c))
+            .count();
+        assert!(bent <= 17, "{bent} bent compass edges");
+        assert!(pos(&g, 143).1 < pos(&g, 88).1, "Clearing {:?} sits above Up a Tree {:?}", pos(&g, 143), pos(&g, 88));
+        assert_eq!(pos(&g, 143).0, pos(&g, 75).0, "Clearing keeps Forest Path's column");
+        assert_eq!(pos(&g, 143), (-4, -6), "Clearing moved up one row (was (-4, -5))");
+    }
+
+    #[test]
+    fn sq1669_old_specimen_places_forest_west_of_west_of_house() {
+        let g = tidied("zork1_r88_sq1669_old.json");
+        assert!(pos(&g, 78).0 < pos(&g, 180).0, "78 {:?} must be west of 180 {:?}", pos(&g, 78), pos(&g, 180));
+        assert_eq!(pos(&g, 78).1, pos(&g, 75).1, "78 and 75 share a row");
+        let score = mapper::layout::directional_hint_score(&g);
+        assert!(score >= 1968, "hint score {score}");
+        assert_clean(&g);
+    }
+
+    #[test]
+    fn sq1669_fixed_specimen_keeps_its_hints() {
+        let g = tidied("zork1_r88_sq1669_fixed.json");
+        assert!(pos(&g, 78).0 < pos(&g, 180).0);
+        let score = mapper::layout::directional_hint_score(&g);
+        assert!(score >= 2150, "hint score {score}");
+        assert_clean(&g);
+    }
+
+    #[test]
+    fn sq1672_canyon_view_specimens_keep_the_stack_and_the_west_side() {
+        for name in ["zork1_r88_sq1669_old.json", "zork1_r88_sq1669_fixed.json"] {
+            let g = tidied(name);
+            assert!(pos(&g, 76).0 < pos(&g, 25).0, "{name}: 76 is west of 25");
+            assert_eq!(pos(&g, 25).1, pos(&g, 76).1, "{name}: 25 W 76 is drawn straight");
+            let bent = g
+                .connections()
+                .iter()
+                .filter(|c| mapper::direction::grid_offset(c.dir).is_some() && !mapper::layout::edge_is_satisfied(&g, c))
+                .count();
+            assert!(bent <= 17, "{name}: {bent} bent compass edges (was 18 before SQ-1672 straightened 25 W 76)");
+            assert_eq!(pos(&g, 26).0, pos(&g, 25).0, "{name}: 26 stays in 25's column");
+            assert!(pos(&g, 25).1 < pos(&g, 26).1, "{name}: stack order kept");
+        }
+    }
+
+    /// Miniature of the SQ-1693 Forest Path / Up a Tree / Clearing corner: 143 and 75 are a
+    /// reciprocal N/S pair, 75 climbs Up to 88, and 143 one-way heads east to 77, across 88's
+    /// connector. Returns the graph before repair.
+    fn sq1693_mini() -> mapper::graph::MapGraph {
+        use mapper::direction::Direction::*;
+        let mut g = mapper::graph::MapGraph::new();
+        for id in [75u32, 77, 88, 143] {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(143, S, 75);
+        g.add_edge(75, N, 143);
+        g.add_edge(75, Up, 88);
+        g.add_edge(143, E, 77);
+        g.set_pos(143, (0, 0));
+        g.set_pos(75, (0, 1));
+        g.set_pos(88, (1, 0));
+        g.set_pos(77, (2, 1));
+        g
+    }
+
+    #[test]
+    fn sq1693_repair_takes_a_crossing_only_win_at_equal_hints() {
+        let mut g = sq1693_mini();
+        let score = mapper::layout::directional_hint_score(&g);
+        assert_eq!(crate::render::map::render_overlap_stats(&g), (0, 1), "one Up/Down crossing to start");
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert_eq!(crate::render::map::render_overlap_stats(&g), (0, 0), "crossing removed, no overlap");
+        assert!(mapper::layout::directional_hint_score(&g) >= score);
+    }
+
+    #[test]
+    fn sq1693_repair_rejects_a_crossing_win_that_costs_hints() {
+        use mapper::direction::Direction::*;
+        let mut g = sq1693_mini();
+        for id in [90u32, 91] {
+            g.upsert_room(id, "r".into());
+        }
+        // 88 and 143 each hold a reciprocal E/W partner on their row: every crossing-free
+        // arrangement the repair can reach gives one of those up.
+        g.add_edge(88, E, 90);
+        g.add_edge(90, W, 88);
+        g.add_edge(143, W, 91);
+        g.add_edge(91, E, 143);
+        g.set_pos(90, (2, 0));
+        g.set_pos(91, (-1, 0));
+        let score = mapper::layout::directional_hint_score(&g);
+        assert_eq!(crate::render::map::render_overlap_stats(&g), (0, 1));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert_eq!(mapper::layout::directional_hint_score(&g), score, "hints are not traded for a crossing");
+        assert_eq!((pos(&g, 88), pos(&g, 143)), ((1, 0), (0, 0)), "the two rooms stayed on their rows");
+        assert_eq!(crate::render::map::render_overlap_stats(&g), (0, 1), "the crossing is the price");
+    }
+
+    #[test]
+    fn sq1669_repair_slides_a_room_further_than_the_ring_radius() {
+        use mapper::direction::Direction::*;
+        // Reciprocal E/W pair 1<->2 on row 0; one-way `3 E 1` wants room 1 east of room 3 (at
+        // x=12). Room 1 is 12 cells short, far outside the radius-3 ring, but the row east of it
+        // is free, so a line slide reaches it.
+        let mut g = mapper::graph::MapGraph::new();
+        for id in [1u32, 2, 3] {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(2, E, 1);
+        g.add_edge(1, W, 2);
+        g.add_edge(3, E, 1);
+        g.set_pos(2, (0, 0));
+        g.set_pos(1, (1, 0));
+        g.set_pos(3, (12, 3));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert!(pos(&g, 1).0 > pos(&g, 3).0, "1 {:?} must slide east of 3 {:?}", pos(&g, 1), pos(&g, 3));
+        assert_eq!(pos(&g, 1).1, pos(&g, 2).1, "the reciprocal row is kept");
+    }
+
+    /// Two-room reciprocal run (`a` -> `b` along `dir`) plus a room 3 that one-way claims BOTH
+    /// of them on `claim`'s side, placed so every cell the run could reach alone is short of it.
+    fn run_graph(run_dir: mapper::direction::Direction, claim: mapper::direction::Direction, p3: (i32, i32)) -> mapper::graph::MapGraph {
+        let mut g = mapper::graph::MapGraph::new();
+        for id in [1u32, 2, 3, 4] {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(1, run_dir, 2);
+        g.add_edge(2, mapper::direction::opposite(run_dir), 1);
+        g.add_edge(3, claim, 1);
+        g.add_edge(4, claim, 2);
+        // Room 4 shares room 3's bound on the claimed axis, so no staggering helps one room.
+        g.set_pos(4, match claim {
+            mapper::direction::Direction::E => (p3.0, p3.1 + 1),
+            _ => (p3.0 + 1, p3.1),
+        });
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, match run_dir {
+            mapper::direction::Direction::E => (1, 0),
+            _ => (0, 1),
+        });
+        g.set_pos(3, p3);
+        g
+    }
+
+    #[test]
+    fn sq1672_repair_moves_a_whole_ew_run_as_a_unit() {
+        use mapper::direction::Direction::*;
+        // 3 E 1 / 3 E 2: both run rooms must end east of room 3. One room sliding alone is
+        // stopped by the other, so only the run travelling together honours both.
+        let mut g = run_graph(E, E, (6, 3));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert!(pos(&g, 1).0 > 6 && pos(&g, 2).0 > 6, "{:?} {:?}", pos(&g, 1), pos(&g, 2));
+        assert_eq!(pos(&g, 2).0 - pos(&g, 1).0, 1, "the run stays intact");
+        assert_eq!(pos(&g, 1).1, pos(&g, 2).1);
+    }
+
+    #[test]
+    fn sq1672_repair_moves_a_whole_ns_run_as_a_unit() {
+        use mapper::direction::Direction::*;
+        // 3 S 1 / 3 S 2: both run rooms must end south of room 3.
+        let mut g = run_graph(S, S, (3, 6));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert!(pos(&g, 1).1 > 6 && pos(&g, 2).1 > 6, "{:?} {:?}", pos(&g, 1), pos(&g, 2));
+        assert_eq!(pos(&g, 2).1 - pos(&g, 1).1, 1, "the run stays intact");
+        assert_eq!(pos(&g, 1).0, pos(&g, 2).0);
+    }
+
+    #[test]
+    fn sq1672_repair_moves_a_run_perpendicular_to_its_own_axis() {
+        use mapper::direction::Direction::*;
+        // An E/W run (row-locked for any single room) must travel SOUTH to sit below room 3.
+        let mut g = run_graph(E, S, (5, 6));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert!(pos(&g, 1).1 > 6 && pos(&g, 2).1 > 6, "{:?} {:?}", pos(&g, 1), pos(&g, 2));
+        assert_eq!(pos(&g, 1).1, pos(&g, 2).1, "the run keeps its row");
+        assert_eq!(pos(&g, 2).0 - pos(&g, 1).0, 1);
+    }
+
+    #[test]
+    fn sq1672_repair_moves_a_room_together_with_its_updown_stack() {
+        use mapper::direction::Direction::*;
+        // 1 S 2 / 2 N 1 is a reciprocal column with an Up/Down link, so 1 cannot step down alone
+        // (2 is in the way, and hopping over it breaks the pair). One-way `3 S 1` wants 1 below
+        // room 3's row; 3 is row-locked by its reciprocal partner 4. Only shifting 1 and 2 down
+        // together satisfies it.
+        let mut g = mapper::graph::MapGraph::new();
+        for id in [1u32, 2, 3, 4] {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(1, Down, 2);
+        g.add_edge(1, S, 2);
+        g.add_edge(2, N, 1);
+        g.add_edge(3, S, 1);
+        g.add_edge(3, E, 4);
+        g.add_edge(4, W, 3);
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1));
+        g.set_pos(3, (5, 0));
+        g.set_pos(4, (6, 0));
+        crate::render::map::repair_directional_hints(&mut g, 3, 40);
+        assert!(pos(&g, 1).1 > pos(&g, 3).1, "1 {:?} must end up below 3 {:?}", pos(&g, 1), pos(&g, 3));
+        assert_eq!(pos(&g, 2), (pos(&g, 1).0, pos(&g, 1).1 + 1), "2 travelled with 1");
     }
 }

@@ -58,7 +58,7 @@ fn collapsed_gutter_split_records_the_flush_drawn_rect() {
     let model = ScreenModel {
         root: WinNode::Pair {
             vertical: true,
-            split: Split { fixed: 3, fixed_px: None },
+            split: Split { fixed: 3, fixed_px: None, rest: None },
             // The game's own border request — gvm reserves a gutter cell for
             // this in its layout regardless of what the theme does with it.
             border: true,
@@ -116,7 +116,7 @@ fn boot_cos_help_menu() -> Option<GlulxSession> {
     let (_, image) = blorb1.executable().ok()?;
     let image = image.to_vec();
     let blorb2 = Blorb::parse(raw).ok()?;
-    let mut sess = GlulxSession::new(image, 80, 30, true, true, false, (8, 16), Some(blorb2), &[])
+    let mut sess = GlulxSession::new(image, 80, 30, true, true, false, (8.0, 16.0), Some(blorb2), &[])
         .expect("CoS should load and boot");
     let _ = Engine::take_transcript(&mut sess);
     for _ in 0..3 {

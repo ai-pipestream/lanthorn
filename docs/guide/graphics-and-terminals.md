@@ -216,6 +216,22 @@ was. It works the same on the Commodore 64 disk and the MS-DOS download, and
 `/dump-windows` names the overlays a frame was built from if you want to see
 which ones went in.
 
+## Games that ship their own frame
+
+Some Glulx games, Photopia 2.01 and Narcolepsy among them, come with a Windows
+Glk `.cfg` file beside the story that says how big their window was designed to
+be. lanthorn lays those games out at that designed size and stretches the whole
+frame, borders and artwork included, to fill your story pane, so the frame meets
+the text with no gaps; put `glk_design = false` in the story's `config.toml`
+sidecar to get the ordinary cell-sized layout back.
+
+If the stretch makes the art look too wide or too tall, `/set-glk-fit aspect`
+(or the render icon on the story pane's top border, which appears only for these
+games) keeps the frame's proportions instead: the largest whole-cell frame that
+fits, centred, with the spare area painted in the `glk_mask_outside` style.
+`/set-glk-fit` again switches back; the choice is remembered per game, and
+`glk_design_fit` in `config.toml` sets the default for every game.
+
 ## Going deeper
 
 - [v6 graphics](../internals/v6-graphics.md) — render modes, the pixel lock, and period fonts in full

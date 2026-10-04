@@ -293,6 +293,17 @@ impl BorderControl {
         }
     }
 
+    /// [`Self::command`] as the control stands NOW (SQ-1707): the v6 render
+    /// control is also the design-size Glulx fit toggle, and while a design-size
+    /// story is on screen a click runs `set-glk-fit` rather than
+    /// `set-v6-render`. Every other control answers exactly as `command()` does.
+    pub fn command_for(self, state: &AppState) -> ControlCommand {
+        match self {
+            BorderControl::V6Render if state.glk_stretch => ControlCommand { name: "set-glk-fit", arg: None },
+            _ => self.command(),
+        }
+    }
+
     /// Does this control REMEMBER what it switched, in the per-game sidecar?
     ///
     /// True of every switch here and false of the one trigger, which has nothing
@@ -482,19 +493,14 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
         ],
     });
 
-    // ── The panel cycle: command panel → inventory panel → none (SQ-1237) ────
-    // Three states, one control, so the glyph and the hint both name the state
-    // it is IN (not the state a click reaches, as the two-way toggles above do)
-    // and the hint's second line says what a click does next. `None` is the
-    // only unlit reading — the other two are a panel actually open, which is
-    // exactly what "lit" means everywhere else in this cluster.
+    // ── The panel cycle: command panel ⇄ none (SQ-1237; the inventory stop
+    // moved into the Journal, SQ-1684) ──────────────────────────────────────────
+    // The glyph and the hint both name the state it is IN (not the state a click
+    // reaches, as the two-way toggles above do). `None` is the only unlit reading.
     let panel = state.current_side_panel();
     let (panel_glyph, panel_hint) = match panel {
         crate::state::SidePanel::Command => {
-            (g.band_hide, "Command panel: open — click for the inventory panel")
-        }
-        crate::state::SidePanel::Inventory => {
-            (g.inventory_open, "Inventory panel: open — click to close")
+            (g.band_hide, "Command panel: open — click to close")
         }
         crate::state::SidePanel::None => {
             (g.band_show, "Closed — click for the command panel")
@@ -538,6 +544,25 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
             key_route(state, BorderControl::Reveal.command()),
         ],
     });
+
+    // ── Glulx design-size fit (SQ-1707) ──────────────────────────────────────
+    // The v6 render control doubles as the fit toggle, and only while a
+    // design-size story is laid out at its design size (a `.cfg` with
+    // WindowWidth and WindowHeight, `glk_design` on). Stretch fills the pane
+    // like `hybrid`'s glyph; aspect is the letterboxed look `raster` has.
+    if state.glk_stretch {
+        use crate::glk_cfg::GlkFitMode;
+        let (glyph, name, next) = match state.glk_fit {
+            GlkFitMode::Stretch => (g.render_hybrid, "stretch", "aspect"),
+            GlkFitMode::Aspect => (g.render_raster, "aspect", "stretch"),
+        };
+        out.push(ControlView {
+            id: BorderControl::V6Render,
+            glyph,
+            style: style_for(state, BorderControl::V6Render, state.glk_fit == GlkFitMode::Aspect),
+            hint: vec![format!("Fit: {name} — click for {next}"), "/set-glk-fit".to_string()],
+        });
+    }
 
     if state.story_zversion != Some(6) {
         return out;

@@ -110,6 +110,25 @@ const STARTUP: &[Row] = &[
         ],
     ),
     ex(
+        "documents_dir",
+        "\"/data/manuals\"",
+        &[
+            "Where each game's documents folder (manuals, feelies, maps) lives, as",
+            "`<Title> [<IFDB id>]/`. Shared by every player, so it is read from this",
+            "file only. Default: <user_dir>/documents.",
+        ],
+    ),
+    ex(
+        "create_documents_folders",
+        "true",
+        &[
+            "Create each linked game's documents folder automatically (default false:",
+            "the story info panel offers a button, or make the folder by hand; an",
+            "existing folder is always found).",
+            "Shared by every player: read from this file only.",
+        ],
+    ),
+    ex(
         "style",
         "\"style.toml\"",
         &[
@@ -131,8 +150,8 @@ const SAVES: &[Row] = &[
     ),
     d(
         "auto_save",
-        "false",
-        &["Save the archive after every turn, on top of the exit-save and Ctrl+S."],
+        "true",
+        &["Save the archive after every turn, on top of the exit-save and Ctrl+S quick-save."],
     ),
     d("prompt_save_on_quit", "true", &["When auto_save is off, offer to save on quit."]),
     d("prompt_load_on_launch", "true", &["When auto_load is off, offer to resume a save found on launch."]),
@@ -152,7 +171,11 @@ const SAVES: &[Row] = &[
             "evicting the oldest. Bounds memory on a long session; no 0 = unbounded.",
         ],
     ),
-    d("undo_levels", "16", &["Undo depth: retained in-memory snapshots. 0 disables undo."]),
+    d(
+        "undo_levels",
+        "16",
+        &["Undo depth for the game's own UNDO command: retained in-memory snapshots. 0 disables undo."],
+    ),
     d(
         "aux_storage",
         "\"ask\"",
@@ -270,17 +293,7 @@ const INTERFACE: &[Row] = &[
             "column headers. Clamped to 1-6.",
         ],
     ),
-    d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),
-    d("inv_dock_pct", "33", &["Inventory panel height cap, as a percentage of screen height."]),
-    d(
-        "room_dock_pct",
-        "33",
-        &[
-            "Room panel height, as a percentage of screen height. The panel docks",
-            "at the bottom of the map pane and describes the room you are in (or",
-            "the one you clicked).",
-        ],
-    ),
+    d("split_ratio", "50", &["The story pane's share of the story/Journal split, as a percentage."]),
     d(
         "text_margin_x",
         "0",
@@ -407,6 +420,31 @@ const INTERPRETER: &[Row] = &[
             "               story rows in the game's own bitmap typeface instead of",
             "               empty letterbox. The game is told nothing — its own screen",
             "               keeps the layout it always had, at the top of a taller frame.",
+        ],
+    ),
+    d(
+        "glk_design",
+        "true",
+        &[
+            "Lay out a Glulx game at the design size its Windows Glk .cfg file asks for.",
+            "A few games (Photopia, Narcolepsy) ship a <story>.cfg beside the story",
+            "with WindowWidth and WindowHeight; lanthorn then lays the game out at",
+            "that pixel size and fits the whole frame to your pane. Set false to keep",
+            "the ordinary cell layout. Games without such a .cfg are unaffected.",
+            "A per-game config.toml beside the story can override this.",
+        ],
+    ),
+    d(
+        "glk_design_fit",
+        "\"stretch\"",
+        &[
+            "How a design-size Glulx game (see glk_design) fills your pane:",
+            "  \"stretch\" — the frame fills the whole pane, each axis scaled on its",
+            "               own, so the art may look slightly wider or taller (default)",
+            "  \"aspect\"  — the frame keeps the design's proportions: the largest",
+            "               whole-cell frame that fits, centred, the spare area",
+            "               painted with the glk_mask_outside style",
+            "/set-glk-fit switches it mid-game and remembers the choice per game.",
         ],
     ),
     d(

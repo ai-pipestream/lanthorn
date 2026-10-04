@@ -11,10 +11,11 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Game | `set-transcript on|off` | start or stop the story's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead) |
 | Game | `quit` | exit lanthorn |
 | Game | `quit-to-library` | exit the current story and return to the story library |
-| Game | `open-hints` | open the hints panel |
+| Game | `download-documents` | choose manuals, feelies and maps listed on IFDB for this game and save them to its documents folder |
+| Game | `open-hints` | show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the story) |
 | Game | `open-history` | open the rewind/replay history |
 | Game | `toggle-command-panel` | open or close the command panel; remembered per story |
-| Game | `cycle-panel` | cycle command panel → inventory panel → none; persisted per-game |
+| Game | `cycle-panel` | cycle command panel → none; persisted per-game |
 | Game | `toggle-timed-input` | toggle honoring the game's timed-input timers |
 | Game | `toggle-sound` | toggle audio playback (bleeps + sampled sounds) |
 | Game | `volume <0-100>` | set the master audio volume (0-100) |
@@ -31,17 +32,23 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Map | `delete-connection` | delete the selected connection |
 | Map | `relabel-edge` | relabel the selected edge |
 | Map | `move-region [new|parent|layer] [direction]` | re-home the selected room's region onto a fresh layer, its parent, or any named layer; bare picks both when only one choice is possible |
-| Map | `toggle-room-panel` | open or close the room panel under the map |
-| Map | `toggle-inspector` | show the room panel's diagnostics view (flips back to info when open) |
+| Map | `toggle-inspector` | show the Journal's Room tab on its diagnostics view (flips back to info when already there) |
 | Map | `load-map <path>` | load a standalone map file into the current session |
 | Map | `toggle-room-numbers` | toggle room-number labels |
 | Map | `view-map [drawn|matrix]` | how the active layer draws: bare cycles, a name sets it |
 | Map | `mark-maze-layer` | flag the active layer as a maze (defaults it to the matrix view) |
 | Map | `toggle-alignment` | toggle alignment guides |
 | Map | `toggle-portal-labels` | toggle portal labels |
-| View | `toggle-map` | show or hide the map panel; persisted per-game |
+| View | `toggle-map` | show or hide the Journal (the map's panel); persisted per-game |
 | View | `toggle-focus` | switch focus between panes |
-| View | `toggle-inventory-panel` | open or close the inventory panel; remembered per story |
+| View | `journal-tab <map|room|inventory|hints|documents>` | show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per story |
+| View | `journal-next-tab` | show the Journal's next tab, wrapping |
+| View | `journal-prev-tab` | show the Journal's previous tab, wrapping |
+| View | `filter-items [query]` | filter the Journal's Inventory tab (both Carrying and Elsewhere) to items matching query; no query clears the filter |
+| View | `open-document` | open the selected document in the Journal's Documents tab: text in a pager, images in place, PDFs in the system viewer |
+| View | `close-document` | close the open document and return to the Documents tab's list |
+| View | `select-document <n>` | move the Documents tab's selection by signed n rows |
+| View | `scroll-document <n>|page-up|page-down` | scroll the open document (or the Documents list) by signed n lines or a page |
 | View | `toggle-status-bar` | toggle the status/score bar |
 | View | `resize-panes` | enter interactive pane-resize mode |
 | View | `reset-pane-size` | reset all pane sizes to their defaults |
@@ -54,6 +61,7 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Style | `print-colors [color]` | print the current color scheme (color = actual colors) |
 | Style | `set-game-colours on|off|auto` | force this game's own colours on/off (auto follows garglk.ini/global); persisted per-game |
 | Style | `set-v6-render [hybrid|raster|extended|auto]` | switch this game's v6 render mode — bare cycles hybrid → raster → extended, auto inherits the global setting; persisted per-game |
+| Style | `set-glk-fit [stretch|aspect|auto]` | how a design-size Glulx game fills the pane — stretch fills it, aspect keeps the art's proportions with a letterbox; bare toggles, auto inherits the global setting; persisted per-game |
 | Style | `set-v6-pixel-lock [on|off|auto]` | lock v6 art to a whole number of device pixels per art pixel — bare toggles, auto inherits the global setting; persisted per-game |
 | Style | `set-guidance [on|off|auto]` | Lanthorn's Guiding Light: help while you play, marked in the margin — bare toggles, auto inherits the global setting; persisted per-game |
 | Style | `set-return-probe [on|off|auto]` | after a move, look for the way back in a silent copy of the game and put it on the map — bare toggles, auto inherits the global setting; persisted per-game |
@@ -88,9 +96,10 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Library | `fetch-story` | re-fetch the selected story's IFDB metadata, ignoring the cache |
 | Library | `refresh-library` | fetch IFDB metadata for every story that is missing or stale |
 | Library | `set-ifdb-url` | point the selected story at an IFDB page by hand |
+| Library | `create-documents-folder` | create this story's documents folder (manuals, maps) beside its IFDB id |
 | Library | `open-url` | download a story from a URL into this library and open it |
 | Library | `search-ifdb` | search IFDB by title or author and download a story into this directory |
-| Library | `download-hints` | download a matching InvisiClues hint file for the selected story |
+| Library | `download-hints` | download a matching InvisiClues hint file for this story (the selected one in the browser) |
 | Library | `sort-library` | cycle the browser's sort column, keeping the direction |
 | Library | `reverse-sort` | reverse the browser's sort direction, keeping the column |
 | Library | `find-story` | type to filter the whole library by title, author, filename or folder |

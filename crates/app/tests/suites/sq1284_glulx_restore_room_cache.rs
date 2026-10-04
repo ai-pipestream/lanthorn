@@ -73,6 +73,7 @@ fn story() -> Option<Vec<u8>> {
 
 fn recipe_in(bytes: &[u8], store: PathBuf) -> ShadowRecipe {
     ShadowRecipe {
+        catalogue: None,
         story_bytes: Arc::new(bytes.to_vec()),
         store,
         vfs_bytes: Arc::new(Vec::new()),
@@ -102,7 +103,7 @@ fn boot(tag: &str) -> Option<(GlulxSession, Vec<u8>, PathBuf)> {
         false,
         false,
         false,
-        (1, 1),
+        (1.0, 1.0),
         None,
         &[],
         [[(None, None); 11]; 2],

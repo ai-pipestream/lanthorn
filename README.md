@@ -98,6 +98,14 @@ bring up the story info panel.
 |:--|
 | *A Glulx game with several Glk windows, each in the colours the story chose.* |
 
+| ![Narcolepsy in its designed Glk frame: the title and blue column down the left, the story's prose inside a thought-bubble window mask](docs/narcolepsy.png) |
+|:--|
+| *Narcolepsy in the frame its author drew: the thought bubble is the game's own window mask.* |
+
+| ![Photopia 2.01 in its designed Glk frame: a metallic title and credit frame around a white text window carrying the opening prose](docs/photopia.png) |
+|:--|
+| *Photopia 2.01 in its designed frame: the author's artwork fills the pane around the story's text.* |
+
 | ![The matrix map view: the map as a direction table — one row per room, every passage's true destination in its cell](docs/maze-grid.png) |
 |:--|
 | *The matrix view: one row per room, every exit's true destination in its cell.* |
@@ -126,7 +134,8 @@ bring up the story info panel.
 
 Grab the archive for your platform from the
 [**latest release**](https://github.com/sharkusk/lanthorn/releases) — Linux
-(x86_64), macOS (universal), and Windows (x86_64) builds ship with every
+(x86_64 and aarch64, covering Raspberry Pi OS 64-bit and other 64-bit ARM
+Linux), macOS (universal), and Windows (x86_64) builds ship with every
 release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 (`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
@@ -209,6 +218,19 @@ itself.**
   for it, and no room is ever drawn twice because the game spelled its name two
   ways.
   → [the map](docs/guide/the-map.md)
+- **The Journal** — the panel beside the story is a tabbed
+  Journal: **Map**, **Room**, **Inventory**, **Hints** and **Documents**, one click or
+  `Alt+1` to `Alt+5` apart, and it remembers the tab you left on for each story. The
+  inventory is no longer a strip across the bottom, so the story gets its rows
+  back, the Hints tab runs a game's *InvisiClues* file beside the story instead of
+  over it, and the Documents tab reads a game's manuals and maps in place: text in a
+  pager, pictures drawn in the pane, PDFs in your viewer.
+  Every IFDB-linked game gets a documents folder
+  (`~/.lanthorn/documents/<Title> [<IFDB id>]`) for its manual, feelies and maps,
+  and you can fetch them without leaving lanthorn: pick from the files IFDB lists
+  for the game (zips can be peeked inside, walkthroughs are flagged as spoilers,
+  files you already have are marked), and they land in the folder. The Documents
+  tab and the story info panel list what is there and open it.
 - **The original disks, as the original machines** — hand it an Amiga, Macintosh,
   Apple II, Atari ST, PC or Commodore floppy and it plays the build on that disk,
   with that machine's artwork, sound, palette and status line. Nine machines,
@@ -223,6 +245,12 @@ itself.**
   letterboxing it — a tall terminal gets more rows to read, with the side art
   tiled out of its own artwork at the artist's spacing. `/set-v6-render` cycles
   them. → [graphics and terminals](docs/guide/graphics-and-terminals.md)
+- **Glulx games in the frame their author drew** — a game that
+  ships a Windows Glk `.cfg` (*Photopia* 2.01 and *Narcolepsy* among them) is laid
+  out at the size its author designed and fills your pane, window masks included.
+  `/set-glk-fit aspect` keeps the design's proportions instead of stretching, and
+  `glk_design = false` in the game's `config.toml` turns it off.
+  → [graphics and terminals](docs/guide/graphics-and-terminals.md#games-that-ship-their-own-frame)
 - **Saves that remember the whole session** — map, screen and scrollback, not
   just the game's own state, whether you press Ctrl+S or the story does its own
   `SAVE`. Plus Quetzal import/export and per-turn rewind.
@@ -267,7 +295,7 @@ and the internals below — is [**`docs/README.md`**](docs/README.md).
 ## Playing aids
 
 The story pane's border carries a few clickable switches — the command panel and
-the Guiding Light along the bottom, the map at the right, and on a graphical v6
+the Guiding Light along the bottom, the Journal at the right, and on a graphical v6
 story the render mode and pixel lock along the top. Each shows its state at a
 glance, and hovering one names the command it stands for. What you switch there
 is remembered per story; the settings screen sets the defaults.
@@ -383,6 +411,12 @@ live under `~/.lanthorn/saves/<story-filename>.save/` by default; `--data-dir
 [every setting](docs/reference/config.md) and
 [saves and rewind](docs/guide/saves-and-rewind.md).
 
+One install can serve several people. `--player <name>` (or
+`LANTHORN_PLAYER`) gives each player their own saves and settings, layered on top
+of the shared config; with no name, everything works exactly as before. Lanthorn
+does no authentication of its own — see
+[sharing one install](docs/guide/command-line.md#sharing-one-install-between-players).
+
 An **exported transcript** is not quite what is on screen:
 lanthorn's own guidance is marked in the margin while you play, and written out
 with the word `Lanthorn:` in front of it, because a file has no margin and no
@@ -443,6 +477,11 @@ tab, lose the Wi-Fi, let a tablet sleep, and coming back to the same address
 puts you in the same room mid-sentence, sound and all, for up to six hours.
 After that the game is put down with its progress saved, and the next visit
 picks it up.
+
+The image can take the player's name from the request header an
+authenticating proxy in front of it sets (ttyd's auth header), so each signed-in
+person gets their own saves and settings. The proxy does the login; lanthorn only
+reads the name it hands over.
 
 → [**play in a browser**](docs/guide/play-in-a-browser.md)
 

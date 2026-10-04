@@ -44,6 +44,8 @@ fn turn(num: mapper::graph::RoomId, name: &str, transcript: &str) -> TurnResult 
         transcript_elems: Vec::new(),
         prose_retired: None,
         declared_exit: None,
+    description: None,
+    items: Vec::new(),
     }
 }
 
@@ -349,7 +351,7 @@ fn adventure_at_the_pit() -> Option<(app::glulx_session::GlulxSession, Mapper, D
     };
     let blorb = blorb::Blorb::parse(bytes).expect("advent.blb parses as a Blorb");
     let (_k, exec) = blorb.executable().expect("advent.blb carries an executable chunk");
-    let mut s = GlulxSession::new(exec.to_vec(), 80, 24, true, false, false, (1, 1), None, &[])
+    let mut s = GlulxSession::new(exec.to_vec(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
         .expect("Adventure (Glulx) boots");
 
     let mut m = Mapper::default();

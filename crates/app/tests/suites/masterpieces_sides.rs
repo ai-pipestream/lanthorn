@@ -44,7 +44,7 @@ fn every_row_reports_the_machine_its_own_story_came_off() {
     let base = std::env::temp_dir().join("bm-masterpieces-sides");
     // 66, not 83: seventeen DOS builds are on the disc twice and fold
     // (SQ-0878, pinned in full below).
-    let rows = app::picker::resolve_entries(&disc, &base);
+    let rows = app::picker::resolve_entries(&disc, &app::data_roots::DataRoots::single(&base));
     assert_eq!(rows.len(), 66, "one row per launchable build, per machine");
 
     let mut mac = 0;
@@ -84,7 +84,7 @@ fn one_build_per_machine_survives_and_the_cross_machine_pairs_do_not_fold() {
         return;
     };
     let base = std::env::temp_dir().join("bm-masterpieces-dedupe");
-    let rows = app::picker::resolve_entries(&disc, &base);
+    let rows = app::picker::resolve_entries(&disc, &app::data_roots::DataRoots::single(&base));
     assert_eq!(rows.len(), 66, "83 stories, seventeen of them the same build twice");
 
     let entry = |row: &app::picker::StoryEntry| row.meta.disk_entry.clone().unwrap_or_default();
@@ -196,7 +196,7 @@ fn the_options_panel_offers_only_this_storys_own_archives() {
     // each) and ten DOS ones (Arthur and Journey at four renditions, Zork Zero
     // at two) — less the two `.EG2` continuations, which are the back halves of
     // their `.EG1` rows rather than rows of their own.
-    let unfiltered = app::launch_options::discover_art_candidates(&disc, None);
+    let unfiltered = app::launch_options::discover_art_candidates(&disc, None, None);
     assert_eq!(unfiltered.len(), 14, "every archive on the disc, EGA sets counted once");
 
     for (entry, want) in [
@@ -207,7 +207,7 @@ fn the_options_panel_offers_only_this_storys_own_archives() {
         // A text game shipped beside no artwork is offered none.
         ("MAC/ZORK I", vec![]),
     ] {
-        let mut got: Vec<String> = app::launch_options::discover_art_candidates(&disc, Some(entry))
+        let mut got: Vec<String> = app::launch_options::discover_art_candidates(&disc, Some(entry), None)
             .into_iter()
             .map(|c| c.filename.rsplit('/').next().unwrap_or_default().to_string())
             .collect();

@@ -1,0 +1,649 @@
+# SQ-1600: a verified command sequence for The Hitchhiker's Guide to the
+# Galaxy (hitchhiker-r59-s851108.z3, v3 Z-code), reconstructed by booting the
+# real game headlessly and driving it turn by turn, checking every reply
+# against the actual interpreter. This is NOT a copy of any published
+# walkthrough's prose -- it is this project's own derived list of literal
+# game commands, produced for automated regression testing
+# (crates/app/tests/suites/walkthrough_hhgg.rs).
+#
+# Derived with the aid of, as a guide only (never transcribed):
+#   hitchhiker.txt, IF Archive, Scorpia, 06-Dec-1992
+#   https://www.ifarchive.org/if-archive/infocom/hints/solutions/hitchhiker.txt
+#   hitchhiker.step, IF Archive, Doug Howell / Peter van Turennout, 17-Dec-1992
+#   https://www.ifarchive.org/if-archive/infocom/hints/solutions/hitchhiker.step
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. A line submitted while the game is at a single-keypress (Char)
+# prompt is sent as a keypress (its first character); otherwise it is
+# submitted as an ordinary typed line.
+#
+# WHY THIS SCRIPT IS LONG (~600 commands): after the Babel-fish/poetry/
+# airlock opening, the game boards you on the Heart of Gold and the middle
+# act is driven by pushing the spare Improbability Drive's switch, which
+# throws you into one of several first-person flashback vignettes chosen by
+# the game's own hidden state each time (Bugblatter Beast, Trillian, Ford,
+# the Vl'hurg/G'Gugvunt War Room, Zaphod, and eventually the whale's-tummy
+# scene) -- the game's own manual documents this as unpredictable ("it may
+# take more than one try to get here, but you will make it eventually").
+# zvm's Z-machine `random` opcode is seeded from a fixed constant with no OS
+# entropy at initial boot (`Machine::DEFAULT_RNG_SEED`), so a fresh boot
+# always draws the identical sequence turn-for-turn -- which is what makes
+# this script reproducible at all despite the game's own randomness. Getting
+# from "all five vignettes done" to the whale's tummy took several retries
+# (the game revisits already-completed vignettes before landing on a new
+# one), and ONE of the wrong turns (revisiting the Vl'hurg/G'Gugvunt War
+# Room's time-paradox maze a second time) is scripted to kill you outright
+# about five turns later NO MATTER WHAT YOU DO -- confirmed by letting it
+# play out once. So this script deliberately routes around a second visit
+# to that specific flashback: whenever "you hear ... a star drive ... from
+# far below" is followed by a bare `aft` leading straight back into it, the
+# fix is to `wait` and `listen` again rather than take that exit, which
+# lets the RNG re-roll instead of walking into the guaranteed-fatal branch.
+#
+# Never repeat the war-room/maze flashback via a direct `aft` off a
+# "far below" listen after it has already been completed once.
+stand
+turn on light
+get gown
+wear gown
+look in pocket
+eat pill
+get screwdriver
+get toothbrush
+south
+get mail
+south
+lie in front of bulldozer
+read mail
+wait
+wait
+wait
+no
+ask ford about my home
+wait
+wait
+south
+west
+buy sandwich
+drink beer
+drink beer
+drink beer
+wait
+east
+give sandwich to dog
+north
+wait
+wait
+get device
+push green button
+smell
+smell
+smell
+smell
+smell
+look at shadow
+eat peanuts
+remove gown
+hang gown on hook
+wait
+get towel
+get satchel
+put towel over drain
+put satchel in front of robot panel
+put mail on satchel
+push dispenser button
+get gown
+wear gown
+get towel
+press switch on case
+push switch
+wait
+wait
+wait
+wait
+wait
+wait
+enjoy poem
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+type "fripping"
+get plotter
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+wait
+listen
+listen
+aft
+aft
+inventory
+drop plotter
+drop screwdriver
+drop device
+down
+aft
+aft
+aft
+aft
+aft
+aft
+look
+look
+get generator
+fore
+fore
+port
+consult guide about nutrimat
+touch pad
+get tea substitute
+starboard
+up
+examine plotter
+examine pincer
+examine generator
+drop tea substitute
+drop generator
+plug small plug into small receptacle
+put dangly bit in tea substitute
+push switch
+wait
+wait
+wait
+wait
+wait
+smell
+look at shadow
+say arthur
+east
+get stone
+cover head with towel
+carve arthur on memorial
+remove towel
+west
+southwest
+get interface
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+drop chipper
+drop interface
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+feel
+feel
+feel
+taste liquid
+drop plate
+examine arthur
+get fluff
+open handbag
+put fluff in handbag
+get plate
+wait
+examine phil
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+get awl
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+north
+north
+north
+south
+get particle
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+see
+look at light
+open satchel
+get all from satchel
+north
+give towel to arthur
+wait
+go to prosser
+ask prosser to lie down
+south
+west
+buy beer
+buy peanuts
+drink beer
+drink beer
+drink beer
+east
+north
+drop satchel
+put satchel fluff on satchel
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+smell
+look at shadow
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+smell
+look at shadow
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+smell
+look at shadow
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+wait
+wait
+wait
+wait
+wait
+taste
+taste
+see
+search seat
+look at light
+search seat
+get toolbox
+inventory
+search seat
+steer boat towards spire
+wait
+wait
+wait
+wait
+stand
+north
+wait
+wait
+wait
+wait
+guards, dont shoot
+tell trillian to shoot rifles
+east
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+get interface
+port
+open panel
+remove circuit board
+put interface in panel
+touch pad
+starboard
+up
+plug large plug into large receptacle
+wait
+wait
+push switch
+generator
+down
+port
+get tea
+inventory
+starboard
+up
+drop tea
+remove dangly bit from tea substitute
+put dangly bit in tea
+drop no tea
+drop circuit board
+drop towel
+drop guide
+drop awl
+drop toothbrush
+push switch
+generator
+smell
+smell
+look at shadow
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+see
+look at light
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+listen
+wait
+listen
+wait
+wait
+wait
+smell
+look at shadow
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+see
+look at light
+north
+open satchel
+get all from satchel
+give towel to arthur
+wait
+go to prosser
+ask prosser to lie down
+south
+west
+buy beer
+buy peanuts
+drink beer
+drink beer
+drink beer
+east
+north
+drop satchel
+put satchel fluff on satchel
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+feel
+feel
+feel
+taste liquid
+drop plate
+examine arthur
+get fluff
+open handbag
+put fluff in handbag
+get plate
+wait
+examine phil
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+see
+look at light
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+see
+look at light
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+push switch
+generator
+wait
+wait
+wait
+wait
+wait
+listen
+wait
+listen
+wait
+wait
+wait
+wait
+wait
+feel
+feel
+feel
+taste liquid
+get pot
+put pot in thing
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+listen
+aft
+aft
+up
+inventory
+look
+get satchel
+get fluff
+down
+aft
+down
+get seat cushion fluff
+up
+fore
+up
+open handbag
+get jacket fluff
+inventory
+get pot
+plant jacket fluff in pot
+plant seat cushion fluff in pot
+plant satchel fluff in pot
+plant pocket fluff in pot
+drop pot
+wait
+wait
+wait
+get pot
+port
+eat fruit
+inventory
+get awl
+drop pot
+drop satchel
+down
+port
+touch pad
+starboard
+up
+look
+get tea
+inventory
+get no tea
+inventory
+down
+aft
+port
+open screening door
+drink tea
+port
+tell marvin to fix hatch
+starboard
+down
+starboard
+inventory
+remove gown
+drop gown
+starboard
+wait
+wait
+give awl to marvin
+hand awl to marvin
+port
+down

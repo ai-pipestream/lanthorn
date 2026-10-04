@@ -6,6 +6,114 @@ use crate::suggest::{SeamDecision, SeamKey};
 
 pub type RoomId = u32;
 
+/// How the app identifies an item across every engine (SQ-1627): the object *number* on the
+/// Z-machine, the object's *address* on Glulx, the item *index* in a Scott Adams database — the
+/// exact same identity space `grammar_model::ObjectWords::id` already carries for the same three
+/// engines, reused here rather than invented fresh so the two never have a chance to disagree.
+/// Stable for the life of one loaded story (an object's number/address/index never moves or gets
+/// reused while a session runs), which is what a save/load round trip and "the same item, still
+/// tracked, after a restore" both need — unlike a positional index into some list the app builds
+/// itself, which can silently point at a different item once anything reorders or filters that
+/// list differently.
+pub type ItemKey = u32;
+
+/// Where the map last confirmed seeing an item (SQ-1627).
+///
+/// `Room`'s `direct` flag is the field the whole feature's correctness hinges on: it is `true`
+/// only when the sighting was of the room's own TOP LEVEL — a bare child of the room object,
+/// never reached by recursing into a container — and it is what
+/// [`MapGraph::note_items_absent`] reads to decide whether a later absence is real news or just a
+/// closed lid. A sighting reached only by recursing into an OPEN container (`direct: false`) is
+/// never eligible to be marked [`Vanished`](ItemLocation::Vanished) later: closing that container
+/// hides the item from every recursive visibility query without moving it an inch, and guessing
+/// "vanished" at that point would be a straightforward false positive on completely ordinary play
+/// (the leaflet in Zork I's mailbox, closed with the leaflet still inside — the correction that
+/// replaced this feature's original one-query design, 2026-09-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemLocation {
+    /// Last confirmed present in `room`.
+    Room {
+        room: RoomId,
+        /// See [`ItemLocation`]'s own doc — `true` only for a top-level sighting.
+        direct: bool,
+        /// SQ-1632 Fix 1: the item this one is nested inside, when the observation could state
+        /// it — the brown sack, the table. Always `None` for a direct (`direct: true`) sighting,
+        /// since the room itself is the "container" there. `None` for a nested sighting too when
+        /// the engine that captured it has no containment model to ask (Glulx, Scott — see
+        /// `app::session::ObservedItemLocation::RoomNested`'s own doc) or when a structural check
+        /// found no REAL containment relationship at all — shared/local-global scenery visible
+        /// from many rooms but a child of none of them (`zvm::world::WorldModel::
+        /// real_container_in_room`, SQ-1632 Fix 5) is filtered out before it ever reaches here,
+        /// never recorded as an item with an absent container.
+        #[serde(default)]
+        container: Option<ItemKey>,
+    },
+    /// Last confirmed in the player's own inventory.
+    Carried,
+    /// Last confirmed directly in `room` at `turn`, and a LATER observation — a direct
+    /// (non-recursive) look at that same room, or (SQ-1632 Fix 4) an inventory check while the
+    /// item was last known `Carried` — came up empty, with the item not carried either: a real,
+    /// personally-observed absence, not an inference about anywhere else. See
+    /// [`MapGraph::note_items_absent`].
+    ///
+    /// `room`/`turn` (SQ-1632 Fix 2) are the LAST place and moment the item was confirmed
+    /// present before it went missing — for an item that was carried when it disappeared
+    /// (eaten, burned, destroyed), that is the room the player themselves were standing in, since
+    /// that is where the item was last WITH them. Always the older `origin_room`/`origin_turn`
+    /// pair (where the item was FIRST ever seen) for a fact a host wants about where it went
+    /// missing FROM, not merely where it started.
+    ///
+    /// Deliberately does not try to distinguish "destroyed" from "moved somewhere unseen" — this
+    /// is honest about not knowing which, rather than guessing.
+    Vanished { room: RoomId, turn: u32 },
+}
+
+/// One item's whole recorded history on the map (SQ-1627): where the player first noticed it,
+/// where they last confirmed it, and whether a take-style command has visibly failed to move it
+/// (Facet 3, `fixed_in_place`) — built entirely from what the player has personally seen or
+/// carried (see `app::session::apply_item_observations`'s "observed-only, never omniscient" rule).
+/// Never a spoiler about anything the player has not stood in a room with or held.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemRecord {
+    /// The item's printed name as of the most recent observation.
+    pub name: String,
+    /// The room the player was in the FIRST time this item was ever observed — carried or seen —
+    /// never updated after that first sighting, even as `last_seen` moves on.
+    pub origin_room: RoomId,
+    /// The turn `origin_room` was stamped on.
+    pub origin_turn: u32,
+    /// Where the item was last confirmed.
+    pub last_seen: ItemLocation,
+    /// The turn `last_seen` was last updated on.
+    pub last_seen_turn: u32,
+    /// Facet 3 (SQ-1627): a take-style command aimed at this item visibly failed to move it into
+    /// inventory. Structural signal only (see `session::classify_take_attempt`), and deliberately
+    /// incomplete — most non-takeable items are never tested this way, so `false` means "never
+    /// confirmed", not "portable". Absent from a map file written before this existed.
+    ///
+    /// **`true` does not mean the item IS fixed in place** (SQ-1631 audit) — it means only that the
+    /// last unambiguous take attempted against it did not put it in inventory. `classify_take_attempt`
+    /// cannot tell that refusal apart from "you're not strong enough", "your hands are full", "it's
+    /// too dark to see", or an NPC that refuses to hand it over: no structural signal distinguishes
+    /// a refusal's REASON, and per this feature's own discipline (`crate::probe::Refusals`'s own
+    /// doc makes the same argument) a hand-written phrase list guessing at the reason would
+    /// misclassify as often as it helps, so none is attempted. Treat `true` as "an unambiguous take
+    /// failed here at least once", not as a portability verdict.
+    #[serde(default)]
+    pub fixed_in_place: bool,
+    /// The turn this item last transitioned from not-carried to carried (SQ-1632 Fix 3) —
+    /// "picked up on move N", which `last_seen_turn` alone cannot state once turn N+1 passes,
+    /// because that field is re-stamped on every turn the item is STILL held, re-confirmed, not
+    /// only on the turn it was first taken. Set once on that transition
+    /// ([`MapGraph::note_item_carried`]), left untouched on every following turn the item stays
+    /// carried, and cleared back to `None` the moment it is ever seen NOT carried again — dropped
+    /// ([`MapGraph::note_item_seen`]) or vanished while held ([`MapGraph::note_items_absent`]).
+    /// `None` for an item never (yet) observed carried at all. Absent from a map file written
+    /// before this existed.
+    #[serde(default)]
+    pub carried_since_turn: Option<u32>,
+}
+
 /// Sentinel used only on the wire: a room whose save predates SQ-0685 has no `seq` field at all,
 /// and deserializes to this rather than a real ordinal. [`MapGraph::from_parts`] recognises it and
 /// backfills the room's true seq from its position in the persisted rooms array before anything
@@ -133,6 +241,17 @@ pub struct Room {
     /// [`MapGraph::from_parts`] could not tell "missing" from "really seq 0".
     #[serde(default = "room_seq_missing")]
     pub seq: u64,
+    /// The text the game printed for this room's LAST-seen description — on arrival or on an
+    /// explicit LOOK (SQ-1625) — kept only as the most recent one, overwritten rather than
+    /// accumulated. `None` for a room mapped before this existed, an engine/story shape this
+    /// isn't captured for (any v6 Z-machine game; see `app::session`'s Z-machine turn builder),
+    /// or a room no capture has reached yet.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The turn [`Room::description`] was captured on, for a host that wants to show how stale
+    /// it is. `None` exactly when `description` is `None`.
+    #[serde(default)]
+    pub description_turn: Option<u32>,
 }
 
 impl Room {
@@ -313,6 +432,13 @@ pub struct MapGraph {
     ///
     /// Not persisted, for the same reason `struct_gen` is not: fresh per running session.
     tried_gen: u64,
+    /// Every item the map has ever been shown (SQ-1627), keyed by [`ItemKey`]. Restored on load
+    /// through [`MapGraph::restore_items`] (a separate door, like [`MapGraph::restore_seam_decisions`]
+    /// beside it) rather than a [`MapGraph::from_parts`] parameter — items are independent of the
+    /// rooms/connections `from_parts` settles, and growing that function's parameter list is
+    /// exactly the "facts that travel together should travel as a value" trap CLAUDE.md's
+    /// refactoring policy warns about.
+    items: BTreeMap<ItemKey, ItemRecord>,
 }
 
 impl Default for MapGraph {
@@ -331,6 +457,7 @@ impl Default for MapGraph {
             suggestions_disabled: false,
             struct_gen: 0,
             tried_gen: 0,
+            items: BTreeMap::new(),
         }
     }
 }
@@ -406,6 +533,8 @@ impl MapGraph {
             // A freshly-loaded graph is a fresh generation — see the field's own doc comment.
             struct_gen: 0,
             tried_gen: 0,
+            // Restored separately too (`restore_items`) — same reasoning as `seam_decisions` above.
+            items: BTreeMap::new(),
         }
     }
 
@@ -636,6 +765,8 @@ impl MapGraph {
                     random_inherited: Vec::new(),
                     aliases: Vec::new(),
                     seq,
+                    description: None,
+                    description_turn: None,
                 });
                 changed = true;
             }
@@ -1232,6 +1363,180 @@ impl MapGraph {
         }
     }
 
+    /// Record this turn's freshly-observed room description (SQ-1625), replacing whatever was
+    /// there before — the map keeps only the MOST RECENT description per room, never an
+    /// accumulating log. A no-op when `id` isn't in the graph yet (e.g. the pre-corroboration
+    /// NameOnly gate `app::session::apply_turn` applies before a room's first real edge).
+    ///
+    /// Deliberately does NOT call [`Self::touch_layout`], unlike [`Self::set_notes`]'s otherwise
+    /// identical shape — `set_notes` is a rare, explicit user action, but this is called
+    /// automatically on every captured turn (`app::session::apply_room_description`), and
+    /// `struct_gen` exists specifically for the drawn-LAYOUT memo (see its own field doc): the
+    /// text a room's description holds is never part of that layout. Bumping it here fed the
+    /// per-turn `map_changed = struct_gen_before != struct_gen_after` check
+    /// (`app::host::turn::post_turn_bookkeeping`) a false "structural change" on a turn that
+    /// merely re-captured an already-known room's description, wrongly giving it its own
+    /// `map_snapshot` and reddening `host_session::replay_location_names_the_turns_own_room_not_an_older_snapshots`
+    /// on CI (2026-09-28).
+    pub fn set_description(&mut self, id: RoomId, description: Option<String>, turn: u32) {
+        if let Some(room) = self.rooms.get_mut(&id) {
+            if room.description != description {
+                room.description = description;
+                room.description_turn = Some(turn);
+            }
+        }
+    }
+
+    /// Read one item's record, if the map has ever seen it.
+    pub fn item(&self, key: ItemKey) -> Option<&ItemRecord> {
+        self.items.get(&key)
+    }
+
+    /// Every item the map has ever seen, in key order.
+    pub fn items(&self) -> impl Iterator<Item = (&ItemKey, &ItemRecord)> {
+        self.items.iter()
+    }
+
+    /// Record this turn's observation that item `key` is present in `room` (SQ-1627, Facet 1) —
+    /// via either a direct top-level sighting (`direct = true`) or one reached only by recursing
+    /// into an open container (`direct = false`); see [`ItemLocation`] for why the two are kept
+    /// apart. `container` (SQ-1632 Fix 1) is the item's immediate container for a nested sighting
+    /// — `None` for a direct one, and `None` for a nested one the caller cannot or should not
+    /// state (see [`ItemLocation::Room`]'s own doc). A first sighting mints a fresh record with
+    /// `room` as its origin; a later one only ever moves `last_seen`/`last_seen_turn` —
+    /// `origin_room`/`origin_turn` are written once and never revisited, however many rooms the
+    /// item passes through afterward. `carried_since_turn` (SQ-1632 Fix 3) is cleared: seeing an
+    /// item in a room is seeing it NOT carried, whatever it was doing before.
+    ///
+    /// Deliberately does NOT call [`Self::touch_layout`] — see [`Self::set_description`]'s own
+    /// doc for why an automatic per-turn capture must never feed `struct_gen`'s drawn-layout memo.
+    pub fn note_item_seen(
+        &mut self,
+        key: ItemKey,
+        name: String,
+        room: RoomId,
+        direct: bool,
+        container: Option<ItemKey>,
+        turn: u32,
+    ) {
+        let last_seen = ItemLocation::Room { room, direct, container };
+        match self.items.get_mut(&key) {
+            Some(rec) => {
+                rec.name = name;
+                rec.last_seen = last_seen;
+                rec.last_seen_turn = turn;
+                rec.carried_since_turn = None;
+            }
+            None => {
+                self.items.insert(
+                    key,
+                    ItemRecord {
+                        name,
+                        origin_room: room,
+                        origin_turn: turn,
+                        last_seen,
+                        last_seen_turn: turn,
+                        fixed_in_place: false,
+                        carried_since_turn: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Record this turn's observation that item `key` is in the player's own inventory (SQ-1627,
+    /// Facet 1). Same mint-or-update shape as [`Self::note_item_seen`]. `room_if_new` names the
+    /// origin ONLY for an item the map has never recorded before (e.g. the story's starting
+    /// inventory, first noticed already carried rather than ever seen sitting somewhere) — it is
+    /// the room the player themselves were standing in at the moment they were first noticed
+    /// holding it, not a claim about where the story spawned it; an item already known keeps
+    /// whatever origin it was first minted with.
+    ///
+    /// `carried_since_turn` (SQ-1632 Fix 3) is stamped `turn` only on the transition INTO carried
+    /// — an item already `Carried` keeps whatever pick-up turn it already has, so re-confirming
+    /// "still held" on every following turn (this function's ordinary case) never overwrites it.
+    ///
+    /// Deliberately does NOT call [`Self::touch_layout`] — same reasoning as [`Self::note_item_seen`].
+    pub fn note_item_carried(&mut self, key: ItemKey, name: String, room_if_new: RoomId, turn: u32) {
+        match self.items.get_mut(&key) {
+            Some(rec) => {
+                rec.name = name;
+                if rec.last_seen != ItemLocation::Carried {
+                    rec.carried_since_turn = Some(turn);
+                }
+                rec.last_seen = ItemLocation::Carried;
+                rec.last_seen_turn = turn;
+            }
+            None => {
+                self.items.insert(
+                    key,
+                    ItemRecord {
+                        name,
+                        origin_room: room_if_new,
+                        origin_turn: turn,
+                        last_seen: ItemLocation::Carried,
+                        last_seen_turn: turn,
+                        fixed_in_place: false,
+                        carried_since_turn: Some(turn),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Sweep for items that just went missing, from two vantage points, neither broader than what
+    /// the player standing in `room` this turn actually confirmed (SQ-1627 Facet 1; SQ-1632 Fix
+    /// 4 added the second): a DIRECT (top-level) sighting in this same room, or a last-known
+    /// `Carried` item — and that `touched` (every item key this turn's observations named
+    /// ANYWHERE — this room, any other room, or carried; see
+    /// `app::session::apply_item_observations`) does not contain — mark each
+    /// [`ItemLocation::Vanished`], stamped with `room`/`turn`: the room the player is standing in
+    /// NOW, since for a carried item that vanished, that is where it was last WITH them.
+    ///
+    /// Never touches a record last seen only NESTED in a container (`direct: false`) or last seen
+    /// in a *different* room: neither is evidence about `room` at all, and guessing would be
+    /// exactly the false positive this feature's correction (see [`ItemLocation`]'s doc) exists to
+    /// avoid — closing a container the item sits in, or simply being elsewhere, leaves the record
+    /// untouched rather than marking it vanished. A carried item that just vanished also has its
+    /// `carried_since_turn` cleared (SQ-1632 Fix 3) — it is no longer held, whatever it was doing
+    /// a moment ago.
+    ///
+    /// Deliberately does NOT call [`Self::touch_layout`] — same reasoning as [`Self::note_item_seen`].
+    pub fn note_items_absent(&mut self, room: RoomId, turn: u32, touched: &std::collections::BTreeSet<ItemKey>) {
+        for (key, rec) in self.items.iter_mut() {
+            if touched.contains(key) {
+                continue;
+            }
+            let vanished_from_room =
+                matches!(rec.last_seen, ItemLocation::Room { room: r, direct: true, .. } if r == room);
+            let vanished_while_carried = rec.last_seen == ItemLocation::Carried;
+            if vanished_from_room || vanished_while_carried {
+                rec.last_seen = ItemLocation::Vanished { room, turn };
+                rec.last_seen_turn = turn;
+                rec.carried_since_turn = None;
+            }
+        }
+    }
+
+    /// Record that a take-style command aimed at item `key` visibly failed to move it into
+    /// inventory (SQ-1627, Facet 3) — see `session::classify_take_attempt` for the structural
+    /// signal this is built from. A no-op when `key` isn't in the graph yet, the same shape
+    /// [`Self::set_description`] uses for an unknown room.
+    ///
+    /// Deliberately does NOT call [`Self::touch_layout`] — same reasoning as [`Self::note_item_seen`].
+    pub fn note_item_fixed_in_place(&mut self, key: ItemKey) {
+        if let Some(rec) = self.items.get_mut(&key) {
+            rec.fixed_in_place = true;
+        }
+    }
+
+    /// Restore a save's item records wholesale (SQ-1627) — the `items` counterpart to
+    /// [`Self::restore_seam_decisions`], a separate door rather than a [`Self::from_parts`]
+    /// parameter for the reason that function's own field doc gives.
+    pub fn restore_items(&mut self, items: BTreeMap<ItemKey, ItemRecord>) {
+        self.items = items;
+    }
+
     /// Remove the connection(s) with key (origin, dir). Returns true if any was removed.
     /// For a real direction that is at most one edge; for `Unknown` — which may hold several
     /// stubs (see [`MapGraph::add_edge`]) — every `?` edge out of `origin` goes at once, as the
@@ -1284,6 +1589,37 @@ impl MapGraph {
             suggestions_disabled: false,
             struct_gen: 0,
             tried_gen: 0,
+            // A routing scratch graph never shows items either — see the comment above.
+            items: BTreeMap::new(),
+        }
+    }
+
+    /// Graft onto this graph (a [`MapGraph::layer_subgraph`]-shaped frame of `layer`) what the
+    /// subgraph dropped: every `live` connection crossing between `layer` and another layer,
+    /// the foreign room at its far end, and the layer table that names it. After this,
+    /// `render_layer(self, layer)` draws the same cross-layer ghosts the live map does (SQ-1697).
+    ///
+    /// A crossing whose in-layer end is not a room of `self` is skipped — a frame part-way
+    /// through a rebuild has not got that room yet, so there is nothing to seat a ghost against.
+    pub fn graft_crossings_from(&mut self, live: &MapGraph, layer: LayerId) {
+        let mut grafted = false;
+        for c in &live.conns {
+            let (o_in, d_in) = (live.layer_of(c.origin) == layer, live.layer_of(c.dest) == layer);
+            if o_in == d_in {
+                continue;
+            }
+            let (near, far) = if o_in { (c.origin, c.dest) } else { (c.dest, c.origin) };
+            if !self.rooms.contains_key(&near) {
+                continue;
+            }
+            if let Some(room) = live.rooms.get(&far) {
+                self.rooms.entry(far).or_insert_with(|| room.clone());
+            }
+            self.conns.push(c.clone());
+            grafted = true;
+        }
+        if grafted {
+            self.layers = live.layers.clone();
         }
     }
 
@@ -1800,6 +2136,8 @@ mod tests {
             random_inherited: Vec::new(),
             aliases: Vec::new(),
             seq: ROOM_SEQ_MISSING,
+            description: None,
+            description_turn: None,
         };
         let rooms = vec![mk(5), mk(2), mk(9)];
         let g = MapGraph::from_parts(rooms, Vec::new(), None, BTreeMap::new(), 1, BTreeMap::new(), 0);
@@ -1833,6 +2171,8 @@ mod tests {
             random_inherited: Vec::new(),
             aliases: Vec::new(),
             seq,
+            description: None,
+            description_turn: None,
         };
         // Array order (2, 1) deliberately disagrees with seq order (1, 0): if the backfill fired
         // here by mistake it would silently overwrite these with array positions instead.
@@ -2024,6 +2364,155 @@ mod struct_gen_tests {
         let gen = g.struct_gen();
         g.set_notes(1, "a loose brick".into()); // unchanged text
         assert_eq!(g.struct_gen(), gen, "an unchanged note must not bump");
+    }
+
+    /// SQ-1625 regression (2026-09-28): unlike `set_notes`, `set_description` must NEVER bump
+    /// `struct_gen` — it runs automatically on every captured turn, and a bump here fed a false
+    /// "structural change" into `map_changed`, giving an already-known room's re-captured
+    /// description its own spurious `map_snapshot`.
+    #[test]
+    fn set_description_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.set_description(1, Some("A drafty hall.".into()), 1);
+        assert_eq!(g.struct_gen(), gen, "setting a description must not bump struct_gen");
+        g.set_description(1, Some("A drafty hall, now lit.".into()), 2);
+        assert_eq!(g.struct_gen(), gen, "changing a description must not bump struct_gen either");
+    }
+
+    /// SQ-1627 regression, same shape as `set_description_never_bumps_struct_gen` above and for
+    /// the identical reason: `note_item_seen` runs automatically on every captured turn, so a
+    /// bump here would feed `post_turn_bookkeeping`'s `map_changed` check a false "structural
+    /// change" on a turn that merely re-confirmed an already-known item's location.
+    #[test]
+    fn note_item_seen_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.note_item_seen(10, "a lamp".into(), 1, true, None, 1);
+        assert_eq!(g.struct_gen(), gen, "a first sighting must not bump struct_gen");
+        g.note_item_seen(10, "a lamp".into(), 1, true, None, 2);
+        assert_eq!(g.struct_gen(), gen, "re-confirming the same sighting must not bump it either");
+        g.note_item_seen(10, "a lamp".into(), 2, false, None, 3);
+        assert_eq!(g.struct_gen(), gen, "moving to a different room, or going nested, must not bump it either");
+    }
+
+    /// SQ-1627 regression, same shape as `note_item_seen_never_bumps_struct_gen`.
+    #[test]
+    fn note_item_carried_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.note_item_carried(10, "a lamp".into(), 1, 1);
+        assert_eq!(g.struct_gen(), gen, "picking an item up must not bump struct_gen");
+    }
+
+    /// SQ-1627 regression, same shape as `note_item_seen_never_bumps_struct_gen`.
+    #[test]
+    fn note_items_absent_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.note_item_seen(10, "a lamp".into(), 1, true, None, 1);
+        let gen = g.struct_gen();
+        g.note_items_absent(1, 2, &std::collections::BTreeSet::new());
+        assert_eq!(g.struct_gen(), gen, "marking an item vanished must not bump struct_gen");
+        assert_eq!(g.item(10).unwrap().last_seen, ItemLocation::Vanished { room: 1, turn: 2 });
+    }
+
+    /// SQ-1627 regression, same shape as `note_item_seen_never_bumps_struct_gen`.
+    #[test]
+    fn note_item_fixed_in_place_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.note_item_seen(10, "a mailbox".into(), 1, true, None, 1);
+        let gen = g.struct_gen();
+        g.note_item_fixed_in_place(10);
+        assert_eq!(g.struct_gen(), gen, "flagging an item fixed-in-place must not bump struct_gen");
+        assert!(g.item(10).unwrap().fixed_in_place);
+    }
+
+    /// SQ-1627, Facet 1: origin is stamped once, on the first sighting, and never moves even as
+    /// the item is carried away and dropped somewhere else.
+    #[test]
+    fn item_origin_is_stamped_once_and_never_moves() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.note_item_seen(10, "a lamp".into(), 1, true, None, 1);
+        g.note_item_carried(10, "a lamp".into(), 1, 2);
+        g.note_item_seen(10, "a lamp".into(), 2, true, None, 3);
+
+        let rec = g.item(10).unwrap();
+        assert_eq!(rec.origin_room, 1, "origin stays the room it was FIRST seen in");
+        assert_eq!(rec.origin_turn, 1);
+        assert_eq!(
+            rec.last_seen,
+            ItemLocation::Room { room: 2, direct: true, container: None },
+            "current location moved to B"
+        );
+    }
+
+    /// SQ-1627, Facet 1 correction: an item sitting loose (direct) in a room that goes absent,
+    /// unobserved and uncarried, on a LATER visit to that same room is real news — Vanished fires.
+    #[test]
+    fn a_direct_item_absent_and_uncarried_on_a_later_visit_vanishes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Room".into());
+        g.note_item_seen(10, "a coin".into(), 1, true, None, 1);
+        // Turn 2: back in room 1, the direct listing no longer shows the coin, and it is not
+        // carried — `touched` (this turn's full observation set) is empty.
+        g.note_items_absent(1, 2, &std::collections::BTreeSet::new());
+        assert_eq!(g.item(10).unwrap().last_seen, ItemLocation::Vanished { room: 1, turn: 2 });
+        assert_eq!(g.item(10).unwrap().last_seen_turn, 2);
+    }
+
+    /// SQ-1627, Facet 1 correction (the whole point of the fix): an item last seen only NESTED
+    /// inside a container must NOT vanish when that container is closed and the recursive
+    /// visibility query can no longer reach it — the record is left exactly as it was.
+    #[test]
+    fn an_item_last_seen_only_nested_stays_put_when_its_container_closes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Room".into());
+        // The leaflet was seen only by recursing into the (open) mailbox — direct: false.
+        g.note_item_seen(10, "a leaflet".into(), 1, false, None, 1);
+        let before = g.item(10).unwrap().clone();
+        // The mailbox is now closed; this turn's recursive query cannot reach the leaflet at
+        // all, so it never appears in `touched`.
+        g.note_items_absent(1, 2, &std::collections::BTreeSet::new());
+        assert_eq!(g.item(10).unwrap(), &before, "a nested-only sighting is never vanish-eligible");
+        assert!(!matches!(g.item(10).unwrap().last_seen, ItemLocation::Vanished { .. }));
+    }
+
+    /// SQ-1627, Facet 1 correction: an item observed elsewhere this turn (touched) is never
+    /// vanished by a sweep of a DIFFERENT room, even if that other room's last_seen record still
+    /// says `direct: true` there from an earlier turn this call hasn't been told about.
+    #[test]
+    fn touched_items_are_never_swept_even_in_a_different_rooms_sweep() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.note_item_seen(10, "a coin".into(), 1, true, None, 1);
+        // The coin was actually carried away and dropped in B — the record now says Room(B) —
+        // sweeping A must not touch a record that no longer claims to be in A at all.
+        g.note_item_seen(10, "a coin".into(), 2, true, None, 2);
+        let mut touched = std::collections::BTreeSet::new();
+        touched.insert(10);
+        g.note_items_absent(1, 3, &touched);
+        assert_eq!(
+            g.item(10).unwrap().last_seen,
+            ItemLocation::Room { room: 2, direct: true, container: None },
+            "the record already says B, not A, so sweeping A must leave it alone"
+        );
+    }
+
+    /// SQ-1627, Facet 3: `note_item_fixed_in_place` is a no-op for a key the map has never seen,
+    /// mirroring `set_description`'s own "unknown id" no-op.
+    #[test]
+    fn note_item_fixed_in_place_is_a_noop_for_an_unknown_item() {
+        let mut g = MapGraph::new();
+        g.note_item_fixed_in_place(999);
+        assert!(g.item(999).is_none());
     }
 
     #[test]

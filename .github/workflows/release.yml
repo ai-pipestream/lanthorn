@@ -39,6 +39,10 @@ jobs:
             os: ubuntu-22.04                 # older glibc for broader compatibility
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm             # native ARM64 runner; older glibc, same reasoning as above
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
           - name: macos-universal2
             os: macos-latest                 # arm64 runner; also cross-builds x86_64
             target: universal-apple-darwin
@@ -297,6 +301,9 @@ jobs:
             printf '  **`libasound2`** at runtime for audio —\n'
             printf '  `sudo apt-get install libasound2` (Debian/Ubuntu) or your distro'"'"'s\n'
             printf '  equivalent.\n'
+            printf -- '- **Linux** (`aarch64`, glibc, built on Ubuntu 22.04) — Raspberry Pi\n'
+            printf '  OS (64-bit) and other 64-bit ARM Linux. Same runtime requirement as\n'
+            printf '  the x86_64 build above: **`libasound2`** for audio.\n'
             printf -- '- **macOS** is a universal binary (Apple Silicon + Intel), ad-hoc\n'
             printf '  signed but **not notarized** with an Apple Developer ID. If you\n'
             printf '  download it with a **browser**, Gatekeeper quarantines it — clear\n'

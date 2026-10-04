@@ -408,28 +408,124 @@ fn stem_matches_story(story_stem: &str, candidate_name: &str) -> bool {
     }
 }
 
-/// Rank hint candidate names by story-stem preference and return the chosen one.
+/// The story a hint is being resolved for, as one value (SQ-1690): its IFID,
+/// its title, and the folder IFDB-linked games keep documents in. They travel
+/// together because the documents folder is checked FIRST and a caller that
+/// supplied only the first two would silently skip it. For a disk image the
+/// IFID and title are the MOUNTED story's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HintStory<'a> {
+    /// The story's IFID (may be empty).
+    pub ifid: &'a str,
+    /// The story's title (may be empty).
+    pub title: &'a str,
+    /// The game's per-game documents folder (`<Title> [<TUID>]`), when the game
+    /// is linked to IFDB. It need not exist yet: a missing folder holds no hints.
+    pub documents: Option<&'a Path>,
+}
+
+impl<'a> HintStory<'a> {
+    /// A story with no documents folder (unlinked, or a host with no library).
+    pub fn new(ifid: &'a str, title: &'a str) -> Self {
+        HintStory { ifid, title, documents: None }
+    }
+
+    /// The same story with its documents folder.
+    pub fn with_documents(mut self, documents: Option<&'a Path>) -> Self {
+        self.documents = documents;
+        self
+    }
+}
+
+/// Whether a file called `name` whose first bytes are `head` is a hint PROGRAM:
+/// named like a hint sidecar ([`is_hint_sidecar`]) AND starting like a Z-machine
+/// story (a version byte in `1..=8` and at least a 64-byte header). The ONE rule
+/// shared by documents-folder resolution ([`is_hint_program`]) and the Documents
+/// tab's "hint program" row (`documents::sniff_kind_bytes`) (SQ-1690).
+pub fn is_hint_program_bytes(name: &str, head: &[u8]) -> bool {
+    is_hint_sidecar(name) && head.len() >= 64 && (1..=8).contains(&head[0])
+}
+
+/// [`is_hint_program_bytes`] for a file on disk: reads only its first 64 bytes.
+pub fn is_hint_program(path: &Path) -> bool {
+    use std::io::Read;
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    if !is_hint_sidecar(name) {
+        return false;
+    }
+    let mut head = Vec::with_capacity(64);
+    let Ok(f) = std::fs::File::open(path) else { return false };
+    f.take(64).read_to_end(&mut head).is_ok() && is_hint_program_bytes(name, &head)
+}
+
+/// The facts that say which story a hint sidecar belongs to, travelling
+/// together (SQ-1689). For a story mounted from a disk image the IFID and title
+/// are the MOUNTED story's: the file stem names the box, not the game.
+#[derive(Debug, Clone, Copy)]
+pub struct HintTarget<'a> {
+    /// The story file's stem.
+    pub stem: &'a str,
+    /// The story's title (may be empty).
+    pub title: &'a str,
+    /// The story's IFID (may be empty).
+    pub ifid: &'a str,
+}
+
+/// What [`match_hint_sidecar`] concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintPick {
+    /// The candidate at this index of the list that was passed in.
+    One(usize),
+    /// Several candidates tie at the best identity tier: do not guess.
+    Ambiguous,
+    /// Nothing is story-specific.
+    NoMatch,
+}
+
+/// THE matcher between a story and its hint sidecars, shared by the story list
+/// ([`crate::picker`]) and [`resolve_hint_source`] so they cannot drift (SQ-1689).
 ///
-/// Tiers:
-/// 1. any candidate the story owns — its stem starts with `story_stem`
-///    ([`stem_matches_story`]) or its curated/derived game key matches the story
-///    ([`hint_matches_story`]) → the first such after a stable name sort
-///    (deterministic regardless of readdir order);
-/// 2. else if exactly one candidate exists → that lone (generic) candidate;
-/// 3. else (multiple candidates, none story-specific) → `None` (ambiguous).
-///
-/// Returns `None` for an empty list too; callers distinguish empty from
-/// ambiguous by checking whether the input was empty.
-fn pick_hint_candidate(story_stem: &str, mut names: Vec<String>) -> Option<String> {
+/// Tiers, best first: identity ([`hint_matches_identity`] with the IFID), stem
+/// ([`stem_matches_story`] / [`hint_matches_story`] on the stem), title
+/// ([`hint_matches_story`] on the title). Identity is exact, so two identity
+/// matches are [`HintPick::Ambiguous`]; the looser stem/title tiers take the
+/// first match in the order `names` is given (callers pass a stable order).
+pub fn match_hint_sidecar<S: AsRef<str>>(target: HintTarget<'_>, names: &[S]) -> HintPick {
+    let ident: Vec<usize> = (0..names.len())
+        .filter(|&i| !target.ifid.is_empty() && hint_matches_identity(names[i].as_ref(), target.ifid))
+        .collect();
+    match ident.len() {
+        1 => return HintPick::One(ident[0]),
+        n if n > 1 => return HintPick::Ambiguous,
+        _ => {}
+    }
+    let by_stem = names.iter().position(|n| {
+        let n = n.as_ref();
+        stem_matches_story(target.stem, n) || hint_matches_story(n, target.stem)
+    });
+    if let Some(i) = by_stem {
+        return HintPick::One(i);
+    }
+    if !target.title.is_empty() {
+        if let Some(i) = names.iter().position(|n| hint_matches_story(n.as_ref(), target.title)) {
+            return HintPick::One(i);
+        }
+    }
+    HintPick::NoMatch
+}
+
+/// Rank hint candidate names with [`match_hint_sidecar`] and return the chosen
+/// one; else a lone (generic) candidate; else `None` (ambiguous or empty).
+/// Callers distinguish empty from ambiguous by checking the input.
+fn pick_hint_candidate(target: HintTarget<'_>, mut names: Vec<String>) -> Option<String> {
     if names.is_empty() {
         return None;
     }
     names.sort();
-    if let Some(m) = names
-        .iter()
-        .find(|n| stem_matches_story(story_stem, n) || hint_matches_story(n, story_stem))
-    {
-        return Some(m.clone());
+    match match_hint_sidecar(target, &names) {
+        HintPick::One(i) => return Some(names.swap_remove(i)),
+        HintPick::Ambiguous => return None,
+        HintPick::NoMatch => {}
     }
     if names.len() == 1 {
         return names.into_iter().next();
@@ -521,7 +617,11 @@ pub enum HintResolution {
         zip_path: PathBuf,
         entry: String,
     },
-    /// No hint file was found automatically — ask the user to choose one.
+    /// Several hint files tie and nothing says which is this game's: the player
+    /// picks one ([`crate::host::hints::HintAvailability::Choose`]), and the pick
+    /// is remembered per IFID with [`save_hint_assoc`] (SQ-1690).
+    Choose(Vec<PathBuf>),
+    /// No hint file was found automatically.
     AskUser,
     /// (Reserved for future use — e.g. when a `None` branch is needed.)
     None,
@@ -529,7 +629,15 @@ pub enum HintResolution {
 
 /// Resolve a hint source for the given story.
 ///
+/// `story` carries the story's own IFID and title (for a disk image, the MOUNTED
+/// story's) and its documents folder; every ranking is [`match_hint_sidecar`].
+///
 /// Discovery order:
+///
+/// 0. The game's documents folder ([`HintStory::documents`], SQ-1690): an
+///    [`is_hint_program`] there. The folder is the game's by TUID, so a lone
+///    hint program is accepted whatever it is called; several are ranked, and a
+///    remembered pick among them wins; ties become [`HintResolution::Choose`].
 /// 1. Remembered: the per-IFID association from `index`.
 /// 2. The story's OWN container: when `story_path` is itself a ZIP, a
 ///    hint-sidecar entry inside it (SQ-1085).
@@ -540,8 +648,15 @@ pub enum HintResolution {
 /// 4. Sibling ZIP: any `.zip` in the same directory that contains a hint-sidecar
 ///    entry; returns `ZipEntry` so the caller can extract the bytes with
 ///    `read_zip_entry`.
-/// 5. Else: `AskUser` (caller should open the file browser).
-pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> HintResolution {
+/// 5. Else: `AskUser`.
+pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> HintResolution {
+    let HintStory { ifid, title, documents: _ } = story;
+
+    // Step 0 (SQ-1690): the game's documents folder.
+    if let Some(found) = resolve_in_story_documents(story_path, story, index) {
+        return found;
+    }
+
     // Step 1: remembered association.
     if let Some(remembered) = index.get(ifid) {
         if remembered.exists() {
@@ -560,7 +675,7 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if let Ok(Some(entry)) = find_hint_entry_in_zip(story_path, &stem) {
+        if let Ok(Some(entry)) = find_hint_entry_in_zip(story_path, HintTarget { stem: &stem, title, ifid }) {
             return HintResolution::ZipEntry { zip_path: story_path.to_path_buf(), entry };
         }
     }
@@ -605,22 +720,34 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
                     .iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
                     .collect();
-                if let Some(chosen) = pick_hint_candidate(&story_stem, names) {
+                let target = HintTarget { stem: &story_stem, title, ifid };
+                let tied = identity_ties(target, &names);
+                if let Some(chosen) = pick_hint_candidate(target, names) {
                     for path in &hint_files {
                         if path.file_name().and_then(|n| n.to_str()) == Some(chosen.as_str()) {
                             return HintResolution::File(path.clone());
                         }
                     }
                 }
-                // Ambiguous (multiple, none story-specific): don't fall through
-                // to the ZIP guess.
+                // Ambiguous: don't fall through to the ZIP guess. Several files
+                // that all CLAIM this story's identity are a real choice; a
+                // pile of unrelated generics beside it is not, and is not offered.
+                if tied.len() > 1 {
+                    let mut tied_paths: Vec<PathBuf> = hint_files
+                        .iter()
+                        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| tied.iter().any(|t| t == n)))
+                        .cloned()
+                        .collect();
+                    tied_paths.sort();
+                    return HintResolution::Choose(tied_paths);
+                }
                 return HintResolution::AskUser;
             }
 
             // Step 4: look inside sibling ZIPs for a hint entry, story-aware.
             zips.sort();
             for zip_path in zips {
-                if let Ok(Some(entry_name)) = find_hint_entry_in_zip(&zip_path, &story_stem) {
+                if let Ok(Some(entry_name)) = find_hint_entry_in_zip(&zip_path, HintTarget { stem: &story_stem, title, ifid }) {
                     return HintResolution::ZipEntry { zip_path, entry: entry_name };
                 }
             }
@@ -630,13 +757,60 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
     HintResolution::AskUser
 }
 
+/// The names in `names` that [`hint_matches_identity`] ties to `target.ifid`.
+fn identity_ties(target: HintTarget<'_>, names: &[String]) -> Vec<String> {
+    if target.ifid.is_empty() {
+        return Vec::new();
+    }
+    names.iter().filter(|n| hint_matches_identity(n, target.ifid)).cloned().collect()
+}
+
+/// Step 0 of [`resolve_hint_source`] for a whole story: the hint program(s) in its
+/// documents folder, `None` when it has no folder or the folder holds none. The
+/// TUID in the folder's name proves the game across releases and disk images, so
+/// no name/IFID guessing applies. Public so the story browser's hint status asks
+/// the very same question the Hints tab does.
+pub fn resolve_in_story_documents(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> Option<HintResolution> {
+    let dir = story.documents?;
+    let stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    resolve_in_documents(dir, HintTarget { stem: &stem, title: story.title, ifid: story.ifid }, index)
+}
+
+/// Step 0 of [`resolve_hint_source`]: the hint programs in the game's documents
+/// folder, or `None` when the folder holds none (the caller falls back to the
+/// old rules). Only the folder's own top-level files count.
+fn resolve_in_documents(dir: &Path, target: HintTarget<'_>, index: &HintIndex) -> Option<HintResolution> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_hint_program(p))
+        .collect();
+    files.sort();
+    match files.len() {
+        0 => return None,
+        1 => return Some(HintResolution::File(files.swap_remove(0))),
+        _ => {}
+    }
+    if let Some(remembered) = index.get(target.ifid) {
+        if files.contains(&remembered) {
+            return Some(HintResolution::File(remembered));
+        }
+    }
+    let names: Vec<String> = files.iter().filter_map(|p| p.file_name()?.to_str().map(String::from)).collect();
+    Some(match match_hint_sidecar(target, &names) {
+        HintPick::One(i) => HintResolution::File(files.swap_remove(i)),
+        HintPick::Ambiguous | HintPick::NoMatch => HintResolution::Choose(files),
+    })
+}
+
 /// Return the best-ranked hint-sidecar entry in `zip_path`, preferring an entry
 /// the story owns (stem prefix or game-key match).
 ///
 /// Applies the same tiers as [`pick_hint_candidate`]: a story-stem match wins;
 /// a lone generic entry is used; multiple generics with no story match are
 /// ambiguous and yield `None`.
-fn find_hint_entry_in_zip(zip_path: &Path, story_stem: &str) -> io::Result<Option<String>> {
+fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>) -> io::Result<Option<String>> {
     let file = std::fs::File::open(zip_path)?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -655,7 +829,7 @@ fn find_hint_entry_in_zip(zip_path: &Path, story_stem: &str) -> io::Result<Optio
     // Rank by the bare filename, but return the full entry path.
     let basename_of = |n: &str| n.rsplit('/').next().unwrap_or(n).to_string();
     let basenames: Vec<String> = matches.iter().map(|n| basename_of(n)).collect();
-    match pick_hint_candidate(story_stem, basenames) {
+    match pick_hint_candidate(target, basenames) {
         Some(chosen) => Ok(matches.into_iter().find(|n| basename_of(n) == chosen)),
         None => Ok(None),
     }
@@ -730,9 +904,46 @@ pub use blorb::medium::DiskImage;
 pub fn mounted_stories(
     path: &Path,
 ) -> Option<(DiskImage, Vec<(blorb::medium::DiskStory, DiskImage)>)> {
-    let raw = std::fs::read(path).ok()?;
-    blorb::medium::DiskImage::detect(&raw)?;
-    let disk = mount_disk(path, raw).ok()?;
+    match scan_mounted_stories(path) {
+        DiskScan::Stories(found) => Some((found.format, found.stories)),
+        DiskScan::NotADisk | DiskScan::NoStory => None,
+    }
+}
+
+/// What [`scan_mounted_stories`] found at a path.
+pub enum DiskScan {
+    /// Not a disk image, or one that would not read or mount. Says nothing
+    /// about whether a story is there, so nothing is remembered about it.
+    NotADisk,
+    /// A disk image that mounted fine and holds no story of any engine — the one
+    /// outcome [`crate::miss_cache`] remembers.
+    NoStory,
+    /// A disk image with at least one story.
+    Stories(DiskStories),
+}
+
+/// The stories of one mounted disk image: the value [`scan_mounted_stories`]
+/// carries so a caller never mounts (and never depacks) the same file twice.
+pub struct DiskStories {
+    /// The volume's format.
+    pub format: DiskImage,
+    /// Each story with its own medium, as [`mounted_stories`] documents.
+    pub stories: Vec<(blorb::medium::DiskStory, DiskImage)>,
+    /// How many of `stories`, from the front, `MountedDisk::stories` itself
+    /// listed; the rest are Scott programs found by [`scott_disk_stories`].
+    /// Zero with one story means that one story is a Scott program, which the
+    /// plain launch path would find through the very same scan.
+    pub listed: usize,
+}
+
+/// [`mounted_stories`], keeping the difference between "not a disk" and "a disk
+/// with nothing playable on it" (see [`DiskScan`]).
+pub fn scan_mounted_stories(path: &Path) -> DiskScan {
+    let Ok(raw) = std::fs::read(path) else { return DiskScan::NotADisk };
+    if blorb::medium::DiskImage::detect(&raw).is_none() {
+        return DiskScan::NotADisk;
+    }
+    let Ok(disk) = mount_disk(path, raw) else { return DiskScan::NotADisk };
     let format = disk.format();
     let mut stories: Vec<_> = disk
         .stories()
@@ -742,6 +953,7 @@ pub fn mounted_stories(
             (s, image)
         })
         .collect();
+    let listed = stories.len();
     // Scott Adams programs — the Commodore 64 *Mysterious Adventures*
     // compilation disks (SQ-1414) — that `MountedDisk::stories` does not cover:
     // that door stays Z-code/Glulx/Blorb-only by design (`blorb::medium`'s own
@@ -751,7 +963,11 @@ pub fn mounted_stories(
         let image = disk.image_for(&story.name);
         stories.push((story, image));
     }
-    (!stories.is_empty()).then_some((format, stories))
+    if stories.is_empty() {
+        DiskScan::NoStory
+    } else {
+        DiskScan::Stories(DiskStories { format, stories, listed })
+    }
 }
 
 /// Names a Commodore/CBM DOS directory lists that are never a game, even when
@@ -785,6 +1001,21 @@ const NON_GAME_DISK_NAMES: [&str; 2] = ["BOOT", "DOS.SYS"];
 /// their databases ARE ordinary catalogue files (`A4.DAT`, `DATABASE`,
 /// `SHULK.DB`) that `contents()` already lists.
 fn scott_disk_stories(disk: &blorb::medium::MountedDisk) -> Vec<blorb::medium::DiskStory> {
+    scott_disk_scan(disk).stories
+}
+
+/// What [`scott_disk_scan`] found: the playable Scott programs, and — only when
+/// there are none and the disk's program was crunched — the one that could not
+/// be turned into one, for [`read_story_file`]'s honest refusal (SQ-1488).
+struct ScottScan {
+    stories: Vec<blorb::medium::DiskStory>,
+    crunched: Option<CrunchedProgram>,
+}
+
+/// [`scott_disk_stories`] and the crunched-program diagnosis from ONE pass over
+/// the candidates, so the 6502 emulation runs once per candidate: it used to run
+/// here and again in a separate diagnosis walk (SQ-1691).
+fn scott_disk_scan(disk: &blorb::medium::MountedDisk) -> ScottScan {
     let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
     let mut candidates: Vec<(String, Vec<u8>)> = disk.contents();
     if disk.format() == blorb::medium::DiskImage::AtariDos2 {
@@ -814,28 +1045,56 @@ fn scott_disk_stories(disk: &blorb::medium::MountedDisk) -> Vec<blorb::medium::D
     // working, uncrunched game AND a second, crunched one — has not been
     // seen; every crunched disk in `stories/scott-dialects/c64/` holds
     // exactly the one program the quest's own title describes.
-    let depacked: Vec<(String, Vec<u8>)> =
-        if cheap.is_empty() && disk.format() == blorb::medium::DiskImage::CommodoreD64 {
-            candidates
-                .into_iter()
-                .filter_map(|(name, bytes)| {
-                    let depacked = blorb::depack::depack_c64_prg(&bytes).ok()?;
-                    let prg = depacked_prg_bytes(&depacked);
-                    resolves_to_scott(&prg).then_some((name, prg))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let mut depacked: Vec<(String, Vec<u8>)> = Vec::new();
+    // The first candidate that did not turn into a game, as the refusal names it.
+    // A candidate that never looked like a `$0801` BASIC-stub program at all
+    // ([`blorb::depack::DepackError::NoEntryPoint`]) is not evidence of a
+    // crunched program, just an ordinary file that is neither Scott nor packed.
+    let mut crunched: Option<CrunchedProgram> = None;
+    if cheap.is_empty() && disk.format() == blorb::medium::DiskImage::CommodoreD64 {
+        for (name, bytes) in candidates {
+            match depack_counted(&bytes) {
+                Err(blorb::depack::DepackError::NoEntryPoint) => {}
+                Err(_) => {
+                    crunched.get_or_insert(CrunchedProgram::NotUnpacked(name));
+                }
+                Ok(d) => {
+                    let prg = depacked_prg_bytes(&d);
+                    if resolves_to_scott(&prg) {
+                        depacked.push((name, prg));
+                    } else {
+                        crunched.get_or_insert(CrunchedProgram::Unrecognised(name));
+                    }
+                }
+            }
+        }
+    }
 
-    cheap
+    let stories = cheap
         .into_iter()
         .chain(depacked)
         .map(|(name, bytes)| {
             let name = saga_us_keyed_name(&name, &bytes);
             blorb::medium::DiskStory { name, bytes }
         })
-        .collect()
+        .collect();
+    ScottScan { stories, crunched }
+}
+
+/// [`blorb::depack::depack_c64_prg`], counted per thread so a test can assert
+/// how many times one resolve emulates (SQ-1691).
+fn depack_counted(
+    prg: &[u8],
+) -> Result<blorb::depack::DepackedProgram, blorb::depack::DepackError> {
+    #[cfg(test)]
+    DEPACK_CALLS.with(|c| c.set(c.get() + 1));
+    blorb::depack::depack_c64_prg(prg)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Calls to [`depack_counted`] on this thread.
+    pub(crate) static DEPACK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `bytes` are a Scott Adams database this crate's own loader agrees
@@ -891,38 +1150,6 @@ impl CrunchedProgram {
             Self::NotUnpacked(name) | Self::Unrecognised(name) => name,
         }
     }
-}
-
-/// The Commodore disk's one crunched program, when [`scott_disk_stories`]
-/// could not turn it into a playable game — SQ-1488's honest refusal in
-/// place of the generic "no story file" message below.
-///
-/// Only asked when `scott_disk_stories` found nothing at all: a candidate
-/// that already resolved is never reported as failed, and this only runs on
-/// a Commodore disk (`blorb::depack::depack_c64_prg` reads a CBM `PRG`'s own
-/// load-address header, which is specifically what a D64 directory keeps).
-/// A candidate that never looked like a `$0801` BASIC-stub program at all —
-/// [`blorb::depack::DepackError::NoEntryPoint`] — is not reported: that is
-/// not evidence of a crunched program, just an ordinary file that is neither
-/// Scott Adams nor packed.
-fn crunched_program_name(disk: &blorb::medium::MountedDisk) -> Option<CrunchedProgram> {
-    if disk.format() != blorb::medium::DiskImage::CommodoreD64 {
-        return None;
-    }
-    let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
-    disk.contents()
-        .into_iter()
-        .filter(|(name, _)| !already.iter().any(|n| n.eq_ignore_ascii_case(name)))
-        .filter(|(name, _)| !NON_GAME_DISK_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)))
-        .filter(|(_, bytes)| !resolves_to_scott(bytes))
-        .find_map(|(name, bytes)| match blorb::depack::depack_c64_prg(&bytes) {
-            Err(blorb::depack::DepackError::NoEntryPoint) => None,
-            Err(_) => Some(CrunchedProgram::NotUnpacked(name)),
-            Ok(depacked) if !resolves_to_scott(&depacked_prg_bytes(&depacked)) => {
-                Some(CrunchedProgram::Unrecognised(name))
-            }
-            Ok(_) => None, // resolves — `scott_disk_stories` would have found it too
-        })
 }
 
 /// A save-key-safe name for a Scott candidate found on a disk (SQ-1470).
@@ -1067,7 +1294,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         // tiebreak"), and has to reach that one candidate the same way
         // `scott-cli` does without `--story`. Ambiguous (zero, or more than
         // one) falls through to the refusal below, exactly as before.
-        let mut scott = scott_disk_stories(&disk);
+        let ScottScan { stories: mut scott, crunched } = scott_disk_scan(&disk);
         if scott.len() == 1 {
             let story = scott.remove(0);
             let image = disk.image_for(&story.name);
@@ -1079,7 +1306,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         // the only thing a disk like the Hulk collection's could ever say
         // (every file scanned, none of them a Scott table in the clear).
         if scott.is_empty() {
-            if let Some(crunched) = crunched_program_name(&disk) {
+            if let Some(crunched) = crunched {
                 let name = crunched.name();
                 let reason = match crunched {
                     CrunchedProgram::NotUnpacked(_) => "lanthorn could not unpack it",
@@ -2566,7 +2793,7 @@ mod tests {
             &zip_path,
             &[("deadline.z3", sample_zcode(3)), ("deadlineinv.z5", sample_zcode(5))],
         );
-        let got = resolve_hint_source(&zip_path, "ZCODE-NOTHING", &load_hint_index(&base));
+        let got = resolve_hint_source(&zip_path, HintStory::new("ZCODE-NOTHING", ""), &load_hint_index(&base));
         assert_eq!(
             got,
             HintResolution::ZipEntry {
@@ -2893,7 +3120,7 @@ mod tests {
         let empty_index = HintIndex { map: HashMap::new() };
 
         // With sibling hints file present: should return File(hints).
-        let result = resolve_hint_source(&story, "ZCODE-TEST", &empty_index);
+        let result = resolve_hint_source(&story, HintStory::new("ZCODE-TEST", ""), &empty_index);
         assert_eq!(result, HintResolution::File(hints));
 
         // Without any hint sibling: should return AskUser.
@@ -2901,7 +3128,7 @@ mod tests {
         let story2 = no_hints_dir.join("story.z5");
         std::fs::write(&story2, b"fake story").unwrap();
 
-        let result2 = resolve_hint_source(&story2, "ZCODE-TEST", &empty_index);
+        let result2 = resolve_hint_source(&story2, HintStory::new("ZCODE-TEST", ""), &empty_index);
         assert_eq!(result2, HintResolution::AskUser);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2918,6 +3145,78 @@ mod tests {
     }
 
     #[test]
+    fn sq1689_identity_beats_stem_and_ties_ask_the_user() {
+        let target = |stem: &'static str, ifid: &'static str| HintTarget { stem, title: "", ifid };
+        // Disk-image stem names no game: identity picks zork1izm among many.
+        let names = ["bzorkizm.z5", "zork1izm.z5", "zork3inv.z5"];
+        assert_eq!(
+            match_hint_sidecar(target("zork i - the great underground empire", "ZCODE-88-840726-A129"), &names),
+            HintPick::One(1)
+        );
+        // Identity beats a stem match that points elsewhere.
+        let names = ["zork2inv.z5", "zork1izm.z5"];
+        assert_eq!(match_hint_sidecar(target("zork2", "ZCODE-88-840726-A129"), &names), HintPick::One(1));
+        // Two identity matches: genuinely ambiguous.
+        let names = ["zork1izm.z5", "zork1inv.z5"];
+        assert_eq!(match_hint_sidecar(target("box", "ZCODE-88-840726-A129"), &names), HintPick::Ambiguous);
+        // Title tier last.
+        let names = ["zork3inv.z5"];
+        let t = HintTarget { stem: "box", title: "zork3 the dungeon master", ifid: "" };
+        assert_eq!(match_hint_sidecar(t, &names), HintPick::One(0));
+        assert_eq!(match_hint_sidecar(target("box", ""), &names), HintPick::NoMatch);
+    }
+
+    #[test]
+    fn sq1689_resolve_uses_identity_and_still_picks_by_stem() {
+        let empty = HintIndex { map: HashMap::new() };
+        // Disk-image-like story name; several hint files; identity decides.
+        let dir = scratch_dir("sq1689-id", &["box.adf", "zork1izm.z5", "bzorkizm.z5", "zork3inv.z5"]);
+        let r = resolve_hint_source(&dir.join("box.adf"), HintStory::new("ZCODE-88-840726-A129", ""), &empty);
+        assert_eq!(r, HintResolution::File(dir.join("zork1izm.z5")));
+        // Without identity, ambiguous.
+        let r = resolve_hint_source(&dir.join("box.adf"), HintStory::new("", ""), &empty);
+        assert_eq!(r, HintResolution::AskUser);
+        // Two identity matches: ask (SQ-1690: the tied pair is the choice offered).
+        let dir2 = scratch_dir("sq1689-tie", &["box.adf", "zork1izm.z5", "zork1inv.z5"]);
+        let r = resolve_hint_source(&dir2.join("box.adf"), HintStory::new("ZCODE-88-840726-A129", ""), &empty);
+        assert_eq!(r, HintResolution::Choose(vec![dir2.join("zork1inv.z5"), dir2.join("zork1izm.z5")]));
+        // Stem story among two Zork hint files still picks by stem.
+        let dir3 = scratch_dir("sq1689-stem", &["zork1.z5", "zork1izm.z5", "zork3inv.z5"]);
+        let r = resolve_hint_source(&dir3.join("zork1.z5"), HintStory::new("IFID", ""), &empty);
+        assert_eq!(r, HintResolution::File(dir3.join("zork1izm.z5")));
+    }
+
+    #[test]
+    fn sq1689_picker_and_resolver_agree_on_a_table() {
+        let empty = HintIndex { map: HashMap::new() };
+        let all = ["bzorkizm.z5", "zork1izm.z5", "zork3inv.z5"];
+        let cases: [(&str, &str, &str, Option<&str>); 4] = [
+            ("box.adf", "ZCODE-88-840726-A129", "", Some("zork1izm.z5")),
+            ("zork3.z3", "IFID", "", Some("zork3inv.z5")),
+            ("box.adf", "IFID", "Beyond Zork", Some("bzorkizm.z5")),
+            ("box.adf", "IFID", "", None),
+        ];
+        for (story, ifid, title, want) in cases {
+            let mut files = vec![story];
+            files.extend(all);
+            let dir = scratch_dir("sq1689-agree", &files);
+            let stem = Path::new(story).file_stem().unwrap().to_str().unwrap();
+            let pick = match_hint_sidecar(HintTarget { stem, title, ifid }, &all);
+            let resolved = resolve_hint_source(&dir.join(story), HintStory::new(ifid, title), &empty);
+            match want {
+                Some(w) => {
+                    assert_eq!(pick, HintPick::One(all.iter().position(|n| *n == w).unwrap()));
+                    assert_eq!(resolved, HintResolution::File(dir.join(w)));
+                }
+                None => {
+                    assert_eq!(pick, HintPick::NoMatch);
+                    assert_eq!(resolved, HintResolution::AskUser);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn resolve_is_story_aware_in_multi_story_dir() {
         let dir = scratch_dir(
             "resolve-multistory",
@@ -2925,10 +3224,10 @@ mod tests {
         );
         let empty = HintIndex { map: HashMap::new() };
 
-        let r1 = resolve_hint_source(&dir.join("zork1.z5"), "IFID-1", &empty);
+        let r1 = resolve_hint_source(&dir.join("zork1.z5"), HintStory::new("IFID-1", ""), &empty);
         assert_eq!(r1, HintResolution::File(dir.join("zork1_hints.z5")));
 
-        let r2 = resolve_hint_source(&dir.join("zork2.z5"), "IFID-2", &empty);
+        let r2 = resolve_hint_source(&dir.join("zork2.z5"), HintStory::new("IFID-2", ""), &empty);
         assert_eq!(r2, HintResolution::File(dir.join("zork2-invisiclues.z5")));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2939,7 +3238,7 @@ mod tests {
         let dir = scratch_dir("resolve-lonegeneric", &["story.z5", "invisiclues.z5"]);
         let empty = HintIndex { map: HashMap::new() };
 
-        let r = resolve_hint_source(&dir.join("story.z5"), "IFID", &empty);
+        let r = resolve_hint_source(&dir.join("story.z5"), HintStory::new("IFID", ""), &empty);
         assert_eq!(r, HintResolution::File(dir.join("invisiclues.z5")));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2950,7 +3249,7 @@ mod tests {
         let dir = scratch_dir("resolve-ambiguous", &["story.z5", "hintsA.z5", "hintsB.z5"]);
         let empty = HintIndex { map: HashMap::new() };
 
-        let r = resolve_hint_source(&dir.join("story.z5"), "IFID", &empty);
+        let r = resolve_hint_source(&dir.join("story.z5"), HintStory::new("IFID", ""), &empty);
         assert_eq!(r, HintResolution::AskUser);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2964,7 +3263,7 @@ mod tests {
         );
         let empty = HintIndex { map: HashMap::new() };
 
-        let r = resolve_hint_source(&dir.join("zork1.z5"), "IFID", &empty);
+        let r = resolve_hint_source(&dir.join("zork1.z5"), HintStory::new("IFID", ""), &empty);
         assert_eq!(r, HintResolution::File(dir.join("zork1_hints.z5")));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2980,7 +3279,7 @@ mod tests {
 
         let expected = HintResolution::File(dir.join("zork1_hints.z5"));
         for _ in 0..8 {
-            let r = resolve_hint_source(&dir.join("zork1.z5"), "IFID-1", &empty);
+            let r = resolve_hint_source(&dir.join("zork1.z5"), HintStory::new("IFID-1", ""), &empty);
             assert_eq!(r, expected);
         }
 
@@ -2996,7 +3295,7 @@ mod tests {
         );
         let empty = HintIndex { map: HashMap::new() };
 
-        let r = resolve_hint_source(&dir.join("deadline-r27-s851006.z3"), "IFID", &empty);
+        let r = resolve_hint_source(&dir.join("deadline-r27-s851006.z3"), HintStory::new("IFID", ""), &empty);
         assert_eq!(r, HintResolution::File(dir.join("deadlineinv.z5")));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3012,7 +3311,7 @@ mod tests {
         );
         let empty = HintIndex { map: HashMap::new() };
 
-        let r = resolve_hint_source(&dir.join("story.z5"), "IFID", &empty);
+        let r = resolve_hint_source(&dir.join("story.z5"), HintStory::new("IFID", ""), &empty);
         assert_eq!(r, HintResolution::AskUser);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3037,5 +3336,104 @@ mod tests {
         assert!(stem_matches_story("zork", "zork-invisiclues.z5"));
         // An empty story stem never matches (pathological path).
         assert!(!stem_matches_story("", "invisiclues.z5"));
+    }
+
+    // ── SQ-1690: the documents folder is searched first ──────────────────────
+
+    /// A 64-byte Z-code header: enough for [`is_hint_program`].
+    fn zcode() -> Vec<u8> {
+        let mut b = vec![0u8; 64];
+        b[0] = 5;
+        b
+    }
+
+    fn docs_dir(tag: &str, files: &[&str]) -> PathBuf {
+        let dir = crate::scratch_dir(tag);
+        for f in files {
+            std::fs::write(dir.join(f), zcode()).unwrap();
+        }
+        dir
+    }
+
+    fn empty_index() -> HintIndex {
+        HintIndex { map: HashMap::new() }
+    }
+
+    #[test]
+    fn sq1690_hint_program_needs_the_name_and_the_zcode_header() {
+        let dir = crate::scratch_dir("sq1690-prog");
+        let named = dir.join("zork1inv.z5");
+        std::fs::write(&named, zcode()).unwrap();
+        assert!(is_hint_program(&named));
+        let text = dir.join("walkthrough.z5");
+        std::fs::write(&text, zcode()).unwrap();
+        assert!(!is_hint_program(&text), "the name must read as a hint file");
+        let junk = dir.join("zork2inv.z5");
+        std::fs::write(&junk, b"<html>not a story at all, but long enough to have a header, honestly....</html>").unwrap();
+        assert!(!is_hint_program(&junk), "and the bytes must start like a story");
+        assert!(!is_hint_program(&dir.join("absent-inv.z5")));
+    }
+
+    #[test]
+    fn sq1690_documents_folder_wins_over_a_sibling_sidecar() {
+        let lib = crate::scratch_dir("sq1690-first");
+        std::fs::write(lib.join("zork1.z3"), b"story").unwrap();
+        std::fs::write(lib.join("zork1inv.z5"), zcode()).unwrap(); // the old home
+        let docs = docs_dir("sq1690-first-docs", &["hints-from-ifdb-inv.z5"]);
+        let r = resolve_hint_source(
+            &lib.join("zork1.z3"),
+            HintStory::new("IFID", "Zork").with_documents(Some(&docs)),
+            &empty_index(),
+        );
+        assert_eq!(r, HintResolution::File(docs.join("hints-from-ifdb-inv.z5")), "a lone hint program, whatever its name");
+        // Without the folder the old rules are untouched.
+        let r = resolve_hint_source(&lib.join("zork1.z3"), HintStory::new("IFID", "Zork"), &empty_index());
+        assert_eq!(r, HintResolution::File(lib.join("zork1inv.z5")));
+    }
+
+    #[test]
+    fn sq1690_an_empty_or_missing_documents_folder_falls_back() {
+        let lib = crate::scratch_dir("sq1690-fallback");
+        std::fs::write(lib.join("zork1.z3"), b"story").unwrap();
+        std::fs::write(lib.join("zork1inv.z5"), zcode()).unwrap();
+        let empty = crate::scratch_dir("sq1690-fallback-empty");
+        std::fs::write(empty.join("manual.pdf"), b"%PDF").unwrap();
+        for docs in [empty.clone(), empty.join("never-created")] {
+            let r = resolve_hint_source(
+                &lib.join("zork1.z3"),
+                HintStory::new("IFID", "Zork").with_documents(Some(&docs)),
+                &empty_index(),
+            );
+            assert_eq!(r, HintResolution::File(lib.join("zork1inv.z5")));
+        }
+    }
+
+    #[test]
+    fn sq1690_several_hint_programs_are_ranked_then_offered() {
+        let lib = crate::scratch_dir("sq1690-several");
+        let story = lib.join("zork1.z3");
+        // Two with nothing to rank by: a choice, in sorted order.
+        let docs = docs_dir("sq1690-several-docs", &["bbb-inv.z5", "aaa-inv.z5"]);
+        let r = resolve_hint_source(&story, HintStory::new("IFID", "Zork").with_documents(Some(&docs)), &empty_index());
+        assert_eq!(r, HintResolution::Choose(vec![docs.join("aaa-inv.z5"), docs.join("bbb-inv.z5")]));
+        // A remembered pick among them wins.
+        let mut index = empty_index();
+        index.map.insert("IFID".into(), docs.join("bbb-inv.z5"));
+        let r = resolve_hint_source(&story, HintStory::new("IFID", "Zork").with_documents(Some(&docs)), &index);
+        assert_eq!(r, HintResolution::File(docs.join("bbb-inv.z5")));
+        // The shared matcher ranks: the stem names one of them.
+        let docs2 = docs_dir("sq1690-several-docs2", &["zork1inv.z5", "other-inv.z5"]);
+        let r = resolve_hint_source(&story, HintStory::new("IFID", "Zork").with_documents(Some(&docs2)), &empty_index());
+        assert_eq!(r, HintResolution::File(docs2.join("zork1inv.z5")));
+    }
+
+    #[test]
+    fn sq1690_identity_ties_beside_the_story_become_a_choice_and_strangers_do_not() {
+        let tie = scratch_dir("sq1690-tie", &["box.adf", "zork1izm.z5", "zork1inv.z5", "zork3inv.z5"]);
+        let r = resolve_hint_source(&tie.join("box.adf"), HintStory::new("ZCODE-88-840726-A129", ""), &empty_index());
+        assert_eq!(r, HintResolution::Choose(vec![tie.join("zork1inv.z5"), tie.join("zork1izm.z5")]), "only the tied pair");
+        let strangers = scratch_dir("sq1690-strangers", &["box.adf", "zork1inv.z5", "zork3inv.z5"]);
+        let r = resolve_hint_source(&strangers.join("box.adf"), HintStory::new("", ""), &empty_index());
+        assert_eq!(r, HintResolution::AskUser, "unrelated generics are not offered");
     }
 }

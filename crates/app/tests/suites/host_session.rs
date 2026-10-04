@@ -37,9 +37,10 @@ fn boot(story: PathBuf, home: &Path) -> BootedStory {
         disk_entry: None,
         overrides: &overrides,
         cfg: headless_config(home),
-        data_base: home.join("saves"),
+        roots: app::data_roots::DataRoots::single(home.join("saves")),
         flags: LaunchFlags::default(),
         terminal: TerminalFacts::default(),
+        fresh_start: false,
     };
     boot_story(req, &mut QuietBoot).expect("the story boots headlessly")
 }
@@ -427,6 +428,53 @@ fn resolve_zcolour_is_callable_from_outside_render() {
     );
 }
 
+// ── `packed_to_rgba` (SQ-1609) ──────────────────────────────────────────────
+
+/// `render::v6_layout::packed_to_rgba` used to be `pub(crate)`, unreachable from
+/// a host resolving a packed z-colour off [`app::render::screen::V6FrameInputs::host_pair`]
+/// (or any other packed value it holds) to a concrete pixel colour — it had to
+/// reimplement this function's own body from the public primitives
+/// (`app::colors::standard_colour_rgb`, `app::render::resolve_zcolour`). It is
+/// `pub` now — callable straight from here, exactly as a host would, with no
+/// need to restate the packed-colour-to-RGBA mapping.
+#[test]
+fn packed_to_rgba_is_callable_from_outside_render() {
+    use app::colors::ColorScheme;
+    use app::render::v6_layout::packed_to_rgba;
+    use app::state::pack_zcolour;
+    use image::Rgba;
+    use zvm::screen::ZColour;
+
+    let scheme = ColorScheme::terminal_default();
+    let fallback = Rgba([1, 2, 3, 255]);
+
+    // True24: direct RGB, no theme involved.
+    let true24_packed = pack_zcolour(ZColour::True24(0x102030));
+    assert_eq!(
+        packed_to_rgba(true24_packed, fallback, &scheme),
+        Rgba([0x10, 0x20, 0x30, 255]),
+        "a 24-bit true colour resolves to its exact RGB"
+    );
+
+    // Standard(4): resolves through the ZMSD §8.3.1 fixed pixel RGB, the same
+    // table the internal pixel path (`standard_pixel_rgb`) reads.
+    let standard_packed = pack_zcolour(ZColour::Standard(4));
+    let (r, g, b) =
+        app::colors::standard_colour_rgb(scheme.machine_palette, 4).expect("Standard(4) has a §8.3.1 RGB");
+    assert_eq!(
+        packed_to_rgba(standard_packed, fallback, &scheme),
+        Rgba([r, g, b, 255]),
+        "a Standard colour resolves through the fixed §8.3.1 pixel RGB"
+    );
+
+    // Default (0) → fallback, unconditionally.
+    assert_eq!(
+        packed_to_rgba(0, fallback, &scheme),
+        fallback,
+        "packed 0 (Default) always answers the caller's fallback"
+    );
+}
+
 // ── Opening-banner pager after reset (SQ-1575) ─────────────────────────────
 
 /// Render one frame of the story pane and resolve any pending pager arm against
@@ -439,7 +487,7 @@ fn settle_pager(b: &mut BootedStory, w: u16, h: u16) {
     let mut buf = Buffer::empty(area);
     let char_mode = b.session.pending_input() == InputKind::Char;
     let m = app::render::screen::render_story_pane(&b.session.screen(), char_mode, None, &b.state, area, &mut buf);
-    app::pager::apply_frame(&mut b.state, m.max_scroll, m.viewport_rows, m.prompt_rows, m.total_rows, m.transcript_surface);
+    app::pager::apply_frame(&mut b.state, m.max_scroll, m.viewport_rows, m.prompt_rows, m.total_rows, m.transcript_surface, m.top_anchored_fits);
 }
 
 /// A restarted game's banner must pause at `[more]` exactly where a fresh boot
@@ -534,6 +582,354 @@ fn reset_game_does_not_pause_when_the_new_banner_fits() {
 
     assert!(!b.state.pager.active, "the fresh banner fits the pane — no pager after reset, same as a fresh boot");
     assert_eq!(b.state.transcript_scroll, 0, "and the view stays at the bottom, on the prompt");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ── `resume_from_turn` (SQ-1619) ────────────────────────────────────────────
+
+/// `host::persist::resume_from_turn` is the library core `Action::ReplayResume`
+/// now calls: restore the engine to a recorded turn's snapshot, rewind the
+/// transcript/map/history to match it, and re-observe (and recenter on) the
+/// resumed room. Exercised directly here, the way a non-terminal host would —
+/// not only through the TUI's key handler.
+///
+/// Driven against minizork, a v3 story: its location is Global Variable 0, read
+/// straight out of restored dynamic memory, so it resolves immediately after a
+/// rewind's bare Quetzal snapshot with no screen carried alongside it (unlike a
+/// v4+ status-line story, whose location needs the upper window `restore_state`
+/// deliberately blanks — see its own doc comment — so it stays undetected until
+/// the game's next repaint; that is a pre-existing, separate limitation of a
+/// snapshot with no screen, not something this test is about).
+#[test]
+fn resume_from_turn_rewinds_engine_transcript_map_and_recenters() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-resume-from-turn");
+    let mut b = boot(story, &home);
+    b.state.config.record_turn_history = true;
+
+    let start_room = here(&b);
+    assert_eq!(start_room.as_deref(), Some("West of House"));
+    let _ = command(&mut b, "south"); // turn 1: a new room -> map snapshot recorded
+    assert_eq!(here(&b).as_deref(), Some("South of House"));
+    let _ = command(&mut b, "west"); // turn 2: back to the start
+    assert_eq!(here(&b), start_room);
+    let _ = command(&mut b, "south"); // turn 3: forward again
+    assert_eq!(here(&b).as_deref(), Some("South of House"));
+
+    assert_eq!(b.state.history.len(), 3, "premise: three recorded turns");
+    assert!(b.state.history[0].map_snapshot.is_some(), "premise: turn 1 added a room");
+    assert_eq!(b.state.turns, 3);
+
+    // Rewind to turn 1 (history index 0): back in South of House, one turn in.
+    b.state.scroll = (999, 999); // sentinel: proves the recenter below actually moved it
+    let result = app::host::persist::resume_from_turn(
+        &mut *b.session, &mut b.mapper, &mut b.state, 0, Some((80, 24)),
+    );
+    assert!(result.ok && result.redraw, "a resume within range succeeds: {result:?}");
+    assert_eq!(here(&b).as_deref(), Some("South of House"), "the engine restored to turn 1's snapshot");
+    assert_eq!(b.state.turns, 1, "the turn counter rewound with it");
+    assert_eq!(b.state.history.len(), 1, "later turns are discarded (linear rewind)");
+    assert_eq!(
+        b.state.transcript_kinds.len(), b.state.transcript.len(),
+        "transcript and its kinds stay length-matched"
+    );
+    assert_eq!(
+        b.state.transcript_runs.len(), b.state.transcript.len(),
+        "and its style-run/paragraph sidecars"
+    );
+    assert_eq!(b.state.transcript_para.len(), b.state.transcript.len());
+    let transcript = b.state.transcript.join("\n");
+    assert!(transcript.contains("> south"), "the echoed command survives the rebuild: {transcript:?}");
+    assert!(
+        transcript.contains("facing the south side"),
+        "and turn 1's own output: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains("mailbox") && !transcript.contains("> west"),
+        "only turn 1 is rebuilt, nothing from the discarded turns 2-3: {transcript:?}"
+    );
+    assert_ne!(b.state.scroll, (999, 999), "the map pane recenters on the resumed room");
+    assert_eq!(
+        b.state.notifications.latest_text(), Some("Resumed from turn 1"),
+        "a notice names the turn resumed to"
+    );
+    assert!(!b.state.unsaved_progress, "resuming a recorded (already-saved) turn leaves nothing unsaved");
+
+    // Perturb, then assert (restore tests must move past the resume point before
+    // trusting it): the resumed session plays on from turn 1, not from where it
+    // was before the rewind.
+    let _ = command(&mut b, "west");
+    assert_eq!(here(&b), start_room, "play continues from the resumed turn");
+    assert_eq!(b.state.turns, 2);
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `idx` past the end of `state.history` is a no-op: nothing about the engine,
+/// transcript, map or history is touched, and no notice is pushed.
+#[test]
+fn resume_from_turn_out_of_range_index_is_a_no_op() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-resume-from-turn-oob");
+    let mut b = boot(story, &home);
+    b.state.config.record_turn_history = true;
+    let _ = command(&mut b, "south");
+    assert_eq!(b.state.history.len(), 1, "premise: one recorded turn");
+
+    let before_loc = here(&b);
+    let before_turns = b.state.turns;
+    let before_transcript = b.state.transcript.clone();
+
+    let result = app::host::persist::resume_from_turn(
+        &mut *b.session, &mut b.mapper, &mut b.state, 1, Some((80, 24)),
+    );
+    assert_eq!(result, app::host::persist::Rewound::default(), "out of range: nothing happened");
+    assert_eq!(here(&b), before_loc);
+    assert_eq!(b.state.turns, before_turns);
+    assert_eq!(b.state.transcript, before_transcript);
+    assert_eq!(b.state.history.len(), 1, "history untouched");
+    assert_eq!(b.state.notifications.latest_text(), None, "no notice for a no-op");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ── SQ-1621 / SQ-1622 ────────────────────────────────────────────────────────
+
+/// `TurnRecord::location_name` (SQ-1621) reflects the room the player actually
+/// stood in on THAT turn, even when the turn made no structural change and so
+/// has no `map_snapshot` of its own. And the replay overlay's map reconstruction
+/// — `from_json` off the latest at-or-before snapshot, then `MapGraph::set_current`
+/// with the SELECTED turn's own `location` (the fix landed in `main.rs`'s
+/// `replay_graph`) — flags the correct room current, not whichever room was
+/// current when that older snapshot was serialized.
+///
+/// Minizork's own geography: `n` → North of House (new room), `e` → Behind
+/// House (new room), `open window` (no move), `west` → Kitchen (new room,
+/// through the window), `west` → Living Room (new room), `east` → back to
+/// Kitchen — an ALREADY-KNOWN room, so this last turn makes no structural
+/// change and gets no `map_snapshot` of its own; the latest snapshot
+/// at-or-before it is Living Room's.
+#[test]
+fn replay_location_names_the_turns_own_room_not_an_older_snapshots() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-replay-location");
+    let mut b = boot(story, &home);
+    b.state.config.record_turn_history = true;
+
+    let _ = command(&mut b, "n"); // turn 1: North of House (new room, new conn)
+    let _ = command(&mut b, "e"); // turn 2: Behind House (new room, new conn)
+    let _ = command(&mut b, "open window"); // turn 3: no move
+    let _ = command(&mut b, "west"); // turn 4: Kitchen (new room, new conn)
+    assert_eq!(here(&b).as_deref(), Some("Kitchen"));
+    let _ = command(&mut b, "west"); // turn 5: Living Room (new room, new conn Kitchen--west-->LivingRoom)
+    assert_eq!(here(&b).as_deref(), Some("Living Room"));
+    let _ = command(&mut b, "east"); // turn 6: Kitchen again — already-known room, but the
+    // REVERSE connection (LivingRoom--east-->Kitchen) hasn't been walked before, so this still
+    // counts as a structural change and gets its OWN snapshot (current = Kitchen at turn 6).
+    assert_eq!(here(&b).as_deref(), Some("Kitchen"));
+    let _ = command(&mut b, "west"); // turn 7: Living Room — the SAME connection as turn 5's
+    // (Kitchen--west-->LivingRoom), already known, so this turn is truly non-structural: no new
+    // room, no new connection, no map_snapshot of its own.
+    assert_eq!(here(&b).as_deref(), Some("Living Room"));
+
+    assert_eq!(b.state.history.len(), 7, "premise: seven recorded turns");
+    let last = &b.state.history[6];
+    assert_eq!(last.turn, 7);
+    assert!(last.map_snapshot.is_none(), "premise: turn 7 made no structural change");
+    assert_eq!(
+        last.location_name.as_deref(), Some("Living Room"),
+        "SQ-1621: this turn's own room, not Kitchen's (turn 6's frozen snapshot)"
+    );
+
+    // Reconstruct the map exactly the way `main.rs`'s fixed `replay_graph` does:
+    // the latest at-or-before snapshot, then override `current` with THIS
+    // turn's own recorded location.
+    let snap = app::history::map_at_turn(&b.state.history, last.turn)
+        .and_then(|json| mapper::persist::from_json(json).ok())
+        .expect("a baseline snapshot exists at-or-before turn 7 (turn 6's)");
+    let mut graph = snap.graph;
+    let living_room_id = last.location.expect("turn 7 recorded a location");
+    let kitchen_id = graph.current().expect("turn 6's snapshot has a current room");
+    assert_ne!(
+        living_room_id, kitchen_id,
+        "premise: turn 6's frozen snapshot's own baked `current` (Kitchen) differs from turn 7's \
+         own room (Living Room) — the bug this fix closes"
+    );
+    assert_eq!(graph.room(kitchen_id).map(|r| r.name.as_str()), Some("Kitchen"));
+    graph.set_current(living_room_id);
+
+    let rm = mapper::render::render(&graph);
+    let living_room_row = rm.rooms.iter().find(|r| r.id == living_room_id)
+        .expect("Living Room is in the reconstructed graph");
+    assert!(living_room_row.is_current, "the reconstructed graph flags Living Room — this turn's room — current");
+    for r in &rm.rooms {
+        if r.id != living_room_id {
+            assert!(!r.is_current, "only Living Room is current, not room {} ({})", r.id, r.label);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// SQ-1622: recording history switched on mid-game — after the mapper has
+/// already explored rooms — must not leave the retained history with zero
+/// `map_snapshot`s anywhere until the map next structurally changes. The
+/// quest's own named repro: Lost Pig, explore first with recording off, turn
+/// recording on, then make one move that finds no new room.
+///
+/// Lost Pig opens in pitch dark: Grunk must `smell` (repeatedly — the direction
+/// is randomized per attempt, but `random_seed: Some(1)` in `headless_config`
+/// makes the sequence deterministic run to run) until it reveals which way the
+/// pig went, then walk that way to fall into the Hole — the mapper's second
+/// room. Recording then switches on, and `look` (no move) is the first
+/// recorded turn: no structural change of its own.
+#[test]
+fn recording_switched_on_mid_game_still_has_a_baseline_snapshot() {
+    let story = fixture_path("LostPig.z8");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-recording-mid-game");
+    let mut b = boot(story, &home);
+    assert!(!b.state.config.record_turn_history, "premise: recording starts off");
+
+    // Explore a little with recording off — the mapper accumulates rooms, but
+    // nothing lands in `state.history`.
+    let mut dir = None;
+    for _ in 0..10 {
+        let before = b.state.transcript.len();
+        let _ = command(&mut b, "smell");
+        let new_lines = &b.state.transcript[before..];
+        dir = ["northeast", "northwest", "southeast", "southwest", "north", "south", "east", "west"]
+            .into_iter()
+            .find(|d| new_lines.iter().any(|l| l.contains(d)));
+        if dir.is_some() {
+            break;
+        }
+    }
+    let _ = command(&mut b, dir.expect("smell reveals a direction within 10 tries (deterministic seed)"));
+    assert!(b.state.history.is_empty(), "premise: nothing recorded yet");
+    assert!(b.mapper.graph.rooms().count() >= 2, "premise: the mapper already has rooms (fell into the Hole)");
+
+    // Switch recording on, then make a move that finds no new room — `look`
+    // never moves — no structural change on this first recorded turn.
+    b.state.config.record_turn_history = true;
+    let rooms_before = b.mapper.graph.rooms().count();
+    let _ = command(&mut b, "look");
+    assert_eq!(b.mapper.graph.rooms().count(), rooms_before, "premise: no new room this turn");
+
+    assert_eq!(b.state.history.len(), 1, "premise: exactly one recorded turn so far");
+    assert!(
+        b.state.history[0].map_snapshot.is_some(),
+        "SQ-1622: the very first recorded turn always carries a baseline snapshot"
+    );
+    assert!(
+        app::history::map_at_turn(&b.state.history, b.state.turns).is_some(),
+        "SQ-1622: so a viewer of the current turn has a map to show, not an empty one"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ── SQ-1629 ──────────────────────────────────────────────────────────────────
+
+/// SQ-1629 Fix 2: the room a story STARTS in never got a `description` at all — no command
+/// triggers `finish_command_turn`/`finish_resumed_turn`'s `apply_room_description` for it, and
+/// the player has not typed `look` yet either. `Engine::seed_turn`'s boot drain (Z-machine
+/// override in `session.rs`) now captures it the same way an ordinary arrival does, wired into
+/// `host::boot::boot_story` right beside the pre-existing `apply_turn` seed call.
+#[test]
+fn boot_captures_the_starting_rooms_own_description() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-boot-starting-room-description");
+    let b = boot(story, &home);
+    assert_eq!(here(&b).as_deref(), Some("West of House"), "premise: minizork starts here");
+    let start = b.mapper.graph.current().expect("the starting room is observed at boot");
+    let desc = b.mapper.graph.room(start).and_then(|r| r.description.clone());
+    assert!(
+        desc.as_deref().is_some_and(|d| !d.trim().is_empty()),
+        "West of House must carry a description straight off boot, before any command: {desc:?}"
+    );
+}
+
+/// SQ-1629 Fix 1: minizork (a v1-3 game) prints its own inline `>` read prompt as part of the
+/// SAME turn's transcript as its room description — the mapper's captured description must stop
+/// before it (reusing [`strip_read_prompt`], the same prompt-recognition the Glk tier's own
+/// `take_room_description` already runs), not carry a trailing "\n\n>". Covers both the boot
+/// capture (Fix 2, West of House) and an ordinary arrival (Forest Path, reached via `n`, `n`
+/// per the quest's own repro).
+#[test]
+fn a_room_description_never_carries_the_games_own_trailing_prompt() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-room-description-prompt-strip");
+    let mut b = boot(story, &home);
+
+    let start = b.mapper.graph.current().expect("the starting room is observed at boot");
+    let start_desc = b.mapper.graph.room(start).and_then(|r| r.description.clone());
+    assert!(start_desc.is_some(), "premise: West of House has a captured description (Fix 2)");
+    let start_desc = start_desc.unwrap();
+    assert!(!start_desc.contains('>'), "the boot's own inline read prompt must not leak in: {start_desc:?}");
+
+    let _ = command(&mut b, "n");
+    let _ = command(&mut b, "n");
+    assert_eq!(here(&b).as_deref(), Some("Forest Path"), "premise: n, n reaches Forest Path");
+    let id = b.mapper.graph.current().expect("Forest Path is on the map");
+    let desc = b.mapper.graph.room(id).and_then(|r| r.description.clone());
+    assert!(desc.is_some(), "Forest Path must have a captured description");
+    let desc = desc.unwrap();
+    assert!(!desc.contains('>'), "the trailing inline read prompt must not leak into the description: {desc:?}");
+    assert!(!desc.trim_end().ends_with('>'), "and no residual blank-line-then-prompt tail: {desc:?}");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// SQ-1629: the Glk tier already strips its own trailing prompt (`AppGlk::take_room_description`
+/// via `strip_read_prompt`, unchanged by Fix 1) — this confirms an ordinary Glulx boot-and-look
+/// sequence is unaffected by Fix 1's Z-machine-side change, and that Fix 2's boot-time wiring
+/// (`apply_room_description`/`apply_item_observations` in `host::boot::boot_story`, engine-
+/// neutral) DOES reach Glulx too: `GlulxSession::new_with_store` already resolves the opening
+/// room's HEADING at construction (to seed `last_room`/the room-lock), and a small companion
+/// change stashes the paired DESCRIPTION `take_room_heading` leaves ready right beside it
+/// (`GlulxSession::boot_description`), which `GlulxSession`'s own `seed_turn` override now hands
+/// to the mapper — the same shape as the Z-machine fix, just reading a different capture.
+#[test]
+fn glulx_boot_captures_the_starting_rooms_own_description_too() {
+    let story = fixture_path("chlorophyll.gblorb");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-glulx-boot-and-look");
+    let b = boot(story, &home);
+    let start = b.mapper.graph.current().expect("Chlorophyll's opening room is seeded at boot");
+    let desc = b.mapper.graph.room(start).and_then(|r| r.description.clone());
+    assert!(
+        desc.as_deref().is_some_and(|d| !d.trim().is_empty()),
+        "the starting room must carry a description straight off boot: {desc:?}"
+    );
+    assert!(!desc.unwrap().contains('>'), "Glk's own prompt-stripping still holds");
 
     let _ = std::fs::remove_dir_all(&home);
 }

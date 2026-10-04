@@ -111,6 +111,21 @@ pub struct Pager {
     /// `AppState::default()` in the test suite; do not rename to a
     /// `baseline_valid` that would default the wrong way.
     pub baseline_stale: bool,
+    /// True when [`AppState::mark_screen_clear`](crate::state::AppState::
+    /// mark_screen_clear) ran during the turn now armed — set there, alongside
+    /// `pending_before_rows`'s own arm, and consumed (read AND reset) by
+    /// [`apply_frame`] so it can never leak into a later, unrelated frame.
+    ///
+    /// `AppState::clear_anchor` sounds like the same fact but isn't: it is a
+    /// persistent transcript-line index the renderer pins post-clear output to,
+    /// and it survives across turns — it can answer "where was the most recent
+    /// clear", never "did THIS turn clear". This field answers exactly that,
+    /// for exactly one consumer: `mark_screen_clear` unconditionally parks
+    /// `transcript_scroll` at 0, which otherwise makes `apply_frame`'s
+    /// `at_bottom` check true regardless of where the reader actually was,
+    /// arming a follow-EASE animation on a turn that should just snap to place
+    /// instantly (SQ-1607).
+    pub screen_cleared_this_turn: bool,
 }
 
 impl Pager {
@@ -328,6 +343,20 @@ pub fn activation_target(
 /// arm, leave the view at the bottom, and cache the new total as the
 /// baseline — the same "already read" reasoning `startup.rs` applies to the
 /// opening-banner arm for a resumed transcript.
+/// `top_anchored_fits` is this frame's `render::transcript::TranscriptRender::
+/// top_anchored_fits` (or the raster path's equivalent) — true when the view is
+/// showing a top-anchored post-clear screen IN FULL (at the bottom, an anchor
+/// set, its content not yet overflowing the viewport). SQ-1661: a follow-ease's
+/// FROM/TO values are computed in the FULL-transcript row-count coordinate
+/// space, which `render::transcript::window_wrapped_rows` only uses once
+/// top-anchoring stops applying — arming one while it still holds eases
+/// `transcript_scroll` through intermediate non-zero values that make the
+/// renderer briefly reach back into pre-anchor scrollback the anchor exists to
+/// hide (the reported symptom: a new command after Anchorhead's intro jumps the
+/// view back to the opening quote, then scrolls down to the fresh line). No
+/// animation is needed in that case anyway — the new output is simply appended
+/// below the still-pinned top-anchored content, so skipping the arm (leaving
+/// `transcript_scroll` at its already-correct 0) is enough.
 pub fn apply_frame(
     state: &mut crate::state::AppState,
     max_scroll: u16,
@@ -335,12 +364,14 @@ pub fn apply_frame(
     prompt_rows: u16,
     total_rows: u16,
     transcript_surface: bool,
+    top_anchored_fits: bool,
 ) {
     if !transcript_surface {
         return;
     }
     if state.pager.baseline_stale {
         state.pager.pending_before_rows = None;
+        state.pager.screen_cleared_this_turn = false;
         state.pager.active = false;
         state.transcript_scroll = 0;
         state.last_transcript_total_rows = total_rows;
@@ -348,13 +379,23 @@ pub fn apply_frame(
         return;
     }
     state.transcript_scroll = state.transcript_scroll.min(max_scroll);
+    // SQ-1607: consumed here, alongside `pending_before_rows`, regardless of
+    // whether an arm is pending — so a clear on a non-arming turn can never
+    // leak into a later, unrelated frame's decision.
+    let cleared_this_turn = std::mem::take(&mut state.pager.screen_cleared_this_turn);
     if let Some(before) = state.pager.pending_before_rows.take() {
         // SQ-1595: was the reader already at (or following) the bottom before
         // this turn's output arrived? Only then does the transition to
         // wherever it lands get an autoscroll-follow ease — a reader scrolled
         // into history is never dragged back down, by this or by anything
         // else, exactly today's behavior of leaving their view alone.
-        let at_bottom = state.transcript_scroll == 0;
+        //
+        // `mark_screen_clear` unconditionally parks `transcript_scroll` at 0,
+        // which makes `at_bottom` true here even when the reader had scrolled
+        // away before the clear — so a turn that cleared the screen (SQ-1607)
+        // is excluded from the follow-ease below and takes the instant-jump
+        // path instead, exactly as if the reader were not at the bottom.
+        let at_bottom = state.transcript_scroll == 0 && !cleared_this_turn;
         // The pre-turn bottom's equivalent offset now that the transcript has
         // grown by `added` rows: showing the same absolute rows the reader was
         // just looking at means sitting `added` rows back from the NEW bottom.
@@ -380,7 +421,12 @@ pub fn apply_frame(
                 state.pager.active = true;
             }
             None => {
-                if at_bottom && added > 0 {
+                // SQ-1661: never while a top-anchored view is showing fully —
+                // see this function's doc. (Cannot co-occur with the `Some`
+                // arm above in practice: `added` here is bounded by the
+                // post-anchor content's own total, which `top_anchored_fits`
+                // already says fits `viewport_rows`.)
+                if at_bottom && added > 0 && !top_anchored_fits {
                     state.arm_transcript_follow_ease(added, 0);
                 }
                 state.pager.active = false;
@@ -404,14 +450,14 @@ mod tests {
         let mut state = crate::state::AppState::default();
 
         // A settled session: 500-row backlog, reader scrolled 100 rows up.
-        apply_frame(&mut state, 476, 24, 0, 500, true);
+        apply_frame(&mut state, 476, 24, 0, 500, true, false);
         assert_eq!(state.last_transcript_total_rows, 500);
         state.transcript_scroll = 100;
 
         // `look at rebus` arms the pager with the real pre-turn total, then the
         // picture frame draws: no transcript surface, all metrics zero.
         state.pager.arm(state.last_transcript_total_rows);
-        apply_frame(&mut state, 0, 40, 0, 0, false);
+        apply_frame(&mut state, 0, 40, 0, 0, false, false);
         assert_eq!(state.transcript_scroll, 100, "a picture frame must not clamp scrollback away");
         assert_eq!(state.last_transcript_total_rows, 500, "a picture frame must not become the pager baseline");
         assert_eq!(state.pager.pending_before_rows, Some(500), "a pending arm survives until a real transcript frame");
@@ -419,7 +465,7 @@ mod tests {
         // The dismissing keypress re-arms from the (unpoisoned) baseline; the
         // normal frame returns with the same 500 rows: nothing new, no pager.
         state.pager.arm(state.last_transcript_total_rows);
-        apply_frame(&mut state, 476, 24, 0, 500, true);
+        apply_frame(&mut state, 476, 24, 0, 500, true, false);
         assert!(!state.pager.active, "returning from the picture pages nothing (no rows were added)");
         assert_eq!(state.transcript_scroll, 100, "the reader's position survives the picture round-trip");
     }
@@ -485,7 +531,7 @@ mod tests {
         let mut state = crate::state::AppState::default();
         // A 40-row boot banner into a 10-row viewport, nothing before it.
         state.pager.arm(0);
-        apply_frame(&mut state, 30, 10, 1, 40, true);
+        apply_frame(&mut state, 30, 10, 1, 40, true, false);
         assert!(state.pager.active);
         assert_eq!(state.transcript_scroll, 31, "parked one row past the prompt-less ceiling");
         // Which is exactly the offset that shows row 0 at the top of a 9-row body.
@@ -530,12 +576,110 @@ mod tests {
         assert_eq!(state.transcript_scroll, 0, "premise: reader is at the bottom");
         state.pager.arm(20); // before_rows = 20
         // 5 rows added (25 - 20), viewport 10: fits, no [more].
-        apply_frame(&mut state, 15, 10, 0, 25, true);
+        apply_frame(&mut state, 15, 10, 0, 25, true, false);
         assert!(!state.pager.active, "5 added rows fit in a 10-row viewport");
         assert_eq!(state.transcript_scroll, 0, "logical target is still the bottom");
         let a = state.scroll_anim.as_ref().expect("a follow-ease must be armed");
         assert_eq!(a.from, 5, "display starts 5 rows back — where the old bottom now sits");
         assert_eq!(a.target(), 0);
+    }
+
+    /// SQ-1661: a turn that did NOT clear the screen, but whose output is
+    /// still showing underneath an active top-anchor (a clear happened on an
+    /// EARLIER turn and the anchored content still fits), must not arm a
+    /// follow-ease either — even though `at_bottom` and `added > 0` are both
+    /// true, exactly the premise of `apply_frame_arms_a_follow_ease_when_at_
+    /// bottom_and_output_fits` above. The only difference from that test is
+    /// `top_anchored_fits: true` on the call; same numbers otherwise. Without
+    /// the guard this is exactly the reported bug: the armed ease would step
+    /// `transcript_scroll` from 5 down to 0, and every intermediate non-zero
+    /// value makes the renderer fall through to `window_wrapped_rows`' plain
+    /// bottom-stick branch, which can reach back into whatever scrollback sits
+    /// above the anchor — the opening quote flashing back into view before the
+    /// settle.
+    #[test]
+    fn apply_frame_skips_follow_ease_when_a_standing_top_anchor_still_fits() {
+        let mut state = crate::state::AppState::default();
+        assert_eq!(state.transcript_scroll, 0, "premise: reader is at the bottom");
+        state.pager.arm(20); // before_rows = 20
+        // 5 rows added (25 - 20), viewport 10: fits, no [more] — identical to
+        // the sibling test above, only `top_anchored_fits` differs.
+        apply_frame(&mut state, 15, 10, 0, 25, true, true);
+        assert!(!state.pager.active, "5 added rows fit in a 10-row viewport");
+        assert_eq!(state.transcript_scroll, 0, "already correct — nothing to ease toward");
+        assert!(
+            state.scroll_anim.is_none(),
+            "SQ-1661: a standing top-anchor that still fits must not arm an ease computed \
+             in the full-transcript coordinate space"
+        );
+    }
+
+    /// SQ-1661, the complementary non-regression case: once a standing
+    /// top-anchor's content has grown past the viewport (so this frame's
+    /// render fell through to plain bottom-sticking — `top_anchored_fits:
+    /// false`), the ordinary full-transcript-relative follow-ease is correct
+    /// again and must still arm, exactly as it does with no anchor involved
+    /// at all. Same numbers as `apply_frame_arms_a_follow_ease_when_at_
+    /// bottom_and_output_fits`.
+    #[test]
+    fn apply_frame_still_arms_follow_ease_once_a_standing_top_anchor_overflows() {
+        let mut state = crate::state::AppState::default();
+        state.pager.arm(20);
+        apply_frame(&mut state, 15, 10, 0, 25, true, false);
+        assert!(!state.pager.active);
+        let a = state.scroll_anim.as_ref().expect("overflow past the anchor is ordinary scrollback growth");
+        assert_eq!(a.from, 5);
+        assert_eq!(a.target(), 0);
+    }
+
+    /// SQ-1607: a turn that CLEARED the screen (e.g. Anchorhead's opening
+    /// `erase_window`) must snap to place instantly, never ease — even though
+    /// `mark_screen_clear` unconditionally parks `transcript_scroll` at 0,
+    /// which makes `apply_frame`'s `at_bottom` check true regardless of where
+    /// the reader actually was. Same shape as
+    /// `apply_frame_arms_a_follow_ease_when_at_bottom_and_output_fits` above
+    /// (5 rows added into a 10-row viewport, fits, no [more]) but going through
+    /// `mark_screen_clear` first — contrast the two: that one asserts a
+    /// follow-ease IS armed, this one asserts none is.
+    #[test]
+    fn apply_frame_skips_follow_ease_when_the_turn_cleared_the_screen() {
+        let mut state = crate::state::AppState::default();
+        state.mark_screen_clear();
+        assert_eq!(state.transcript_scroll, 0, "mark_screen_clear always parks at the bottom");
+        assert!(state.pager.screen_cleared_this_turn, "premise: the clear flag is set");
+        state.pager.arm(20); // before_rows = 20, as if armed for the clearing turn
+        // 5 rows added (25 - 20), viewport 10: fits, no [more].
+        apply_frame(&mut state, 15, 10, 0, 25, true, false);
+        assert!(!state.pager.active, "5 added rows fit in a 10-row viewport");
+        assert_eq!(state.transcript_scroll, 0, "already at the bottom from the clear");
+        assert!(
+            state.scroll_anim.is_none(),
+            "a clearing turn snaps instantly — no follow-ease, unlike the non-clearing case above"
+        );
+        assert!(!state.pager.screen_cleared_this_turn, "the flag must not leak into a later frame");
+    }
+
+    /// The same exclusion when the pager DOES engage (output overflows a
+    /// clearing turn's repaint): the reader still lands at the pager's park,
+    /// but via the ordinary instant-jump path (`scroll_transcript_to`), never
+    /// the Follow-kind ease `apply_frame_follow_ease_target_is_clamped_to_
+    /// the_pager_park` pins for the non-clearing case with identical numbers.
+    #[test]
+    fn apply_frame_jumps_instead_of_easing_when_the_pager_engages_on_a_clearing_turn() {
+        let mut state = crate::state::AppState::default();
+        state.mark_screen_clear();
+        state.pager.arm(2);
+        apply_frame(&mut state, 30, 10, 1, 27, true, false);
+        assert!(state.pager.active, "25 added rows overflow a 10-row viewport");
+        assert_eq!(state.transcript_scroll, 16, "parked exactly where the pager would park");
+        if let Some(a) = state.scroll_anim.as_ref() {
+            assert_ne!(
+                a.kind,
+                crate::state::ScrollAnimKind::Follow,
+                "a clearing turn must never arm a Follow ease"
+            );
+        }
+        assert!(!state.pager.screen_cleared_this_turn, "the flag must not leak into a later frame");
     }
 
     /// The reader scrolled into history before this output arrived: nothing
@@ -546,7 +690,7 @@ mod tests {
         let mut state = crate::state::AppState::default();
         state.transcript_scroll = 7; // reader scrolled up into history
         state.pager.arm(20);
-        apply_frame(&mut state, 50, 10, 0, 25, true);
+        apply_frame(&mut state, 50, 10, 0, 25, true, false);
         assert!(!state.pager.active);
         assert_eq!(state.transcript_scroll, 7, "the reader's position must not move");
         assert!(state.scroll_anim.is_none(), "no follow-ease for a reader who scrolled away");
@@ -561,7 +705,7 @@ mod tests {
         let mut state = crate::state::AppState::default();
         assert_eq!(state.transcript_scroll, 0, "premise: reader is at the bottom");
         state.pager.arm(2);
-        apply_frame(&mut state, 30, 10, 1, 27, true);
+        apply_frame(&mut state, 30, 10, 1, 27, true, false);
         assert!(state.pager.active, "25 added rows overflow a 10-row viewport");
         assert_eq!(state.transcript_scroll, 16, "parked exactly where the pager would park");
         let a = state.scroll_anim.as_ref().expect("a follow-ease must be armed");

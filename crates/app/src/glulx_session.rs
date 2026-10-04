@@ -31,7 +31,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, Introspect, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{clamp_runs, strip_read_prompt_for, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
+use crate::session::{clamp_runs, item_tracker_display_name, strip_read_prompt_for, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
@@ -166,6 +166,16 @@ pub struct GlulxSession {
     /// the corpus), 3 ms on `The_Wizard_Sniffer.gblorb`, 23 ms for Kerkerkruip's
     /// refusal, 0.2 ms for the Anchorhead demo's.
     i7_world: std::cell::OnceCell<Option<gvm::i7map::I7World>>,
+    /// The story's grammar/dictionary snapshot ([`Engine::story_vocabulary`]),
+    /// cached here (SQ-1655) because [`Self::learn_player_from_pickups`] asks
+    /// for it every turn a command was typed and rebuilding it from the
+    /// grammar table on every ask — which is what `story_vocabulary` itself
+    /// does, and what the host's OWN separate cache (`AppState::vocab`) exists
+    /// to avoid at that layer — would undo the point of caching at this one.
+    /// Static story data, exactly like `i7_world`/`parse_names` above: never
+    /// invalidated, because the dictionary a game compiled with does not
+    /// change at runtime.
+    vocab_cache: std::cell::OnceCell<Option<crate::vocab::StoryVocabulary>>,
     /// Reverse map from a room's [`mapper::graph::RoomId`] (SQ-0526's
     /// `crate::roomid::glulx_room_id` HASH of the object address) back to that
     /// address (SQ-1264).
@@ -209,15 +219,47 @@ pub struct GlulxSession {
     /// the walk decodes every object's name array — 2,494 of them on
     /// Counterfeit Monkey.
     player_addr: std::cell::RefCell<Option<Option<u32>>>,
+    /// The host's own locked player-object id (SQ-1631 Fix 3) — see `GameSession::player_hint`'s
+    /// doc (the Z-machine's twin field) for why [`Self::glulx_item_observations`] prefers this over
+    /// [`Introspect::player_object`]'s own raw lookup once the host has one. Set via
+    /// [`Engine::set_player_hint`].
+    player_hint: Option<u16>,
     /// Auxiliary persistent data (Glulx aux persistence is a later phase).
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
     /// The current room, derived from the last Inform `Subheader` heading and
     /// held sticky across heading-less turns (examine/talk/failed-move).
     last_room: Option<LocationInfo>,
+    /// SQ-1629 Fix 2: the starting room's own description, captured once at construction
+    /// (`new_with_store`, immediately after the SAME `take_room_heading` drain that resolves
+    /// `last_room` there — see `AppGlk::take_room_description`'s own doc for why it must follow
+    /// that call on the same drain) and consumed exactly once by `Engine::seed_turn`'s override
+    /// below. No command runs `finish_turn`'s own heading/description pair for the boot, and the
+    /// player has not typed `look` yet either — this is the only chance to capture it.
+    boot_description: Option<String>,
     /// Learns which RAM word holds the game's `location` global, so same-named
     /// rooms get distinct ids (SQ-0526). See [`crate::glulx_roomlock`].
     room_lock: crate::glulx_roomlock::RoomLock,
+    /// Learns which RAM word holds the game's `player` global, for a story
+    /// [`gvm::objects::ParseNames::find_player`]'s static scan cannot find at
+    /// all — Counterfeit Monkey's compiled `parse_name` routine avatar being the
+    /// motivating case (SQ-1655). See [`crate::glulx_playerlock`]. Consulted
+    /// only as a FALLBACK, from [`Self::player_addr`], after the static scan has
+    /// already answered `None` — never an override.
+    player_lock: crate::glulx_playerlock::PlayerLock,
+    /// The room [`Self::learn_player_from_pickups`] last compared against, and
+    /// what stood in it: `(room address, its live children's addresses)`,
+    /// refreshed every turn. `None` when the current room has no resolvable
+    /// address yet — see that method's own doc.
+    pickup_watch: Option<(u32, Vec<u32>)>,
+    /// The command line [`Self::submit`] is about to drive, held here only
+    /// until [`Self::finish_turn`] consumes it (SQ-1655) — the caller,
+    /// `learn_player_from_pickups`'s gate on whether THIS turn is worth
+    /// reading as a pickup at all. `None` on every OTHER path into
+    /// `finish_turn` (`submit_key`, a resume, a resize, …), which is exactly
+    /// right: none of those is a player-typed command, so none of them should
+    /// ever be read as one.
+    pending_command: Option<String>,
     /// Consecutive silent `look`s that came back with no room heading, capped by
     /// [`NAMING_LOOK_REFUSALS`]: a story that will not name its rooms that way must
     /// stop being asked. Reset by any answer. See [`GlulxSession::silent_look`]
@@ -263,22 +305,40 @@ pub struct GlulxSession {
 pub struct GameStore {
     dir: std::path::PathBuf,
     writable: bool,
+    /// Where the story's SHARED learned-address files (`room-global`,
+    /// `player-global`) live (SQ-1676). `None` keeps them beside the saves in
+    /// `dir`, which is the single-player layout; a launch with a named player
+    /// points this at the shared catalogue folder so every player benefits from
+    /// what any of them taught lanthorn about the build.
+    catalogue: Option<std::path::PathBuf>,
 }
 
 impl GameStore {
     /// A store the game may read and write — a launched session.
     pub fn writable(dir: std::path::PathBuf) -> GameStore {
-        GameStore { dir, writable: true }
+        GameStore { dir, writable: true, catalogue: None }
     }
 
     /// A store the game may READ and never write — a shadow.
     pub fn read_only(dir: std::path::PathBuf) -> GameStore {
-        GameStore { dir, writable: false }
+        GameStore { dir, writable: false, catalogue: None }
     }
 
     /// No store at all: the game's own fixed-name saves auto-fail.
     pub fn none() -> GameStore {
         GameStore::default()
+    }
+
+    /// Keep the shared learned-address files in `dir` rather than beside the saves.
+    pub fn with_catalogue(mut self, dir: std::path::PathBuf) -> GameStore {
+        self.catalogue = Some(dir);
+        self
+    }
+
+    /// Where the shared learned-address files live: the catalogue folder when
+    /// one was named, else the store's own directory.
+    fn shared_dir(&self) -> &std::path::Path {
+        self.catalogue.as_deref().unwrap_or(&self.dir)
     }
 
     /// The directory, or an empty path when there is no store.
@@ -520,7 +580,7 @@ impl GlulxSession {
         acceleration: bool,
         graphics_enabled: bool,
         sound_enabled: bool,
-        char_px: (u32, u32),
+        char_px: (f64, f64),
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
     ) -> Result<GlulxSession, GError> {
@@ -559,7 +619,7 @@ impl GlulxSession {
         graphics_enabled: bool,
         sound_enabled: bool,
         borderless: bool,
-        char_px: (u32, u32),
+        char_px: (f64, f64),
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
         theme: crate::glk_backend::GlkStylePairs,
@@ -598,8 +658,23 @@ impl GlulxSession {
         vfs_bytes: &[u8],
         random_seed: Option<u32>,
     ) -> Result<GlulxSession, GError> {
+        Self::new_shadow_in(GameStore::read_only(game_dir), image, cols, rows, acceleration, vfs_bytes, random_seed)
+    }
+
+    /// [`GlulxSession::new_shadow`] over an explicit store, so a named player's
+    /// shadow can read the shared learned-address files from the catalogue
+    /// ([`GameStore::with_catalogue`]) exactly as the live session does (SQ-1676).
+    pub fn new_shadow_in(
+        store: GameStore,
+        image: Vec<u8>,
+        cols: u32,
+        rows: u32,
+        acceleration: bool,
+        vfs_bytes: &[u8],
+        random_seed: Option<u32>,
+    ) -> Result<GlulxSession, GError> {
         let mut s = Self::new_with_store(
-            GameStore::read_only(game_dir),
+            store,
             image,
             cols,
             rows,
@@ -607,7 +682,7 @@ impl GlulxSession {
             false, // graphics
             false, // sound
             false, // borderless
-            (8, 16),
+            (8.0, 16.0),
             None, // no picture Blorb
             vfs_bytes,
             [[(None, None); 11]; 2],
@@ -619,7 +694,7 @@ impl GlulxSession {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_store(
+    pub fn new_with_store(
         store: GameStore,
         image: Vec<u8>,
         cols: u32,
@@ -628,7 +703,7 @@ impl GlulxSession {
         graphics_enabled: bool,
         sound_enabled: bool,
         borderless: bool,
-        char_px: (u32, u32),
+        char_px: (f64, f64),
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
         theme: crate::glk_backend::GlkStylePairs,
@@ -685,13 +760,19 @@ impl GlulxSession {
             parse_names: std::cell::OnceCell::new(),
             world_model: std::cell::OnceCell::new(),
             i7_world: std::cell::OnceCell::new(),
+            vocab_cache: std::cell::OnceCell::new(),
             room_addrs: std::cell::RefCell::new(std::collections::HashMap::new()),
             object_word_set: std::cell::RefCell::new(None),
             player_addr: std::cell::RefCell::new(None),
+            player_hint: None,
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
+            boot_description: None,
             room_lock: crate::glulx_roomlock::RoomLock::new(0, 0),
+            player_lock: crate::glulx_playerlock::PlayerLock::new(0),
+            pickup_watch: None,
+            pending_command: None,
             naming_look_refusals: 0,
             saw_buffer_heading: false,
             strip_prompt: true,
@@ -712,6 +793,12 @@ impl GlulxSession {
                 session.scan_words(),
             ),
         };
+        session.player_lock = match session.remembered_player_global() {
+            Some(addr) if session.player_sidecar_plausible(addr) => {
+                crate::glulx_playerlock::PlayerLock::locked_at(session.machine.mem().ramstart(), addr)
+            }
+            _ => crate::glulx_playerlock::PlayerLock::new(session.machine.mem().ramstart()),
+        };
         // SQ-1303: read this story's compiled Inform 7 world model NOW, before the
         // opening room is resolved below — that resolution is the first thing it
         // pays for, and the room lock wants the room set from its very first
@@ -730,8 +817,23 @@ impl GlulxSession {
         let ram = session.scan_ram();
         let awaiting_line_input = session.pending == InputKind::Line;
         let heading = session.appglk().take_room_heading(awaiting_line_input);
+        // SQ-1629 Fix 2: must follow `take_room_heading` on the SAME drain, exactly like
+        // `finish_turn`'s own pairing (see `AppGlk::take_room_description`'s doc) — stashed
+        // rather than used immediately, since `TurnResult` doesn't exist yet this early; `Engine::
+        // seed_turn`'s override below is what hands it to the mapper.
+        session.boot_description = session.appglk().take_room_description();
         let heading = session.name_this_room(heading, awaiting_line_input);
         session.last_room = heading.map(|n| session.room_for(&n, &ram));
+        // SQ-1655: seed the pickup-watch baseline from the opening room, the same
+        // reason `last_room` is seeded here rather than left for the first turn —
+        // a story whose opening command is itself a take (Counterfeit Monkey's
+        // own "take all") needs a baseline to compare against on that very first
+        // turn, not one turn later. See `learn_player_from_pickups`'s own doc.
+        session.pickup_watch = session
+            .last_room
+            .as_ref()
+            .and_then(|r| session.room_addrs.borrow().get(&r.number).copied())
+            .map(|addr| (addr, session.room_children_snapshot(addr)));
         Ok(session)
     }
 
@@ -860,6 +962,135 @@ impl GlulxSession {
         self.appglk().borderless()
     }
 
+    /// Set the `(width, height)` in pixels of one Glk text-grid cell and
+    /// relayout so every open graphics window's canvas is resized to match —
+    /// SQ-1598, for a host whose own cells are not the constructor's 8×16
+    /// fallback (a proportional-font frontend, or any host stating its own
+    /// pixel size directly rather than through the in-game image `Picker`).
+    /// Same shape as [`Self::set_borderless`]: the game hears about it (and
+    /// redraws whatever it painted at the old canvas size) at its next select,
+    /// via the same Glk Arrange event a terminal resize already delivers
+    /// ([`Self::resize`]) — there is no separate redraw mechanism to invoke.
+    /// A no-op once the game has quit.
+    pub fn set_char_px(&mut self, char_px: (f64, f64)) {
+        if self.quit {
+            return;
+        }
+        self.appglk().set_char_px(char_px);
+        self.machine.rearrange();
+        // Same rule as `resize`/`set_borderless`: no non-interactive drive
+        // while a dialog holds a suspended `@save`/`@restore` (SQ-0656). The
+        // size is already set on the backend and the tree relaid out; the
+        // game hears about it at its next select. Nothing to queue.
+        self.settle_after_event();
+        self.refresh_screen();
+    }
+
+    /// Select (`Some`) or leave (`None`) a design-pixel Glk screen (SQ-1703):
+    /// the host states the screen as `size` layout units of `unit_px` pixels
+    /// and a fractional, possibly non-square `text_cell` in those units, and
+    /// gvm divides splits in exactly those units. `None` returns to the usual
+    /// cell mode ([`Self::resize`] / [`Self::set_char_px`]). Calling it again
+    /// with a new text cell relayouts and redraws exactly as
+    /// [`Self::set_char_px`] does. A no-op once the game has quit.
+    pub fn set_glk_screen(&mut self, screen: Option<gvm::glk::GlkScreen>) {
+        if self.quit {
+            return;
+        }
+        self.appglk().set_screen_override(screen);
+        if screen.is_none() {
+            // `None` is cell mode, full stop — stretch mode
+            // ([`Self::set_glk_design`]) is left too, or it would simply take
+            // over from the override that was just removed.
+            self.appglk().set_design(None);
+        }
+        self.machine.rearrange();
+        self.settle_after_event();
+        self.refresh_screen();
+    }
+
+    /// Turn STRETCH design mode on (`Some(design size px)`) or off (`None`)
+    /// (SQ-1703 P3). Unlike [`Self::set_glk_screen`] it is a standing
+    /// instruction: the design screen is re-derived from the current pane and
+    /// cell size on every relayout ([`crate::glk_cfg::glk_design_screen`]), so
+    /// [`Self::resize`] and [`Self::set_char_px`] keep it right with nothing to
+    /// re-apply. A new session (`@restart`) starts in cell mode and must be
+    /// told again. Relayouts and redraws as [`Self::set_char_px`] does; a no-op
+    /// once the game has quit.
+    pub fn set_glk_design(&mut self, design: Option<(u32, u32)>) {
+        if self.quit {
+            return;
+        }
+        self.appglk().set_design(design);
+        self.machine.rearrange();
+        self.settle_after_event();
+        self.refresh_screen();
+    }
+
+    /// [`Self::set_glk_design`] and [`Self::set_glk_fit_mode`] in ONE relayout
+    /// (SQ-1707), so a boot or `@restart` into aspect mode shows the story a
+    /// single Arrange rather than a stretch one first.
+    pub fn set_glk_design_fit(&mut self, design: Option<(u32, u32)>, mode: crate::glk_cfg::GlkFitMode) {
+        if self.quit {
+            return;
+        }
+        self.appglk().set_design_fit_mode(mode);
+        self.set_glk_design(design);
+    }
+
+    /// Choose how the design frame fills the pane (SQ-1707): stretch or aspect.
+    /// Relayouts and redraws like [`Self::set_glk_design`]; a no-op once the
+    /// game has quit. Meaningless (stored, unread) while design mode is off.
+    pub fn set_glk_fit_mode(&mut self, mode: crate::glk_cfg::GlkFitMode) {
+        if self.quit {
+            return;
+        }
+        self.appglk().set_design_fit_mode(mode);
+        self.machine.rearrange();
+        self.settle_after_event();
+        self.refresh_screen();
+    }
+
+    /// The [`crate::glk_cfg::GlkFit`] for the current pane and cell size (in
+    /// cells), or `None` in cell mode. The frame, each window's rect and the
+    /// click inverse for the TUI's current layout.
+    pub fn glk_fit(&mut self) -> Option<crate::glk_cfg::GlkFit> {
+        self.appglk().design_fit()
+    }
+
+    /// The primary text-buffer window id — the story window whose text the app
+    /// mirrors into the transcript (the first text buffer opened, retargeted to
+    /// the window awaiting line input); `None` before one is open. The same id
+    /// the app's own renderer treats as primary.
+    pub fn primary_text_window(&mut self) -> Option<u32> {
+        self.appglk().primary()
+    }
+
+    /// Load (or clear, `None`) the stretch-mode window mask from Blorb `Pict`
+    /// `resnum` (SQ-1703 P4) and return it for the host to carry. Redraws.
+    pub fn set_glk_mask(&mut self, resnum: Option<u32>) -> Option<std::sync::Arc<crate::glk_cfg::GlkMask>> {
+        if self.quit {
+            return None;
+        }
+        let mask = self.appglk().set_design_mask(resnum);
+        self.refresh_screen();
+        mask
+    }
+
+    /// The Glk screen the layout is currently measured against, with every
+    /// leaf window's rect in that screen's layout units (SQ-1703).
+    pub fn glk_layout(&mut self) -> GlkLayout {
+        let g = self.appglk();
+        GlkLayout {
+            screen: g.glk_screen(),
+            windows: g
+                .leaf_layout()
+                .iter()
+                .map(|&(id, wintype, rect, _)| GlkWindowRect { id, wintype, rect })
+                .collect(),
+        }
+    }
+
     /// Drive one turn's worth of execution, updating `pending`/`quit`/`pending_io`.
     /// On an in-game `@save`/`@restore` the drive stops with `pending_io` set (and
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
@@ -933,6 +1164,12 @@ impl GlulxSession {
                 self.parse_names().and_then(|n| gvm::i7map::I7World::detect(self.machine.mem(), n))
             })
             .as_ref()
+    }
+
+    /// This story's grammar/dictionary, cached — see the [`vocab_cache`](Self::vocab_cache)
+    /// field's own doc for why.
+    fn cached_vocabulary(&self) -> Option<&crate::vocab::StoryVocabulary> {
+        self.vocab_cache.get_or_init(|| Engine::story_vocabulary(self)).as_ref()
     }
 
     /// What the STORY calls the room at `addr`, where its compiled world model
@@ -1096,6 +1333,21 @@ impl GlulxSession {
         }
     }
 
+    /// The `player-global` sidecar's own boot-only cross-check (SQ-1655),
+    /// mirroring [`Self::sidecar_addr_plausible`] for the same reason: a value
+    /// that is neither `0` nor one of this story's OBJECTS is not a plausible
+    /// `player` global at boot, whatever a stale sidecar remembers. `true` when
+    /// there is no object list to check against at all, which leaves the
+    /// sidecar exactly as trusted as it was before this existed.
+    fn player_sidecar_plausible(&self, addr: u32) -> bool {
+        let Some(names) = self.parse_names() else { return true };
+        match self.machine.mem().read32(addr) {
+            Some(0) => true,
+            Some(v) => names.is_object(self.machine.mem(), v),
+            None => false,
+        }
+    }
+
     /// The address the game's `location` global currently holds — the room the
     /// player is in, as the STORY sees it (SQ-1241).
     ///
@@ -1116,6 +1368,12 @@ impl GlulxSession {
     /// [`location_addr`](Self::location_addr) where that is known — see
     /// [`gvm::objects::ParseNames::find_player`].
     ///
+    /// SQ-1655: where the static scan refuses outright (Counterfeit Monkey's
+    /// compiled `parse_name`-routine avatar — see [`crate::glulx_playerlock`]'s
+    /// module doc), falls back to [`Self::player_global_addr`] — the fallback
+    /// this learner exists for, and never consulted when the static scan
+    /// already has an answer.
+    ///
     /// Cached for the turn, refusal included: see the
     /// [`player_addr`](Self::player_addr) field.
     fn player_addr(&self) -> Option<u32> {
@@ -1124,9 +1382,186 @@ impl GlulxSession {
         }
         let found = self
             .parse_names()
-            .and_then(|n| n.find_player(self.machine.mem(), self.player_room_hint()));
+            .and_then(|n| n.find_player(self.machine.mem(), self.player_room_hint()))
+            .or_else(|| self.player_global_addr());
         *self.player_addr.borrow_mut() = Some(found);
         found
+    }
+
+    /// The avatar address [`crate::glulx_playerlock::PlayerLock`] currently
+    /// names, dereferencing the locked GLOBAL the same way
+    /// [`Self::location_addr`] dereferences [`crate::glulx_roomlock::RoomLock`]'s
+    /// — `None` while the learner hasn't locked, and for a lock whose word
+    /// currently reads zero (the game may legitimately park it there
+    /// momentarily, exactly as [`crate::glulx_roomlock::RoomLock::room_id`]
+    /// already tolerates for `location`).
+    fn player_global_addr(&self) -> Option<u32> {
+        let global = self.player_lock.locked()?;
+        self.machine.mem().read32(global).filter(|&v| v != 0)
+    }
+
+    /// The live top-level children of the object at `addr` — what a room
+    /// "contains" right now, from [`Self::parse_names`]'s object tree. `Vec::new()`
+    /// for a story with no readable object list. Shared by
+    /// [`Self::new_with_store`] (the opening room's baseline) and
+    /// [`Self::learn_player_from_pickups`] (every turn's baseline for the next).
+    fn room_children_snapshot(&self, addr: u32) -> Vec<u32> {
+        match self.parse_names() {
+            Some(names) => names.children(self.machine.mem(), addr),
+            None => Vec::new(),
+        }
+    }
+
+    /// Feed [`crate::glulx_playerlock::PlayerLock`] one turn's worth of evidence
+    /// (SQ-1655): an item that stood in the SAME room a moment ago and does not
+    /// any more, whose new container looks like an avatar, is exactly what a
+    /// successful `take` (or `take all`, `get X`, …) leaves behind.
+    ///
+    /// Compares [`Self::pickup_watch`](the field) — this SAME room's children as
+    /// of the moment this method last ran — against the room's children RIGHT
+    /// NOW. An item present before and absent now left the room somehow; its
+    /// live [`gvm::objects::ParseNames::parent`] says where. Four things rule
+    /// out a false reading before the evidence ever reaches the learner:
+    ///
+    /// * **the turn must be a genuine take-shaped command.** Measured directly
+    ///   against `stories/Anchorhead.gblorb`: without this gate, `climb on
+    ///   garbage can` reads as a pickup, because the PLAYER's own address stops
+    ///   being a direct child of the room (they are now standing ON the can) and
+    ///   the can itself passes every remaining check — an avatar-plausible
+    ///   object, situated, holding something that "left the room". The garbage
+    ///   can then locks as "the avatar". `enter window`, `up`/`down` and every
+    ///   other containment-shuffling command do the same for a different
+    ///   scenery object each time, which is what produced a DIFFERENT wrong
+    ///   `player_object()` handle on nearly every one of Anchorhead's first
+    ///   dozen turns before this gate existed. [`crate::session::take_command_target`]
+    ///   — the same lexical take-or-not test `classify_take_attempt` already
+    ///   trusts for the identical "is this worth reading as a pickup" question
+    ///   — is cheap enough to run every turn and precise enough to rule the
+    ///   whole class out: none of those commands names "take" or one of its
+    ///   story-recognised synonyms, so none of them reaches the object-tree
+    ///   diff below at all;
+    /// * the room must be the SAME room both times — a room change explains an
+    ///   item's disappearance on its own (the player simply isn't standing
+    ///   there to see it any more), and is not evidence of anything;
+    /// * an item removed from play entirely (`parent` now `None`) or still a
+    ///   direct child of the room (moved but not taken) teaches nothing;
+    /// * the new parent must pass the SAME avatar-plausibility test
+    ///   [`gvm::objects::ParseNames::find_player`] itself applies to its own
+    ///   candidates — a real object of this story, standing somewhere
+    ///   (`parent(mem, new_parent).is_some()`) — never "whatever happened to be
+    ///   holding it", which could as easily be an NPC.
+    ///
+    /// This is allowed to UNDER-report (a genuine pickup that happens through a
+    /// verb this story's grammar does not resolve to "take" teaches nothing) —
+    /// the same "never guess, record nothing instead" discipline
+    /// [`crate::session::classify_take_attempt`]'s own doc holds itself to, and
+    /// for the identical reason: a missed turn of evidence costs nothing here,
+    /// where a false one corrupts the very address every later turn trusts.
+    ///
+    /// Runs every turn a command was typed, win or lose, and always refreshes
+    /// the watch for next turn: a room the player has just left is never worth
+    /// comparing against once they are gone, and a turn that taught nothing
+    /// must not leave a stale baseline for the next one to misread as
+    /// "everything vanished".
+    fn learn_player_from_pickups(&mut self, location: Option<&LocationInfo>, ram: &[u32]) {
+        let room_addr = location.and_then(|l| self.room_addrs.borrow().get(&l.number).copied());
+        let cmd = self.pending_command.take();
+        let take_shaped = cmd
+            .as_deref()
+            .is_some_and(|c| crate::session::take_command_target(c, self.cached_vocabulary()).is_some());
+
+        let mut evidence: Vec<u32> = Vec::new();
+        if take_shaped {
+            if let (Some(room_addr), Some((prev_room, prev_children))) = (room_addr, self.pickup_watch.clone()) {
+                if prev_room == room_addr {
+                    if let Some(names) = self.parse_names() {
+                        let mem = self.machine.mem();
+                        let current = names.children(mem, room_addr);
+                        for item in prev_children {
+                            if current.contains(&item) {
+                                continue; // still there; no evidence either way
+                            }
+                            let Some(new_parent) = names.parent(mem, item) else { continue }; // removed from play
+                            if new_parent == room_addr {
+                                continue; // moved, but stayed a direct child of the room
+                            }
+                            if names.is_object(mem, new_parent) && names.parent(mem, new_parent).is_some() {
+                                evidence.push(new_parent);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for avatar in evidence {
+            self.player_lock.observe_pickup(ram, avatar);
+        }
+        self.pickup_watch = room_addr.map(|addr| (addr, self.room_children_snapshot(addr)));
+    }
+
+    /// Feed [`crate::glulx_playerlock::PlayerLock`] a SECOND, independent kind of evidence
+    /// (SQ-1657): the `inventory` command's own prose names the items the player already
+    /// carries, and the story's own vocabulary says which objects those words identify — so
+    /// the avatar is whichever object the matched items' live [`gvm::objects::ParseNames::parent`]
+    /// agrees on.
+    ///
+    /// This complements [`Self::learn_player_from_pickups`] (SQ-1655) rather than replacing
+    /// it: both Anchorhead and Counterfeit Monkey start the player already holding their key
+    /// item(s) — the trenchcoat/wedding ring/umbrella, the R-remover — with no take ever
+    /// needed early on, so the pickup watcher has no confirmed pickup to learn from at all.
+    /// `inventory` is the one command whose prose exhaustively lists what the player already
+    /// has, independent of ever having taken any of it.
+    ///
+    /// Fed into the exact SAME [`crate::glulx_playerlock::PlayerLock::observe_pickup`] the
+    /// pickup evidence above uses, not a parallel acceptance path: an inventory match that
+    /// agrees with an existing lock is silent, one that contradicts it goes through the same
+    /// reject-and-relock discipline, and one found while unlocked elects a candidate the same
+    /// way. See that method's own doc for what all of that means; this method's only job is
+    /// turning this turn's prose into the one address it asks for — [`inventory_evidence_parent`]
+    /// is the pure part of that job, kept separate so it is testable without booting a story.
+    ///
+    /// `cmd` must be an `inventory`-shaped command ([`crate::session::inventory_command`]) —
+    /// the same lexical, story-grammar-driven gate `learn_player_from_pickups` applies to a
+    /// take-shaped one, for the identical reason: without it, any turn whose prose happens to
+    /// use an item's own name (an "examine" reply, an ordinary room description) would read
+    /// as inventory evidence.
+    fn learn_player_from_inventory(&mut self, cmd: Option<&str>, transcript: &str, ram: &[u32]) {
+        let Some(cmd) = cmd else { return };
+        if !crate::session::inventory_command(cmd, self.cached_vocabulary()) {
+            return;
+        }
+        let Some(names) = self.parse_names() else { return };
+        // SQ-1657: both commercial specimens have a rich conversation/hint-quip system whose
+        // "topic" objects carry entire ORDINARY-ENGLISH SENTENCES as their own static `name`
+        // vocabulary (Counterfeit Monkey confirmed directly: "had", "isn't", "nothing", "so"
+        // and dozens of other filler words each uniquely name exactly one quip object, the
+        // same "exactly one object answers to this word" bar a genuine held item passes). A
+        // bare `is_object(mem, addr) && parent(mem, addr).is_some()` plausibility test — the
+        // one the pickup watcher above uses — cannot tell the two apart: a quip object is a
+        // real $70-tagged tree member with a real parent exactly like the avatar is. What DOES
+        // tell them apart is confirmed directly too: the avatar's parent chain reaches a
+        // declared ROOM in this story's own compiled world model (it is, after all, standing
+        // somewhere on the map), while every sampled quip-container's does not (quips are
+        // never placed on the map at all). So where [`Self::i7_world`] is readable, plausibility
+        // is upgraded to that stronger, room-grounded test; where it is not (a story the reader
+        // refuses), this falls back to the same weaker test the pickup watcher trusts, rather
+        // than refusing the whole evidence source outright.
+        let mem = self.machine.mem();
+        let objects: Vec<(u32, grammar_model::ObjectWords)> =
+            names.objects().filter_map(|addr| names.of(mem, addr).map(|ow| (addr, ow))).collect();
+        let world = self.i7_world();
+        let candidate = inventory_evidence_parent(transcript, &objects, |addr| names.parent(mem, addr), |addr| {
+            if !names.is_object(mem, addr) {
+                return false;
+            }
+            match world {
+                Some(w) => w.rooms().iter().any(|&r| names.has_ancestor(mem, addr, r)),
+                None => names.parent(mem, addr).is_some(),
+            }
+        });
+        if let Some(avatar) = candidate {
+            self.player_lock.observe_pickup(ram, avatar);
+        }
     }
 
     /// The room to judge avatar candidates by — the *only* thing it is used
@@ -1333,6 +1768,17 @@ impl GlulxSession {
         // command — cragne Manor's content warning (SQ-0733).
         let awaiting_line_input = self.pending == InputKind::Line;
         let heading = self.appglk().take_room_heading(awaiting_line_input);
+        // SQ-1653: must also follow `take_room_heading` on the same drain — see
+        // `AppGlk::heading_is_a_later_distinct_entry`'s own doc.
+        let later_distinct_entry = self.appglk().heading_is_a_later_distinct_entry();
+        // SQ-1625: must follow `take_room_heading` immediately (same drain) — see that
+        // accessor's own doc. Read regardless of what happens to `heading` below
+        // (`refuse_banner_the_status_line_contradicts`, `name_this_room`): those decide whether
+        // THIS app trusts the heading as a room change, not whether the story printed a
+        // description alongside it.
+        let description = self.appglk().take_room_description();
+        let (heading, description) =
+            self.refuse_a_later_distinct_entry_in_a_list(heading, description, later_distinct_entry);
         // SQ-1351: and a banner the story's own status line contradicts is not a
         // heading at all, whatever it is styled as.
         let heading = self.refuse_banner_the_status_line_contradicts(heading);
@@ -1423,6 +1869,27 @@ impl GlulxSession {
         self.check_room_lock_against_story(&ram, movement, story_named.as_deref());
         let location = self.last_room.clone();
         let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
+        // SQ-1655: before computing this turn's items — a confirmed pickup this turn
+        // may just have identified the avatar for the very first time, and that fresh
+        // lock must be visible to the `glulx_item_observations` call right below, not
+        // one turn late. See `learn_player_from_pickups`'s own doc.
+        let was_player_locked = self.player_lock.locked();
+        // SQ-1657: `learn_player_from_pickups` consumes `pending_command` below, so this turn's
+        // command is cloned out first for `learn_player_from_inventory`'s own gate.
+        let cmd_this_turn = self.pending_command.clone();
+        self.learn_player_from_pickups(location.as_ref(), &ram);
+        self.learn_player_from_inventory(cmd_this_turn.as_deref(), &transcript, &ram);
+        match (was_player_locked, self.player_lock.locked()) {
+            (None, Some(addr)) => self.remember_player_global(addr),
+            (Some(_), None) => self.forget_player_global(),
+            _ => {}
+        }
+        // SQ-1627: a direct `Introspect` query, not a transcript heuristic — no v6-style gate
+        // needed. See the helper's own doc for why Glulx needs only one room query (unlike the
+        // Z-machine): this format has no way to tell an OPEN container from a closed one at all.
+        // SQ-1648: this turn's own `transcript` is passed through as the tier-1 evidence
+        // `item_tracker_display_name` prefers.
+        let items = self.glulx_item_observations(location.as_ref(), &transcript);
         TurnResult {
             transcript,
             transcript_runs,
@@ -1444,7 +1911,84 @@ impl GlulxSession {
             transcript_elems: elems,
             prose_retired: None,
             declared_exit: None,
+            description,
+            items,
         }
+    }
+
+    /// This turn's item observations (SQ-1627) — the room the player is standing in and their
+    /// own carried inventory, exactly like `GameSession::zvm_item_observations`'s sibling, but
+    /// with only ONE room query rather than two: [`Introspect::room_objects_excluding`]'s own doc
+    /// explains why — Inform's `container`/`open`/`transparent` attribute NUMBERING is a library
+    /// convention this format's own layout says nothing about, so there is no way to recurse into
+    /// an open container at all, and every room sighting here is therefore already the room's
+    /// direct top level.
+    ///
+    /// The player id prefers [`Self::player_hint`] over the raw [`Introspect::player_object`]
+    /// lookup (SQ-1631 Fix 3) — see `GameSession::zvm_item_observations`'s doc for why: on
+    /// virtually every Inform 7 game `result.items` was previously empty here regardless, because
+    /// this format's `printed_name` is routinely blank (Fix 1 below); once that filter is widened,
+    /// the player-id bypass alone would still misfire for an unnamed player object.
+    ///
+    /// **SQ-1640: excludes pure scenery/backdrop nouns and doors**, read live off each object's
+    /// own `scenery`/`door` attribute bits (`gvm::objects::ParseNames::is_scenery_or_door`) —
+    /// structural children of the room they stand in exactly like a portable object is, but not
+    /// real inventory-style items (an alley's entrance doors, its garbage can, its sky). Deliberately
+    /// does NOT exclude `static`: a static-but-not-scenery object (a vending machine, a patch of
+    /// soil) is still a genuine take-and-fail candidate for `session::classify_take_attempt`'s
+    /// fixed-in-place detector, which needs it present in `result.items` to work at all. Where this
+    /// image's identifier-names table cannot resolve one or both attribute numbers at all
+    /// (`$OMIT_SYMBOL_TABLE`, or a library that spells neither), `is_scenery_or_door` fails open —
+    /// never hides a real item because the check was inconclusive.
+    fn glulx_item_observations(&self, location: Option<&LocationInfo>, prose: &str) -> Vec<crate::session::ItemObservation> {
+        use crate::session::{ItemObservation, ObservedItemLocation};
+        let mut out = Vec::new();
+        let player = self.player_hint.or_else(|| Introspect::player_object(self));
+        let names = self.parse_names();
+        let mem = self.machine.mem();
+        let is_scenery_or_door =
+            |id: u32| names.is_some_and(|n| n.is_scenery_or_door(mem, id));
+
+        let room: Vec<grammar_model::ObjectWords> = match location {
+            Some(loc) => self
+                .room_objects_excluding(loc.number, player)
+                .into_iter()
+                .filter(|ow| !is_scenery_or_door(ow.id))
+                .collect(),
+            None => Vec::new(),
+        };
+        let carried: Vec<grammar_model::ObjectWords> = match player {
+            Some(p) => self.contents(p).into_iter().filter(|ow| !is_scenery_or_door(ow.id)).collect(),
+            None => Vec::new(),
+        };
+
+        // SQ-1652: see `GameSession::zvm_item_observations`'s matching comment — every item
+        // observed this turn shares one turn-wide `prose` string, so names are resolved only
+        // once every item under consideration this turn is known.
+        let all_words: Vec<&grammar_model::ObjectWords> = room.iter().chain(carried.iter()).collect();
+        let others_for = |id: u32| -> Vec<&grammar_model::ObjectWords> {
+            all_words.iter().copied().filter(|ow| ow.id != id).collect()
+        };
+
+        for ow in &room {
+            // SQ-1631 Fix 1: a display name, not the raw printed name alone — Inform 7's
+            // objects routinely have no hardware short name at all, only parse words, and a
+            // filter on the bare printed name drops every one of them (the exact SQ-1042 bug
+            // this mirrors; see `render::room_info::list_room_objects_excluding`'s own doc).
+            // SQ-1648: `item_tracker_display_name`, not `display_name` directly — see that
+            // function's own doc for why.
+            let Some(name) = item_tracker_display_name(ow, prose, &others_for(ow.id)) else {
+                continue;
+            };
+            out.push(ItemObservation { key: ow.id, name, location: ObservedItemLocation::RoomDirect, words: ow.clone() });
+        }
+        for ow in &carried {
+            let Some(name) = item_tracker_display_name(ow, prose, &others_for(ow.id)) else {
+                continue;
+            };
+            out.push(ItemObservation { key: ow.id, name, location: ObservedItemLocation::Carried, words: ow.clone() });
+        }
+        out
     }
 
     /// Words of RAM the room-lock learner scans, from `ramstart`.
@@ -1724,6 +2268,36 @@ impl GlulxSession {
         self.appglk().status_room_name()
     }
 
+    /// Refuse a SECOND, differently-named own-line heading this turn as a room
+    /// (SQ-1653) — a listing (a page title over item entries), not an arrival —
+    /// once a room is already known.
+    ///
+    /// `later_distinct_entry` is [`crate::glk_backend::AppGlk::heading_is_a_later_distinct_entry`],
+    /// read on the same drain as `heading`/`description` — see that accessor's own
+    /// doc for the mechanism (*Superluminal Vagrant Twin*'s `map`/`prospects`) and
+    /// why it cannot be decided in `glk_backend` alone: a game's OWN title banner
+    /// joined to its credits block legitimately precedes the opening room on the
+    /// turn a title menu is dismissed (*King of Shreds and Patches*), which is the
+    /// exact same shape on the buffer's own terms. `self.last_room` is the fact
+    /// `glk_backend` cannot see that tells the two apart — `None` on that opening
+    /// turn (nothing to lose refusing there: `heading` is `None` either way, and
+    /// `needs_a_room_name` below asks the story directly), `Some` once
+    /// `map`/`prospects` are ever typed (nothing to lose refusing there either — a
+    /// real mid-turn transition still reaches the player's screen and is picked up
+    /// the next time the story prints, or a `look` reads, its own heading alone).
+    fn refuse_a_later_distinct_entry_in_a_list(
+        &self,
+        heading: Option<String>,
+        description: Option<String>,
+        later_distinct_entry: bool,
+    ) -> (Option<String>, Option<String>) {
+        if later_distinct_entry && self.last_room.is_some() {
+            (None, None)
+        } else {
+            (heading, description)
+        }
+    }
+
     /// Drop a bold own-line banner the story's own STATUS LINE contradicts
     /// (SQ-1351) — it names something, but not the room.
     ///
@@ -1864,6 +2438,10 @@ impl GlulxSession {
         let display = self.appglk().display_snapshot();
         let kept_diagnostics = self.machine.take_diagnostics();
         self.drop_world_caches();
+        // SQ-1639: this "look" is exactly the same shape as a real command line —
+        // see `AppGlk::begin_command_line`'s own doc for why the read prompt this
+        // turn ended on would otherwise sink the heading it is here to find.
+        self.appglk().begin_command_line();
         self.machine.supply_line("look");
         let stopped = drive_auto(&mut self.machine, &self.store, self.turn_budget);
         self.machine.flush();
@@ -1915,7 +2493,7 @@ impl GlulxSession {
 
     /// Where the learned `location` address is remembered for this story.
     fn room_global_path(&self) -> Option<std::path::PathBuf> {
-        (!self.store.absent()).then(|| self.store.dir().join("room-global"))
+        (!self.store.absent()).then(|| self.store.shared_dir().join("room-global"))
     }
 
     /// An identity for the RUNNING image, cheap enough to stamp on every write
@@ -1985,7 +2563,7 @@ impl GlulxSession {
                 let _ = std::fs::create_dir_all(dir);
             }
             let (checksum, extstart) = self.image_identity();
-            let _ = std::fs::write(p, format!("{addr} {checksum:x}:{extstart:x}"));
+            let _ = crate::storage::atomic_write(&p, format!("{addr} {checksum:x}:{extstart:x}").as_bytes());
         }
     }
 
@@ -1994,11 +2572,70 @@ impl GlulxSession {
     /// the story caught out straight back at the next launch, before a single
     /// turn has been played and with the rejection list — which is a fact about
     /// this SESSION's learning, not about the story file — starting empty again.
+    // Deleting the catalogue's file is right even for a named player: the learned
+    // address is shared knowledge, and it just proved wrong for everyone.
     fn forget_room_global(&self) {
         if !self.store.may_write() {
             return;
         }
         if let Some(p) = self.room_global_path() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    // ── SQ-1655: the `player-global` sidecar, mirroring `room-global` above ──
+    //
+    // Same shape, same reasoning, same on-disk format (`"<addr> <checksum>:<extstart>"`,
+    // keyed by `image_identity` exactly like `room-global` — see that field's own
+    // docs for why a bare-decimal legacy format doesn't apply here: this sidecar
+    // never had one). A separate file, not a second line in `room-global`, so
+    // either learner's sidecar can be inspected, deleted or go stale independently
+    // of the other's.
+
+    /// Where the learned `player` address is remembered for this story.
+    fn player_global_path(&self) -> Option<std::path::PathBuf> {
+        (!self.store.absent()).then(|| self.store.shared_dir().join("player-global"))
+    }
+
+    /// The address learned in an earlier run of THIS BUILD of this story, if
+    /// any — `None` for a sidecar stamped by a different one (see
+    /// [`Self::image_identity`]), treated exactly like an absent sidecar.
+    fn remembered_player_global(&self) -> Option<u32> {
+        let raw = std::fs::read_to_string(self.player_global_path()?).ok()?;
+        let (addr, token) = raw.trim().split_once(' ')?;
+        let addr = addr.parse::<u32>().ok().filter(|&a| a != 0)?;
+        let (checksum, extstart) = token.split_once(':')?;
+        let checksum = u32::from_str_radix(checksum, 16).ok()?;
+        let extstart = u32::from_str_radix(extstart, 16).ok()?;
+        (self.image_identity() == (checksum, extstart)).then_some(addr)
+    }
+
+    /// Remember a freshly learned address for later runs, stamped with this
+    /// build's [`Self::image_identity`]. Best-effort: a story with no writable
+    /// directory simply re-learns next time.
+    fn remember_player_global(&self, addr: u32) {
+        if !self.store.may_write() {
+            return;
+        }
+        if let Some(p) = self.player_global_path() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let (checksum, extstart) = self.image_identity();
+            let _ = crate::storage::atomic_write(&p, format!("{addr} {checksum:x}:{extstart:x}").as_bytes());
+        }
+    }
+
+    /// Delete the remembered address. Called where the story has just
+    /// contradicted the lock, mirroring [`Self::forget_room_global`]'s own
+    /// reasoning: without this a stale sidecar would hand the very word the
+    /// story caught out straight back at the next launch.
+    // As above: shared knowledge that turned out wrong is dropped for every player.
+    fn forget_player_global(&self) {
+        if !self.store.may_write() {
+            return;
+        }
+        if let Some(p) = self.player_global_path() {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -2157,6 +2794,20 @@ impl GlulxSession {
         self.appglk().char_pixels()
     }
 
+    /// In stretch design mode, every graphics window's `(id, (width, height))`
+    /// in design pixels, for [`glk_mouse_target_design`]; empty in cell mode.
+    pub fn design_graphics_px(&mut self) -> Vec<(u32, (u32, u32))> {
+        let l = self.glk_layout();
+        if l.screen.unit_px != (1, 1) {
+            return Vec::new();
+        }
+        l.windows
+            .iter()
+            .filter(|w| w.wintype == gvm::glk::WinType::Graphics)
+            .map(|w| (w.id, (w.rect.width, w.rect.height)))
+            .collect()
+    }
+
     /// Take what the app's input line should hold for the newest line-input request,
     /// if one has appeared since the last call (Glk spec §4.2 `initlen`). One-shot
     /// per request; `Some("")` means "start empty", which is how the app learns the
@@ -2174,6 +2825,42 @@ impl GlulxSession {
     /// not awaiting a line.
     pub fn sync_line_input(&mut self, text: &str) {
         self.machine.set_line_input_text(text);
+    }
+
+    /// Complete a suspended LINE `glk_select` with `terminator` as a registered
+    /// line-terminator keycode ([`gvm::Machine::supply_line_terminated`], Glk
+    /// spec §4.2/§11.2), then drive the game to its next input request or Quit.
+    /// Mirrors `submit`'s own drive/finish sequence, but for a terminator other
+    /// than plain Enter — the Glulx counterpart of the Z-machine's
+    /// `GameSession::submit_line_with_terminator` (SQ-1613).
+    pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u32) -> TurnResult {
+        if self.machine.trace_exec() {
+            self.machine.clear_executed_pcs();
+        }
+        if !self.quit {
+            self.machine.supply_line_terminated(command, terminator);
+            self.drive_turn();
+        }
+        self.finish_turn()
+    }
+
+    /// While a Glulx *line* read is active, decide whether a special key the
+    /// player pressed is one the game registered as a line terminator for the
+    /// pending window (`glk_set_terminators_line_event`, Glk spec §11.2).
+    ///
+    /// Only `Escape` and the function keys can ever be a Glk terminator
+    /// ([`gvm::glk::keycode::is_terminator`]) — arrows are structurally
+    /// excluded, so unlike the Z-machine's v6 arrow gate (SQ-0460, which is
+    /// v6-only anyway) no separate withholding step is needed here. Returns
+    /// the Glk keycode to submit with, or `None` to leave the key to its
+    /// normal app behavior.
+    pub fn line_key_terminator(&self, ki: &KeyInput) -> Option<u32> {
+        let code = key_to_glk(*ki)?;
+        if !gvm::glk::keycode::is_terminator(code) {
+            return None;
+        }
+        let win = self.machine.line_request_window()?;
+        self.machine.is_line_terminator(win, code).then_some(code)
     }
 
     /// A terminal click landed inside a mouse-watching window: deliver a Glk
@@ -2286,6 +2973,28 @@ pub fn glk_mouse_target(
     char_px: (u32, u32),
     sub_px: Option<(u16, u16)>,
 ) -> Option<(u32, u32, u32)> {
+    glk_mouse_target_design(overlay_open, col, row, story, requested, win_rects, char_px, sub_px, &[])
+}
+
+/// [`glk_mouse_target`] for stretch design mode (SQ-1703 P3). A graphics
+/// window listed in `design_px` (`(win, (width, height))` in design pixels,
+/// from [`GlulxSession::design_graphics_px`]) was stretched over its cell rect,
+/// so a click reports the INVERSE-stretched design-pixel position inside it
+/// ([`crate::glk_cfg::cell_offset_to_design_px`]) instead of cells times
+/// `char_px`. Any window not listed (every window in cell mode, and every grid
+/// window, whose cells are exactly the characters told) is answered exactly as
+/// [`glk_mouse_target`] always has.
+pub fn glk_mouse_target_design(
+    overlay_open: bool,
+    col: u16,
+    row: u16,
+    story: (u16, u16, u16, u16),
+    requested: &[u32],
+    win_rects: &[(u32, crate::engine::WinKind, ratatui::layout::Rect)],
+    char_px: (u32, u32),
+    sub_px: Option<(u16, u16)>,
+    design_px: &[(u32, (u32, u32))],
+) -> Option<(u32, u32, u32)> {
     if overlay_open {
         return None;
     }
@@ -2299,7 +3008,20 @@ pub fn glk_mouse_target(
         .find(|&&(id, _, r)| requested.contains(&id) && r.contains(pt))?;
     let rel_x = (col - rect.x) as u32;
     let rel_y = (row - rect.y) as u32;
-    let (vx, vy) = if kind == crate::engine::WinKind::Graphics {
+    let stretched = design_px.iter().find(|(id, _)| *id == win).map(|&(_, px)| px);
+    let (vx, vy) = if let (Some((pw, ph)), true) = (stretched, kind == crate::engine::WinKind::Graphics) {
+        let (fx, fy) = match sub_px {
+            Some((x, y)) => (
+                (x as f64 / char_px.0.max(1) as f64).min(0.999),
+                (y as f64 / char_px.1.max(1) as f64).min(0.999),
+            ),
+            None => (0.5, 0.5),
+        };
+        (
+            crate::glk_cfg::cell_offset_to_design_px(rel_x, fx, rect.width as u32, pw),
+            crate::glk_cfg::cell_offset_to_design_px(rel_y, fy, rect.height as u32, ph),
+        )
+    } else if kind == crate::engine::WinKind::Graphics {
         // The kitty render scales the canvas to exactly the window's cell rect
         // (`render_kitty_virtual`), so cells and canvas pixels stay in proportion
         // and a cell offset converts straight to a canvas pixel. Clamped inside
@@ -2361,7 +3083,95 @@ fn heading_to_room(name: &str) -> LocationInfo {
     }
 }
 
+/// The pure matching core behind [`GlulxSession::learn_player_from_inventory`] (SQ-1657):
+/// isolated from [`gvm::memory::Memory`]/[`gvm::objects::ParseNames`] the way
+/// [`crate::glulx_playerlock::PlayerLock`] itself is from both — a function of data the
+/// caller has already read, never of live engine state, so it is testable without booting a
+/// story.
+///
+/// `objects` is the WHOLE story's objects as `(address, parse words)` — every object this
+/// turn's prose could possibly name, not only the player's current holdings, because the
+/// disambiguation rule below needs to know about every OTHER object too. `parent_of` is
+/// [`gvm::objects::ParseNames::parent`]. `is_plausible_avatar` asks whatever situatedness
+/// question the caller trusts for THIS evidence source — see
+/// [`GlulxSession::learn_player_from_inventory`]'s own doc for why it needs a stronger one
+/// than the bare "has some parent" test [`gvm::objects::ParseNames::find_player`] and the
+/// pickup watcher apply to their own candidates — supplied as a closure because only the
+/// caller can ask a live `ParseNames` either question.
+///
+/// Every word of `prose` is checked against the whole `objects` list: a word more than one
+/// object answers to cannot say which one the prose actually meant, so it is dropped as
+/// evidence for either — the same "shared word, trust neither" discipline SQ-1652's
+/// `crate::session::item_tracker_display_name` already applies, here to find an object's
+/// IDENTITY rather than its display name, and applied uniformly so it also covers the
+/// single-match case (Counterfeit Monkey's starting inventory is one item, the R-remover).
+/// The objects that survive that filter must all agree on one common parent — disagreement
+/// among them teaches nothing, on the same never-guess footing — and that parent must pass
+/// `is_plausible_avatar`. `None` whenever any of this comes up empty or disagreeing: this is
+/// allowed to under-report, exactly like [`GlulxSession::learn_player_from_pickups`]'s own
+/// evidence.
+fn inventory_evidence_parent(
+    prose: &str,
+    objects: &[(u32, grammar_model::ObjectWords)],
+    parent_of: impl Fn(u32) -> Option<u32>,
+    is_plausible_avatar: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    let prose_words: std::collections::BTreeSet<String> = prose
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .map(|w| w.to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut matched: Vec<u32> = Vec::new();
+    for word in &prose_words {
+        let mut hit: Option<u32> = None;
+        for (addr, ow) in objects {
+            if ow.refers_to(word) {
+                if hit.is_some() {
+                    hit = None; // ambiguous: more than one object claims this word
+                    break;
+                }
+                hit = Some(*addr);
+            }
+        }
+        if let Some(addr) = hit {
+            if !matched.contains(&addr) {
+                matched.push(addr);
+            }
+        }
+    }
+    if matched.is_empty() {
+        return None;
+    }
+    // Plausibility is checked BEFORE agreement, not after: a matched word that happens to
+    // belong to an implausible object (CM's quip/hint-topic objects, see this function's
+    // caller) must not be allowed to manufacture a false disagreement against a genuinely
+    // plausible match — it is simply not evidence, the same as a word matching nothing at all.
+    let mut parents = matched.iter().filter_map(|&addr| parent_of(addr)).filter(|&p| is_plausible_avatar(p));
+    let first = parents.next()?;
+    if !parents.all(|p| p == first) {
+        return None; // the plausible matched items disagree on who holds them; nothing to commit to
+    }
+    Some(first)
+}
+
 /// The empty initial screen snapshot.
+/// One leaf window's rectangle, in the layout units of the [`GlkLayout::screen`]
+/// it was laid out against (SQ-1703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlkWindowRect {
+    pub id: u32,
+    pub wintype: gvm::glk::WinType,
+    pub rect: gvm::glk::Rect,
+}
+
+/// The Glk screen and every leaf window's rect on it: what a host that maps
+/// design-pixel windows onto its own surface reads (SQ-1703).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlkLayout {
+    pub screen: gvm::glk::GlkScreen,
+    pub windows: Vec<GlkWindowRect>,
+}
+
 fn blank_screen() -> ScreenModel {
     ScreenModel {
         root: WinNode::Blank,
@@ -2380,6 +3190,12 @@ impl Engine for GlulxSession {
         if self.machine.trace_exec() {
             self.machine.clear_executed_pcs();
         }
+        // SQ-1655: only a genuine LINE command is a candidate take — when `pending`
+        // is `Char` below, `command` is coerced into a single keypress instead (a
+        // menu, a "press any key"), which is never a player-typed command.
+        if !self.quit && self.pending != InputKind::Char {
+            self.pending_command = Some(command.to_string());
+        }
         if !self.quit {
             if self.pending == InputKind::Char {
                 // A LINE must never reach a keypress read (SQ-1270, contract on
@@ -2396,6 +3212,10 @@ impl Engine for GlulxSession {
                 let code = key_to_glk(key).expect("Char and Enter always map to a Glk code");
                 self.machine.supply_char(code);
             } else {
+                // SQ-1639: see `AppGlk::begin_command_line`'s own doc — a real
+                // command line is about to run, and the bare ">" the last turn
+                // ended on left every scan thinking it is still mid-line.
+                self.appglk().begin_command_line();
                 self.machine.supply_line(command);
             }
             self.drive_turn();
@@ -2419,6 +3239,10 @@ impl Engine for GlulxSession {
         self.machine.flush();
         let raw = self.appglk().take_transcript().0;
         if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw }
+    }
+
+    fn set_player_hint(&mut self, hint: Option<u16>) {
+        self.player_hint = hint;
     }
 
     fn drain_screen_clear(&mut self) -> bool {
@@ -2447,6 +3271,32 @@ impl Engine for GlulxSession {
 
     fn set_strip_prompt(&mut self, on: bool) {
         self.strip_prompt = on;
+    }
+
+    /// SQ-1629 Fix 2: the default [`Engine::seed_turn`] drains the boot transcript for the
+    /// host's opening banner and stops there, so without this override the starting room's own
+    /// `description`/`items` were never captured. Unlike the Z-machine, the `description` half
+    /// is not re-derivable here at all — it is a transcript heuristic that must run on the SAME
+    /// drain `take_room_heading` did, which construction (`new_with_store`) already consumed to
+    /// resolve `last_room`, stashing its paired description in `Self::boot_description` for
+    /// exactly this moment. `items` needs no such stash: it is a live `Introspect` query, same as
+    /// every other turn's.
+    fn seed_turn(&mut self) -> TurnResult {
+        let transcript_elems = self.take_transcript_elems();
+        let transcript = if transcript_elems.is_empty() { self.take_transcript() } else { String::new() };
+        let location = self.current_location();
+        let description = self.boot_description.take();
+        let items = self.glulx_item_observations(location.as_ref(), &transcript);
+        TurnResult {
+            transcript,
+            transcript_elems,
+            location,
+            quit: self.has_quit(),
+            erase_lower: self.drain_screen_clear(),
+            description,
+            items,
+            ..TurnResult::default()
+        }
     }
 
     fn pending_input(&self) -> InputKind {
@@ -3105,7 +3955,7 @@ mod tests {
         // we assert the app-side delegation: `load_vfs` populates the machine VFS
         // and `vfs_bytes` re-encodes it, using gvm's public sidecar codec.
         let mut sess =
-            GlulxSession::new(image_for(enc(0x120, &[]), 1), 80, 24, true, false, false, (1, 1), None, &[])
+            GlulxSession::new(image_for(enc(0x120, &[]), 1), 80, 24, true, false, false, (1.0, 1.0), None, &[])
                 .expect("new");
         assert!(!sess.vfs_dirty(), "a fresh session's VFS is not dirty");
         assert!(
@@ -3139,7 +3989,7 @@ mod tests {
         let sidecar = gvm::glk::encode_files(&files);
 
         let sess = GlulxSession::new(
-            simple_line_image(), 80, 24, true, false, false, (1, 1), None, &sidecar,
+            simple_line_image(), 80, 24, true, false, false, (1.0, 1.0), None, &sidecar,
         )
         .expect("new");
 
@@ -3187,7 +4037,7 @@ mod tests {
         std::fs::write(dir.join("foo.qzl"), b"pretend-save-bytes").expect("write foo.qzl");
 
         let mut sess = GlulxSession::new_in(
-            dir.clone(), image_for(body, 3), 80, 24, true, false, false, false, (1, 1), None, &[],
+            dir.clone(), image_for(body, 3), 80, 24, true, false, false, false, (1.0, 1.0), None, &[],
             [[(None, None); 11]; 2], false, None,
         )
         .expect("new_in");
@@ -3254,7 +4104,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0x84), Imm(2), Discard])); // glk_put_buffer
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         // Banner drained.
         assert_eq!(sess.take_transcript(), "OK");
@@ -3308,7 +4158,7 @@ mod tests {
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // Turn 1: the command drives into @save, which bubbles a Save request.
@@ -3353,7 +4203,7 @@ mod tests {
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // A window is open (from open_buffer_prelude) before the save.
@@ -3412,7 +4262,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
 
         let mut sess =
-            GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save));
 
         // The two triggers pick DIFFERENT bytes for Glulx — that is the whole
@@ -3431,6 +4281,7 @@ mod tests {
         crate::persist_files::save_named(
             &dir, "GLULX-TEST-0531", "slot", SaveTrigger::Ingame, &mapper::mapper::Mapper::default(),
             &ingame, None, &[], None, None, sess.aux_data(), 3, None, None, &crate::archive::SessionRecord::empty(),
+            &crate::archive::SaveSource::default(),
         )
         .expect("save_named writes the Glulx archive");
         let path = dir.join("slot.lanthorn");
@@ -3496,7 +4347,7 @@ mod tests {
         use crate::archive::SaveTrigger;
         use crate::persist_files::game_save_bytes;
 
-        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1, 1), None, &[])
+        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
             .expect("new");
         let _ = sess.take_transcript(); // drain the banner
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at prompt 1");
@@ -3557,7 +4408,7 @@ mod tests {
         body.extend(line_prompt());
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         let _ = sess.take_transcript();
         assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save));
         let ingame = game_save_bytes(&sess, SaveTrigger::Ingame);
@@ -3589,7 +4440,7 @@ mod tests {
     /// identity check runs before anything is abandoned for exactly this.
     #[test]
     fn glulx_host_restore_refuses_a_foreign_game_save_and_leaves_the_session_playable() {
-        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1, 1), None, &[])
+        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
             .expect("new");
         let _ = sess.take_transcript();
 
@@ -3601,7 +4452,7 @@ mod tests {
             b.extend(line_prompt());
             b.extend(enc(0x123, &[Imm(0), MemLoad(0x410)]));
             b.extend(enc(0x120, &[]));
-            let mut o = GlulxSession::new(image_for(b, 2), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            let mut o = GlulxSession::new(image_for(b, 2), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
             assert_eq!(o.submit("save").pending_io, Some(PendingIo::Save));
             o.save_quetzal()
         };
@@ -3642,7 +4493,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
 
         let sess = GlulxSession::new_in(
-            dir.clone(), image_for(body, 2), 80, 24, true, false, false, false, (1, 1), None, &[],
+            dir.clone(), image_for(body, 2), 80, 24, true, false, false, false, (1.0, 1.0), None, &[],
             [[(None, None); 11]; 2], false, None,
         )
         .expect("new");
@@ -3668,7 +4519,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0x62), Imm(3), MemLoad(FREF_RES)]));
         body.extend(line_prompt()); // resume point after supply_filename
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // The command drives into create_by_prompt, which bubbles a filename request.
@@ -3700,7 +4551,7 @@ mod tests {
         body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save (host-intercepted)
         body.extend(line_prompt());
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         let r1 = sess.submit("save");
         // SavedGame create_by_prompt must NOT surface a filename request; it auto-resolves
         // in-session so the turn reaches @save and bubbles a Save request in ONE turn.
@@ -3716,7 +4567,7 @@ mod tests {
         body.extend(line_prompt());
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
 
         let r1 = sess.submit("restore");
         assert_eq!(r1.pending_io, Some(PendingIo::Restore));
@@ -3741,7 +4592,7 @@ mod tests {
 
     #[test]
     fn submit_key_delivers_char_and_skips_unmapped() {
-        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
         // An unmapped key (Insert) leaves the VM untouched.
         assert!(sess.submit_key(KeyInput::Insert).is_none());
@@ -3761,7 +4612,7 @@ mod tests {
         // never ran. Falsify by reverting the `pending == InputKind::Char`
         // branch in `GlulxSession::submit`: this then asserts `quit` on a
         // session left stuck waiting, which fails.
-        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
 
         let r = sess.submit("Zebra");
@@ -3774,7 +4625,7 @@ mod tests {
         // An empty submitted line at a char prompt behaves like the app's own
         // Enter keypress (`key_to_glk(KeyInput::Enter)`), not like the
         // dropped-turn no-op a bare `supply_line("")` would produce.
-        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
 
         let r = sess.submit("");
@@ -3797,7 +4648,7 @@ mod tests {
 
     #[test]
     fn timer_only_select_suspends_as_event_and_deliver_timer_advances() {
-        let mut sess = GlulxSession::new(timer_wait_image(), 80, 24, true, false, false, (1, 1), None, &[])
+        let mut sess = GlulxSession::new(timer_wait_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
             .expect("new");
         // The timer-only select suspends as Event (not Line/Char) and did NOT
         // spin to quit — the SQ-0299 fix.
@@ -3882,7 +4733,7 @@ mod tests {
         // Shrinking the pane to 40 cols halves its width to 80 px (rows
         // unchanged); the game re-suspends on its line request (not quit).
         let mut sess =
-            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2.0, 2.0), None, &[])
                 .expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         let (w0, h0) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
@@ -3898,7 +4749,7 @@ mod tests {
     #[test]
     fn resize_after_quit_is_a_noop() {
         // A quit session must ignore resize (no drive, no panic).
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[])
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
             .expect("new");
         let r = sess.submit("go"); // drives to quit
         assert!(r.quit);
@@ -3910,7 +4761,7 @@ mod tests {
     fn finish_turn_drains_buffered_sound_ops() {
         use crate::session::SchannelOp;
         use gvm::glk::GlkBackend;
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, true, (1, 1), None, &[])
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, true, (1.0, 1.0), None, &[])
             .expect("new");
         {
             let g = sess.appglk();
@@ -3954,7 +4805,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
         let r = sess.submit("x");
         assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
@@ -3988,7 +4839,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         sess.strip_prompt = false;
         assert_eq!(sess.take_transcript(), "Hi\n> ", "banner keeps the trailing prompt");
         let r = sess.submit("x");
@@ -4016,7 +4867,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
@@ -4041,7 +4892,7 @@ mod tests {
 
     #[test]
     fn save_state_is_tagged_and_round_trips_with_guard() {
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         let save = sess.save_state();
         assert_eq!(save.engine, GLULX_ENGINE);
         assert!(!save.bytes.is_empty(), "gvm snapshot is non-empty");
@@ -4066,7 +4917,7 @@ mod tests {
     /// would have quietly turned every refusal into a false empty world.
     #[test]
     fn introspect_refuses_a_story_with_no_object_list() {
-        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert!(sess.parse_names().is_none(), "the hand-built image holds no Inform object list");
         assert!(sess.introspect().is_none(), "so introspection refuses rather than answering empty");
     }
@@ -4122,7 +4973,7 @@ mod tests {
         // Arrange + its re-select) than the archived save point, so the state
         // is functionally equivalent, not byte-identical.
         let mut sess =
-            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2.0, 2.0), None, &[])
                 .expect("new");
         let _ = sess.take_transcript(); // drain the banner
         assert_eq!(sess.pending_input(), InputKind::Line, "source session reached its line prompt");
@@ -4142,7 +4993,7 @@ mod tests {
         assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
 
         let mut fresh =
-            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2.0, 2.0), None, &[])
                 .expect("new");
         let _ = fresh.take_transcript();
         fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
@@ -4154,7 +5005,7 @@ mod tests {
     fn glulx_restore_refuses_zmachine_archive() {
         // The foreign-engine guard fires gracefully (no panic) when a zmachine
         // save is offered to a Glulx session.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         let foreign = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
         assert!(matches!(
             sess.restore_state(&foreign),
@@ -4191,7 +5042,7 @@ mod tests {
             image_for(body, 1)
         };
 
-        let mut sess = GlulxSession::new(image, 78, 20, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut sess = GlulxSession::new(image, 78, 20, true, false, false, (1.0, 1.0), None, &[]).expect("new");
 
         // Mirror the app loop: drain the banner into the transcript, take a turn.
         let mut state = AppState::default();
@@ -4242,7 +5093,7 @@ mod tests {
     #[test]
     fn mouse_windows_lists_only_watching_windows_and_char_pixels_exposed() {
         let mut sess =
-            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9.0, 19.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
         // Only the grid (window 2) watches; the buffer (window 1) does not. Ids
@@ -4257,7 +5108,7 @@ mod tests {
     #[test]
     fn deliver_mouse_resumes_the_game_and_is_one_shot() {
         let mut sess =
-            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert!(!sess.mouse_windows().is_empty(), "armed before the click");
 
         // The click resumes the suspended select; the game runs to its trailing quit.
@@ -4274,7 +5125,7 @@ mod tests {
     #[test]
     fn mouse_coordinates_are_clamped_into_the_window_the_game_was_told() {
         let mut sess =
-            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         // Window 2 is the grid: one row, the pane's full 80 columns.
         assert_eq!(sess.clamp_into_window(2, 5, 0), (5, 0), "a click inside the window is untouched");
         assert_eq!(
@@ -4436,7 +5287,7 @@ mod tests {
     #[test]
     fn hyperlink_windows_lists_only_watching_windows() {
         let mut sess =
-            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9.0, 19.0), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
         // Only the grid (window 2) watches; the buffer (window 1) does not. Ids
@@ -4448,7 +5299,7 @@ mod tests {
     #[test]
     fn deliver_hyperlink_resumes_the_game_and_is_one_shot() {
         let mut sess =
-            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
         assert!(!sess.hyperlink_windows().is_empty(), "armed before the click");
 
         // The click resumes the suspended select; the game runs to its trailing quit.
@@ -4548,7 +5399,7 @@ mod tests {
         else {
             panic!("Counterfeit Monkey is a Glulx story");
         };
-        let mut s = GlulxSession::new(image, 80, 30, true, false, false, (8, 16), pict, &[])
+        let mut s = GlulxSession::new(image, 80, 30, true, false, false, (8.0, 16.0), pict, &[])
             .expect("Counterfeit Monkey boots");
         let _ = s.take_transcript();
         if !ask {
@@ -4687,7 +5538,7 @@ mod tests {
         else {
             panic!("Cragne Manor is a Glulx story");
         };
-        let s = GlulxSession::new(image, 80, 30, true, false, false, (8, 16), pict, &[])
+        let s = GlulxSession::new(image, 80, 30, true, false, false, (8.0, 16.0), pict, &[])
             .expect("Cragne Manor boots");
         let world = s.i7_world().expect("Cragne Manor has a compiled I7 map");
         let names = s.parse_names().expect("Cragne Manor has an object table");
@@ -4721,7 +5572,7 @@ mod tests {
         let body = enc(0x120, &[]); // quit immediately; the boot drive is all we need
         GlulxSession::new_in(
             dir.to_path_buf(), image_for(body, 1), 80, 24, true, false, false, false,
-            (1, 1), None, &[], [[(None, None); 11]; 2], false, None,
+            (1.0, 1.0), None, &[], [[(None, None); 11]; 2], false, None,
         )
         .expect("tiny image boots")
     }
@@ -4747,6 +5598,38 @@ mod tests {
             Some(1024),
             "a sidecar whose token matches the running image is trusted at boot"
         );
+    }
+
+    /// SQ-1676: a named player's live session AND probe shadow read the learned
+    /// address from the shared catalogue folder, where the default player wrote it.
+    #[test]
+    fn a_named_players_session_and_shadow_read_learned_addresses_from_the_catalogue() {
+        let catalogue = crate::scratch_dir("sq1676-catalogue");
+        let player = crate::scratch_dir("sq1676-player");
+        let (checksum, extstart) = sidecar_test_token();
+        std::fs::write(catalogue.join("room-global"), format!("1024 {checksum:x}:{extstart:x}"))
+            .expect("write sidecar");
+        let store = |ro: bool| {
+            let s = if ro {
+                GameStore::read_only(player.clone())
+            } else {
+                GameStore::writable(player.clone())
+            };
+            s.with_catalogue(catalogue.clone())
+        };
+        let image = || image_for(enc(0x120, &[]), 1);
+        let live = GlulxSession::new_with_store(
+            store(false), image(), 80, 24, true, false, false, false,
+            (1.0, 1.0), None, &[], [[(None, None); 11]; 2], false, None,
+        )
+        .expect("boots");
+        assert_eq!(live.locked_room_global(), Some(1024), "the live session sees the shared address");
+        let shadow =
+            GlulxSession::new_shadow_in(store(true), image(), 80, 24, true, &[], None).expect("boots");
+        assert_eq!(shadow.locked_room_global(), Some(1024), "so does the shadow");
+        // Without the catalogue the player's own folder has nothing to offer.
+        let bare = GlulxSession::new_shadow(player.clone(), image(), 80, 24, true, &[], None).expect("boots");
+        assert_eq!(bare.locked_room_global(), None);
     }
 
     #[test]
@@ -4800,5 +5683,271 @@ mod tests {
         // And round-trips: a second boot against the same story and dir honours it.
         let s2 = boot_for_sidecar(&dir);
         assert_eq!(s2.locked_room_global(), Some(2048), "what was written is what gets read back");
+    }
+
+    // ── SQ-1655: `player-global`'s own sidecar, mirroring `room-global`'s above ──
+
+    #[test]
+    fn a_player_sidecar_stamped_with_this_images_token_is_honoured() {
+        let dir = crate::scratch_dir("sq1655-token-match");
+        let (checksum, extstart) = sidecar_test_token();
+        std::fs::write(dir.join("player-global"), format!("4096 {checksum:x}:{extstart:x}"))
+            .expect("write sidecar");
+
+        let s = boot_for_sidecar(&dir);
+        assert_eq!(
+            s.player_lock.locked(),
+            Some(4096),
+            "a sidecar whose token matches the running image is trusted at boot"
+        );
+    }
+
+    #[test]
+    fn a_player_sidecar_stamped_with_a_different_images_token_is_ignored() {
+        let dir = crate::scratch_dir("sq1655-token-mismatch");
+        let (checksum, extstart) = sidecar_test_token();
+        std::fs::write(dir.join("player-global"), format!("4096 {:x}:{extstart:x}", checksum ^ 1))
+            .expect("write sidecar");
+
+        let s = boot_for_sidecar(&dir);
+        assert_eq!(
+            s.player_lock.locked(),
+            None,
+            "a sidecar stamped for a DIFFERENT image (a rebuilt story) is treated as absent"
+        );
+    }
+
+    #[test]
+    fn remember_player_global_stamps_the_running_images_token_and_round_trips() {
+        let dir = crate::scratch_dir("sq1655-stamp-roundtrip");
+        {
+            let s = boot_for_sidecar(&dir);
+            s.remember_player_global(8192);
+        }
+        let raw = std::fs::read_to_string(dir.join("player-global")).expect("sidecar written");
+        let (checksum, extstart) = sidecar_test_token();
+        assert_eq!(
+            raw.trim(),
+            format!("8192 {checksum:x}:{extstart:x}"),
+            "the written line carries the address and this image's checksum:extstart token"
+        );
+        // And round-trips: a second boot against the same story and dir honours it, and it
+        // persists independently of the room-global sidecar (the same boot never wrote one,
+        // since the tiny `enc(0x120, &[])` test image has no object list at all to search).
+        let s2 = boot_for_sidecar(&dir);
+        assert_eq!(s2.player_lock.locked(), Some(8192), "what was written is what gets read back");
+        assert_eq!(s2.locked_room_global(), None, "the two sidecars are independent files");
+    }
+
+    #[test]
+    fn forget_player_global_removes_only_the_player_sidecar() {
+        let dir = crate::scratch_dir("sq1655-forget");
+        let s = boot_for_sidecar(&dir);
+        s.remember_player_global(4096);
+        s.remember_room_global(2048);
+        assert!(dir.join("player-global").is_file());
+        s.forget_player_global();
+        assert!(!dir.join("player-global").is_file(), "the player sidecar is gone");
+        assert!(dir.join("room-global").is_file(), "the room sidecar is untouched");
+    }
+
+    /// SQ-1640: a genuinely `static`-but-not-`scenery`/`door` object must still reach
+    /// `result.items` — the property [`GlulxSession::glulx_item_observations`]'s own doc says the
+    /// new filter deliberately preserves, so `session::classify_take_attempt`'s fixed-in-place
+    /// detector still has something to flag. Falsified by temporarily widening the filter in
+    /// `glulx_item_observations` to also exclude `static` and re-running: this test then fails
+    /// with the chair missing from `items` entirely (confirmed by hand before writing the fix).
+    ///
+    /// Reached via a synthetic [`LocationInfo`] rather than real navigation: Cragne Manor's own
+    /// office chair (`mp-chair`, a `supporter` carrying only the `static` attribute of the three
+    /// this fix reads) sits several rooms past a still-unsolved code-lock puzzle beyond the
+    /// starting Railway Platform. Every room reachable by ordinary movement from there — checked
+    /// directly against the real compiled object tree before writing this test — turns out to hold
+    /// either purely `scenery`/`door` objects or ordinary takeable ones (Train Station Lobby's
+    /// coffee cup, `item_tracking.rs`'s own specimen for that case), never a clean static-only
+    /// fixture. `glulx_item_observations` is a private method precisely because it is the seam
+    /// under test here; calling it directly, with a `LocationInfo` built from the chair's own real
+    /// room address via [`GlulxSession::handle_for`] (the same resolution a real arrival would
+    /// produce), exercises the exact production code path against real compiled data without
+    /// needing a walkthrough of an unsolved puzzle.
+    #[test]
+    fn glulx_item_observations_keeps_a_static_only_object_so_fixed_in_place_can_flag_it() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let local = manifest.join("../../stories/cragne.gblorb");
+        let tracked = manifest.join("tests/fixtures/stories/cragne.gblorb");
+        let path = if local.is_file() { local } else { tracked };
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: cragne.gblorb missing at {}", path.display());
+            return;
+        };
+        let b = blorb::Blorb::parse(bytes).expect("blorb parse");
+        let (kind, image) = b.executable().expect("has an executable chunk");
+        assert_eq!(kind, blorb::ExecKind::Glulx);
+        let mut s = GlulxSession::new(image.to_vec(), 80, 24, true, false, false, (1.0, 1.0), None, &[])
+            .expect("GlulxSession::new");
+        for _ in 0..6 {
+            if s.pending_input() != crate::session::InputKind::Char {
+                break;
+            }
+            s.submit_key(KeyInput::Enter);
+        }
+        for cmd in ["yes", "yes"] {
+            s.submit(cmd);
+        }
+        s.submit_key(KeyInput::Enter);
+
+        // mp-chair's own real address, found once by an exhaustive sweep of the compiled tree for
+        // an object carrying `static` but neither `scenery` nor `door` — pinned here as a literal
+        // rather than re-derived, since re-deriving it is exactly what
+        // `is_scenery_or_door`/`attribute_number` are already unit-tested to do correctly.
+        const MP_CHAIR: u32 = 0x64b76e;
+        let names = s.parse_names().expect("Cragne's object list reads perfectly");
+        let mem = s.machine.mem();
+        assert!(
+            names.is_object(mem, MP_CHAIR),
+            "premise: this address is still an object of Cragne's own compiled tree"
+        );
+        assert!(
+            !names.is_scenery_or_door(mem, MP_CHAIR),
+            "premise: mp-chair carries `static` but neither `scenery` nor `door`"
+        );
+        let room_addr = names.parent(mem, MP_CHAIR).expect("mp-chair sits in a real room");
+        let handle = s.handle_for(room_addr).expect("that room resolves to a real handle");
+        let loc = LocationInfo { number: handle.into(), parent: 0, name: String::new() };
+
+        let items = s.glulx_item_observations(Some(&loc), "");
+        let chair = items
+            .iter()
+            .find(|i| i.key == MP_CHAIR)
+            .expect("a static-only, non-scenery, non-door object must still reach result.items");
+        assert_eq!(chair.location, crate::session::ObservedItemLocation::RoomDirect);
+        assert!(chair.words.refers_to("chair"), "its real parse words: {:?}", chair.words);
+
+        // And the fixed-in-place detector, given this exact observation, flags it — precisely the
+        // downstream consumer SQ-1640 was told not to break.
+        let vocab = Engine::story_vocabulary(&s).expect("Cragne's own dictionary reads");
+        let key = crate::session::classify_take_attempt("take chair", &items, Some(&vocab))
+            .expect("an unambiguous candidate, visibly not carried, is flagged fixed-in-place");
+        assert_eq!(key, MP_CHAIR);
+    }
+
+    // ── inventory_evidence_parent (SQ-1657) ─────────────────────────────────────
+    //
+    // Pure-data unit tests for `GlulxSession::learn_player_from_inventory`'s matching core —
+    // no story booted, mirroring `glulx_playerlock`'s own test module pattern of exercising the
+    // state machine directly on hand-built data.
+
+    fn ow(id: u32, words: &[&str]) -> (u32, grammar_model::ObjectWords) {
+        (id, grammar_model::ObjectWords::new(id, String::new(), words.iter().map(|w| w.to_string()).collect(), Some(1), None))
+    }
+
+    #[test]
+    fn inventory_evidence_parent_locks_onto_a_single_unambiguous_item() {
+        // Counterfeit Monkey's own shape: ONE held item, named by exactly one word no other
+        // object in the story claims.
+        let objects = vec![ow(10, &["r-remov", "remover"])];
+        let got = inventory_evidence_parent(
+            "we are equipped with your r-remover",
+            &objects,
+            |addr| if addr == 10 { Some(99) } else { None },
+            |addr| addr == 99,
+        );
+        assert_eq!(got, Some(99), "a single unambiguous match is enough to identify the avatar");
+    }
+
+    #[test]
+    fn inventory_evidence_parent_refuses_a_word_two_objects_both_claim() {
+        let objects = vec![ow(10, &["green"]), ow(11, &["green"])];
+        let got = inventory_evidence_parent("green", &objects, |_| Some(99), |_| true);
+        assert_eq!(got, None, "a shared word cannot say which object the prose actually meant");
+    }
+
+    #[test]
+    fn inventory_evidence_parent_elects_the_shared_parent_multiple_items_agree_on() {
+        let objects = vec![ow(10, &["trenchcoat"]), ow(11, &["umbrella"]), ow(12, &["wedding", "ring"])];
+        let got = inventory_evidence_parent(
+            "wearing your trenchcoat and your wedding ring, holding your umbrella",
+            &objects,
+            |addr| if [10, 11, 12].contains(&addr) { Some(99) } else { None },
+            |addr| addr == 99,
+        );
+        assert_eq!(got, Some(99), "three independently-named items agreeing on one parent");
+    }
+
+    #[test]
+    fn inventory_evidence_parent_requires_the_matched_items_to_agree_on_one_plausible_parent() {
+        let objects = vec![ow(10, &["trenchcoat"]), ow(11, &["umbrella"])];
+        let got = inventory_evidence_parent(
+            "wearing your trenchcoat, holding your umbrella",
+            &objects,
+            |addr| match addr {
+                10 => Some(99),
+                11 => Some(100), // a DIFFERENT parent — the items disagree on who holds them
+                _ => None,
+            },
+            |_| true,
+        );
+        assert_eq!(got, None, "disagreement among plausible candidates teaches nothing");
+    }
+
+    #[test]
+    fn inventory_evidence_parent_refuses_an_implausible_parent() {
+        let objects = vec![ow(10, &["remover"])];
+        let got = inventory_evidence_parent("remover", &objects, |_| Some(99), |_| false);
+        assert_eq!(got, None, "the matched item's own parent must still pass the caller's plausibility test");
+    }
+
+    /// The CM shape that motivated checking plausibility BEFORE agreement, not after (confirmed
+    /// directly against the real `CounterfeitMonkey-11.gblorb`: its hint/quip system marks
+    /// dozens of ordinary English words as the sole vocabulary of individual quip objects, all
+    /// sharing one quip-container parent). A matched word whose object's parent is NOT
+    /// plausible must not manufacture a false disagreement against a genuinely plausible one.
+    #[test]
+    fn inventory_evidence_parent_ignores_an_implausible_matched_items_parent_rather_than_treating_it_as_disagreement()
+    {
+        let objects = vec![ow(10, &["remover"]), ow(11, &["nothing"]), ow(12, &["so"])];
+        let got = inventory_evidence_parent(
+            "we are equipped with your remover; nothing so unusual",
+            &objects,
+            |addr| match addr {
+                10 => Some(99),  // the real avatar
+                11 => Some(200), // a quip-container parent — NOT plausible
+                12 => Some(200),
+                _ => None,
+            },
+            |addr| addr == 99, // only the real avatar passes the room-grounded plausibility test
+        );
+        assert_eq!(got, Some(99), "implausible noise must be filtered out, not treated as a contradiction");
+    }
+
+    /// Demonstrates the composition with [`crate::glulx_playerlock::PlayerLock::observe_pickup`]
+    /// this quest relies on rather than reimplementing (SQ-1657): inventory evidence that
+    /// AGREES with an existing lock leaves it untouched. `PlayerLock`'s own test module already
+    /// covers `observe_pickup` directly; this proves the two compose the way the production
+    /// code assumes.
+    #[test]
+    fn inventory_evidence_feeding_observe_pickup_agrees_with_an_existing_lock() {
+        let mut lock = crate::glulx_playerlock::PlayerLock::locked_at(0x1000, 0x1004);
+        let objects = vec![ow(10, &["umbrella"])];
+        let candidate = inventory_evidence_parent("umbrella", &objects, |_| Some(0xABCD), |_| true)
+            .expect("the umbrella names its holder");
+        lock.observe_pickup(&[0, 0xABCD, 7], candidate);
+        assert_eq!(lock.locked(), Some(0x1004), "agreeing inventory evidence leaves an existing lock untouched");
+    }
+
+    /// The other half of the same composition: inventory evidence that CONTRADICTS an existing
+    /// lock goes through `observe_pickup`'s own reject-and-relock discipline, not a bespoke one.
+    #[test]
+    fn inventory_evidence_feeding_observe_pickup_rejects_and_relocks_on_contradiction() {
+        let mut lock = crate::glulx_playerlock::PlayerLock::locked_at(0x1000, 0x1004);
+        let objects = vec![ow(10, &["umbrella"])];
+        let candidate = inventory_evidence_parent("umbrella", &objects, |_| Some(0x9999), |_| true)
+            .expect("the umbrella names its holder");
+        lock.observe_pickup(&[0, 0x1111, 0x9999], candidate);
+        assert_eq!(
+            lock.locked(),
+            Some(0x1008),
+            "the story contradicted the old lock; inventory evidence re-established a fresh one"
+        );
     }
 }

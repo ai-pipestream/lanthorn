@@ -1,0 +1,455 @@
+# SQ-1600: a verified command sequence for The Lurking Horror, sound edition
+# (`lurkinghorror-r221-s870918-sound.zblorb`, release 221 / serial 870918),
+# reconstructed by booting the real game headlessly through its `.zblorb`
+# container and driving it turn by turn, checking every reply against the
+# actual interpreter, all the way to a perfect 100/100 score. This is NOT a
+# copy of any published walkthrough's prose or command list -- it is this
+# project's own derived list of literal game commands, produced for automated
+# regression testing (crates/app/tests/suites/walkthrough_lurking_horror.rs).
+#
+# Derived with the aid of, as a guide only (never transcribed):
+#   The IF Archive's own solution files, if-archive/infocom/hints/solutions/
+#   lurkinghorror.{step1,step2,step3,step4,txt} (the .txt is Scorpia's prose
+#   walkthrough, copyright 1987)
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. A line submitted while the game is at a single-keypress (Char)
+# prompt is sent as a keypress (its first character); otherwise it is
+# submitted as an ordinary typed line.
+
+sit down
+turn pc on
+login 872325412
+password uhlersoth
+click menu with mouse
+push menu
+read text
+push more
+push more
+push more
+down
+down
+take stone
+take stone
+wait
+stand
+south
+south
+down
+down
+east
+take gloves
+take crowbar
+wear gloves
+west
+press button
+wait
+press button
+south
+open panel
+take flashlight
+turn on flashlight
+open doors
+north
+west
+west
+up
+south
+take container
+east
+open container
+pour wax on floor
+east
+east
+east
+east
+east
+east
+up
+climb rope
+open door
+out
+up
+open plug
+take paper
+read paper
+down
+in
+close door
+drop crowbar
+drop container
+take ladder
+put ladder over railing
+down
+up
+take crowbar
+take container
+down
+down
+east
+east
+east
+east
+east
+east
+east
+east
+east
+east
+east
+east
+break glass with crowbar
+take axe
+west
+cut cord with axe
+west
+west
+north
+down
+east
+east
+up
+up
+west
+open refrigerator
+take carton
+open carton
+open microwave
+put carton in microwave
+close microwave
+press 4
+press 0
+press 0
+press hi
+press start
+wait
+wait
+wait
+open microwave
+take carton
+east
+north
+give carton to hacker
+examine hacker
+examine keys
+ask hacker about keys
+ask hacker about master key
+ask hacker for master key
+south
+down
+down
+west
+west
+down
+drop axe
+drop container
+nw
+unlock padlock with master key
+get padlock
+open hatch
+down
+east
+turn valve with crowbar
+wait
+wait
+wait
+turn valve with crowbar
+close valve
+east
+east
+remove brick with crowbar
+west
+west
+west
+up
+se
+take container
+take axe
+up
+east
+enter forklift
+turn on forklift
+east
+east
+east
+lift junk with forklift
+lift junk with forklift
+lift junk with forklift
+lift junk with forklift
+east
+exit forklift
+pry manhole with crowbar
+down
+north
+down
+drop container
+take knife
+up
+south
+up
+west
+west
+west
+west
+west
+up
+south
+east
+east
+east
+east
+east
+east
+east
+south
+knock on door
+give paper to professor
+south
+give paper to professor
+south
+wait
+wait
+cut pentagram with knife
+stand
+move bench
+open trapdoor
+down
+open trapdoor
+up
+take hyrax
+down
+north
+up
+west
+west
+west
+west
+west
+up
+south
+east
+east
+east
+east
+north
+down
+se
+drop plug
+drop assignment
+take boots
+wear boots
+up
+up
+unlock door with master key
+open door
+west
+up
+dig in earth
+down
+throw stone at creature
+inventory
+up
+take hand
+down
+inventory
+east
+close door
+down
+down
+nw
+up
+south
+south
+open door
+south
+south
+put hand in vat
+wait
+wait
+put hyrax on hand
+get hand
+inventory
+north
+north
+north
+north
+down
+se
+up
+out
+get stone
+in
+down
+nw
+up
+south
+west
+east
+west
+west
+west
+west
+north
+south
+east
+east
+east
+east
+west
+west
+west
+north
+down
+east
+east
+up
+up
+west
+up
+show hand to urchin
+down
+east
+north
+east
+north
+down
+se
+up
+out
+north
+down
+nw
+up
+south
+south
+north
+north
+south
+west
+west
+west
+east
+east
+south
+east
+north
+south
+south
+south
+south
+down
+north
+up
+west
+west
+west
+up
+up
+west
+open fridge
+take coke
+open coke
+drink coke
+drink coke
+drink coke
+drink coke
+east
+down
+press down-arrow
+wait
+wait
+down
+pry doors with crowbar
+wedge doors with crowbar
+climb down
+take chain
+get crowbar
+pry north wall with crowbar
+wrap chain around rod
+lock chain with padlock
+pry doors with crowbar
+wedge doors with crowbar
+climb up
+put chain on hook
+up
+up
+press up-arrow
+wait
+wait
+down
+down
+take crowbar
+pry doors with crowbar
+wedge doors with crowbar
+climb down
+climb up
+west
+west
+up
+turn off flashlight
+south
+east
+show hand to urchin
+get cutter
+east
+show hand to urchin
+get cutter
+east
+show hand to urchin
+get cutter
+east
+show hand to urchin
+get cutter
+turn on flashlight
+west
+west
+west
+up
+west
+north
+down
+east
+east
+climb down
+climb up
+east
+up
+take flask
+down
+west
+climb down
+north
+west
+west
+west
+west
+west
+west
+down
+cut wire with cutter
+down
+north
+down
+south
+south
+down
+open flask
+pour flask on curtain
+drop flask
+unlock door with master key
+open door
+south
+open box
+remove coax
+reach in pool
+wait
+take line
+cut line with axe
+cut line with axe
+cut line with axe
+take line
+put line in socket
+wait
+throw stone at creature
+look
+get stone

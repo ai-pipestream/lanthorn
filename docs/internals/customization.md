@@ -365,7 +365,10 @@ switches that make lanthorn feel like yours without opening the whole registry.
   The commands are `move-selection <dx> <dy>`, `page-selection <n>`,
   `select-edge first|last`, `play-story`, `open-launch-options`,
   `toggle-info-panel`, `toggle-gallery`, `fetch-story`, `refresh-library`,
-  `set-ifdb-url`, `search-ifdb`, `download-hints`, `sort-library`,
+  `set-ifdb-url`, `search-ifdb`, `download-hints`, `download-documents`
+  (the one command that is also a game command: `/download-documents` in a
+  running game opens the same chooser, and `Shift+D` is bound to it here),
+  `sort-library`,
   `reverse-sort`, `find-story`, `parent-folder`, `quit-browser` and
   `cancel-browser`. They are a world of their
   own: a game command in `[keymap.browser]` is refused with a warning (there is
@@ -466,6 +469,116 @@ order above. The text margin and border toggle are applied at runtime — nothin
 is written back to any sidecar — and, consistent with `honor_game_colours`, an
 explicit per-game `config.toml` value always wins over the garglk.ini (the text
 margin has no per-game key today, so garglk overrides only your global default).
+
+**Windows Glk `.cfg` (SQ-1703)**: a Glulx story that ships a Windows Glulxe
+per-game config (`<story stem>.cfg` beside the story — exactly that spelling;
+`Photopia` and `Narcolepsy` carry one) is parsed by `glk_cfg` into one
+`GlkDesign` on `AppState::glk_design`: `WindowWidth`/`WindowHeight` (the design
+size in pixels), `WindowBorders`, `WindowFrame`, `WindowMask` (a Blorb Pict id),
+the font keys and `FullScreen`. Key meanings come from Windows Glulxe's own
+`config.htm`. So far only `WindowBorders` acts: the borderless-windows
+preference resolves per-game `config.toml` → garglk.ini `wborder` → the `.cfg`
+(`WindowBorders=no` → borderless) → bordered, in the one function
+`glk_cfg::resolve_borderless` that boot, `@restart` and the settings screen
+share.
+
+**Stretch design mode (SQ-1703 P3).** A story whose `.cfg` states a design size
+(and whose per-game `config.toml` does not say `glk_design = false`; the
+sidecar key is deliberately not templated) is laid out at that size and the
+whole frame is stretched over the story pane. No letterbox; aspect is not
+honoured. `host::screen::apply_glk_design` turns it on at boot and again after
+`@restart` (a fresh session starts in cell mode) and sets
+`AppState::glk_stretch` for the renderer. The mode is a standing instruction on
+`AppGlk`, not a snapshot: the Glk screen is re-derived from the current pane
+and cell size on every relayout by `glk_cfg::glk_design_screen(design_px,
+pane_px, char_px)`, so a resize or a cell-size change needs no hook. Its text
+cell is the terminal cell divided by the per-axis stretch (fractional,
+non-square); the cell size cancels, leaving `design / cells` design pixels per
+terminal cell.
+
+The edge rule is ONE function, `glk_cfg::design_px_to_cell_edge(px, design,
+cells)` (round half up, exact integers), applied to BOTH edges of every window
+(`design_rect_to_cells`), so neighbours share an edge exactly, `edge(0) = 0` and
+`edge(design) = cells`, and the windows tile the pane. `AppGlk::
+convert_design_tree` turns gvm's design-pixel window tree into the cell tree
+the renderer already draws: exact cell counts per pair, never a border.
+Graphics windows draw their design-pixel canvas stretched to exactly their cell
+rect (`GraphicsRender::render_stretched`: kitty scales its r x c grid itself,
+the other backends get a one-off resample first). Text windows draw as terminal
+text.
+
+**Characters told == cells drawn.** The story is told `chars_in(px) =
+floor(px / text_cell)`; the edge rule can give a text window one cell more
+(rounding is not flooring; drawn is never fewer, an integer in `(d-1, d+1)` is
+at least `floor(d)`). A text window is therefore drawn with exactly the told
+count and the at-most-one surplus column/row (far side) is a filler painted in
+the window's own background; `glk_cfg`'s sweep test and `sq1703_glk_stretch`
+pin it. The text margin is not carved out of a stretched text window. A click
+in a stretched graphics window reports the inverse-stretched DESIGN-pixel
+position inside the window (`glk_cfg::cell_offset_to_design_px`, via
+`glk_mouse_target_design`); grid windows still report cells (drawn == told) and
+cell mode is unchanged. Not yet done: raster mode.
+
+**Fit modes (SQ-1707).** `glk_design_fit = "stretch"` (default) | `"aspect"` is
+a global `config.toml` key (templated) and a per-game sidecar key; per-game wins
+(`glk_cfg::resolve_fit_mode`). The global `glk_design` (default true) joined it
+with the same precedence (`resolve_design_on`). Everything above describes
+stretch, whose behaviour is unchanged. ONE value, `glk_cfg::GlkFit { mode,
+design, pane, unit }`, answers a host in its own units: `GlkFit::pixels(mode,
+design, pane_px)` for a pixel host, `GlkFit::cells(mode, design, pane_cells,
+cell_px)` for the TUI. Methods: `frame()` (size and offset), `letterbox()` (up
+to four rects that tile the pane with the frame), `window_rect(design_rect)`
+(edge rule `design_px_to_cell_edge` over the frame, plus its offset),
+`to_design(x, y)` (click inverse, `None` in the letterbox) and
+`design_screen(char_px)` (the screen the story is told).
+
+*Aspect, and the snapping rule.* The scale is uniform and computed in DEVICE
+pixels (terminal cells are not square): `s = min(pane_px.w / design.w, pane_px.h
+/ design.h)`. In pixels the limiting axis is the pane's extent and the other is
+rounded; in cells each side is `round(design * s / cell)` clamped to the pane,
+so the limiting axis fills the pane exactly and the other is within half a cell
+of the true aspect, and the offset is `floor(leftover / 2)` (the odd leftover
+cell goes right/bottom). Frame plus letterbox tile the pane with no gap or
+overlap. The story is told the text cell the SNAPPED frame implies, so chars
+told == cells drawn still holds. `AppGlk::screen_model` builds the frame's cell
+tree as in stretch and wraps it in filler buffers carrying
+`glk_backend::GLK_LETTERBOX_WIN`; the renderer paints those with
+`glk_mask_outside`, and the mask spans the frame, not the pane. Graphics
+canvases are resampled to their cell box exactly as in stretch. A click needs no
+extra mapping: windows are drawn at their real cell rects, so the letterbox
+holds no window and the existing per-window inverse applies.
+
+*Command, icon.* `/set-glk-fit [stretch|aspect|auto]` (bare toggles; `auto`
+removes the per-game key) runs `host::screen::run_set_glk_fit`, which persists
+and applies live; it refuses with "this game has no design size" when no `.cfg`
+with both dimensions applies. The v6 render border control doubles as the toggle
+while `AppState::glk_stretch` is on (`BorderControl::command_for`; glyph:
+stretch = hybrid's, aspect = raster's); v6 stories are unaffected. Host API
+(additive): `host::screen::{run_set_glk_fit, set_glk_fit, glk_fit,
+glk_design_size, glk_primary_text_window}`, `GlulxSession::{glk_fit,
+primary_text_window, set_glk_fit_mode, set_glk_design_fit}`, and for per-pixel
+mask hosts `GlkMask::{opaque, alpha_image}`.
+
+**The window mask (SQ-1703 P4).** `WindowMask=<n>` names a Blorb Pict; per
+Windows Glulxe's `config.htm` a white pixel makes the window transparent there
+and any other pixel is opaque (alpha 0 also counts as transparent). Verified on
+the specimens: Narcolepsy's Pict 3 is 800x600, pure black and white (the left
+half opaque, the right half a thought-bubble; its look comes entirely from the
+mask, the margin windows are never painted) and Photopia's Pict 39 is a black
+640x480 field with 32 white corner pixels. The Pict is loaded through the
+ordinary `PictSource` when stretch mode switches on (`apply_glk_design`), carried
+as one `glk_cfg::GlkMask` (a summed-area table) in `AppState::glk_mask` and the
+session, and dropped with the per-game `glk_design = false` switch (no mask in
+cell mode). It stretches per axis exactly as the frame does. Art: a graphics
+canvas has its alpha zeroed where the mask is transparent (`GlkMask::clip_canvas`,
+design pixels, applied in `convert_design_tree`). Text and fills: a cell whose
+area is LESS than 50% inside the mask is hidden, exactly half stays
+(`GlkMask::cell_visible`, cell edges `floor(i * mask_size / cells)` so
+neighbours share edges; `visible_cells` gives a whole pane). Hidden cells are
+reset to blank in the `glk_mask_outside` style (derives from `graphics`) after
+the pane renders. Presentation only: the story is told the same screen, so
+`chars_in` is untouched. At real pane sizes Photopia's corners are sub-cell and
+hide nothing; only a 2x2-pixel-cell pane would.
 
 **And we answer for it.** A game can ask the interpreter what colour it actually
 paints a given style — and at least one game asks in order to find out whether

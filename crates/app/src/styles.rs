@@ -53,6 +53,13 @@ pub fn per_game_config_path(game_dir: &Path) -> PathBuf {
 pub struct PerGameConfig {
     pub honor_game_colours: Option<bool>,
     pub borderless_windows: Option<bool>,
+    /// `false` keeps today's cell-measured Glulx layout for a story that
+    /// ships a Windows Glk `.cfg` design size (SQ-1703 P3); absent/`true` lets
+    /// the design size lay the story out and stretch it over the pane.
+    pub glk_design: Option<bool>,
+    /// How a design-size Glulx story fills the pane (SQ-1707): `stretch` or
+    /// `aspect`. `None` = no override, so the global `glk_design_fit` decides.
+    pub glk_design_fit: Option<crate::glk_cfg::GlkFitMode>,
     pub show_map: Option<bool>,
     pub pictures: Option<String>,
     pub interpreter_number: Option<u8>,
@@ -62,12 +69,16 @@ pub struct PerGameConfig {
     /// The v6 render mode for this story, as its config-file spelling
     /// (`hybrid` / `raster` / `extended`) — SQ-1123.
     pub v6_render: Option<String>,
-    /// Which panel opens with this story — command, inventory, or none
-    /// (SQ-1123, widened to a three-state cycle by SQ-1237). `None` here means
+    /// Whether the command panel opens with this story (SQ-1123; the inventory
+    /// stop SQ-1237 added moved into the Journal, SQ-1684). `None` here means
     /// no override at all (inherit `[command_panel] auto_open`), which is a
     /// different thing from `Some(SidePanel::None)` (this story is pinned to
-    /// neither panel).
+    /// no panel).
     pub panel: Option<crate::state::SidePanel>,
+    /// Which Journal tab was showing when this story was last played (SQ-1684):
+    /// `map` / `room` / `inventory`. `None` = no override, so the Journal opens
+    /// on the Map tab.
+    pub journal_tab: Option<crate::journal::JournalTab>,
     /// Whether the return probe runs for this story (SQ-0785).
     pub return_probe: Option<bool>,
     /// ScottFree's `-y`/`YOUARE` option for this Scott Adams story (SQ-1413):
@@ -123,10 +134,13 @@ impl PerGameConfig {
     pub const KEYS: &'static [&'static str] = &[
         "honor_game_colours",
         "borderless_windows",
+        "glk_design",
+        "glk_design_fit",
         "show_map",
         "v6_pixel_lock",
         "guidance",
         "panel",
+        "journal_tab",
         "return_probe",
         "pictures",
         "v6_render",
@@ -162,6 +176,8 @@ impl PerGameConfig {
         PerGameConfig {
             honor_game_colours: b("honor_game_colours"),
             borderless_windows: b("borderless_windows"),
+            glk_design: b("glk_design"),
+            glk_design_fit: s("glk_design_fit").as_deref().and_then(crate::glk_cfg::GlkFitMode::from_key),
             show_map: b("show_map"),
             pictures: s("pictures"),
             interpreter_number: v
@@ -172,6 +188,7 @@ impl PerGameConfig {
             guidance: b("guidance"),
             v6_render: s("v6_render"),
             panel: s("panel").as_deref().and_then(crate::state::SidePanel::from_key),
+            journal_tab: s("journal_tab").as_deref().and_then(crate::journal::JournalTab::from_name),
             return_probe: b("return_probe"),
             scott_you_are: b("scott_you_are"),
             scott_light: b("scott_light"),
@@ -198,10 +215,13 @@ impl PerGameConfig {
         edit_raw(game_dir, |doc| {
             put_bool(doc, "honor_game_colours", self.honor_game_colours);
             put_bool(doc, "borderless_windows", self.borderless_windows);
+            put_bool(doc, "glk_design", self.glk_design);
+            put_str(doc, "glk_design_fit", self.glk_design_fit.map(|m| m.key()));
             put_bool(doc, "show_map", self.show_map);
             put_bool(doc, "v6_pixel_lock", self.v6_pixel_lock);
             put_bool(doc, "guidance", self.guidance);
             put_str(doc, "panel", self.panel.map(|p| p.key()));
+            put_str(doc, "journal_tab", self.journal_tab.map(|t| t.name()));
             put_bool(doc, "return_probe", self.return_probe);
             put_str(doc, "pictures", self.pictures.as_deref());
             put_str(doc, "v6_render", self.v6_render.as_deref());
@@ -338,6 +358,19 @@ pub fn read_per_game_honor(game_dir: &Path) -> Option<bool> {
 /// `Some(true)`, all window splits abut with no reserved gutter (SQ-0341).
 pub fn read_per_game_borderless(game_dir: &Path) -> Option<bool> {
     PerGameConfig::read(game_dir).borderless_windows
+}
+
+/// Read the per-game `glk_design` override (SQ-1703 P3). `Some(false)` keeps
+/// the cell-measured Glulx layout for a story with a `.cfg` design size; `None`
+/// (the default) and `Some(true)` lay the story out at its design size.
+pub fn read_per_game_glk_design(game_dir: &Path) -> Option<bool> {
+    PerGameConfig::read(game_dir).glk_design
+}
+
+/// Read the per-game `glk_design_fit` override (SQ-1707). `None` = no override,
+/// so the global `glk_design_fit` decides.
+pub fn read_per_game_glk_design_fit(game_dir: &Path) -> Option<crate::glk_cfg::GlkFitMode> {
+    PerGameConfig::read(game_dir).glk_design_fit
 }
 
 /// Read the per-game `show_map` override, if the user set one. `None` = no
@@ -613,6 +646,13 @@ pub fn write_per_game_guidance(game_dir: &Path, value: Option<bool>) -> std::io:
     edit(game_dir, |c| c.guidance = value)
 }
 
+/// Persist (or clear) the per-game `glk_design_fit` override (SQ-1707),
+/// preserving every sibling key. `None` clears it back to inheriting the global
+/// mode.
+pub fn write_per_game_glk_design_fit(game_dir: &Path, value: Option<crate::glk_cfg::GlkFitMode>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.glk_design_fit = value)
+}
+
 /// Persist (or clear) the per-game `v6_render` override (SQ-1123), preserving
 /// every sibling key. `None` clears it back to inheriting the global mode.
 pub fn write_per_game_v6_render(game_dir: &Path, value: Option<String>) -> std::io::Result<()> {
@@ -627,6 +667,21 @@ pub fn write_per_game_panel(
     value: Option<crate::state::SidePanel>,
 ) -> std::io::Result<()> {
     edit(game_dir, |c| c.panel = value)
+}
+
+/// Read the per-game `journal_tab` (SQ-1684). `None` = no override: the Journal
+/// opens on the Map tab.
+pub fn read_per_game_journal_tab(game_dir: &Path) -> Option<crate::journal::JournalTab> {
+    PerGameConfig::read(game_dir).journal_tab
+}
+
+/// Persist (or clear) the per-game `journal_tab` (SQ-1684), preserving every
+/// sibling key.
+pub fn write_per_game_journal_tab(
+    game_dir: &Path,
+    value: Option<crate::journal::JournalTab>,
+) -> std::io::Result<()> {
+    edit(game_dir, |c| c.journal_tab = value)
 }
 
 /// Persist (or clear) the per-game `quick` override (SQ-1552), preserving
@@ -703,6 +758,8 @@ mod tests {
         let every = PerGameConfig {
             honor_game_colours: Some(true),
             borderless_windows: Some(true),
+            glk_design: Some(true),
+            glk_design_fit: Some(crate::glk_cfg::GlkFitMode::Aspect),
             show_map: Some(true),
             pictures: Some("Pic.data".into()),
             interpreter_number: Some(6),
@@ -710,6 +767,7 @@ mod tests {
             guidance: Some(true),
             v6_render: Some("raster".into()),
             panel: Some(crate::state::SidePanel::Command),
+            journal_tab: Some(crate::journal::JournalTab::Room),
             return_probe: Some(true),
             scott_you_are: Some(true),
             scott_light: Some(true),

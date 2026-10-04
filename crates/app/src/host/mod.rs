@@ -25,7 +25,11 @@
 //!   ([`hints::open`], SQ-1586), and a cheap "would it find one?" check
 //!   ([`hints::available`]).
 //! - [`input`] — player input that is not a typed line: a v6 mouse click
-//!   ([`deliver_v6_click`](input::deliver_v6_click), SQ-1568).
+//!   ([`deliver_v6_click`](input::deliver_v6_click), SQ-1568), and a special
+//!   key that ends a pending line read via the story's own terminating-
+//!   characters table, gated by the v6-arrow-withholding rule
+//!   ([`deliver_line_key_terminator`](input::deliver_line_key_terminator),
+//!   [`withhold_arrow_from_v6`](input::withhold_arrow_from_v6), SQ-1610).
 //! - [`settings`] — apply a changed config to a running session, as the
 //!   settings screen's Save does (SQ-1559).
 //! - [`assist`] — the Guiding Light's per-game switch, and the command band's
@@ -49,8 +53,8 @@ pub mod turn;
 
 pub use assist::{refresh_band_data, set_guidance, BandData};
 pub use boot::{
-    boot_story, random_seed_line, resolve_pict_blorb, story_screen_in, BootError, BootHooks,
-    BootRequest, BootedStory, LaunchFlags, QuietBoot, TerminalFacts,
+    boot_story, random_seed_line, resolve_pict_blorb, resume_source, story_screen_in, BootError,
+    BootHooks, BootRequest, BootedStory, LaunchFlags, QuietBoot, ResumeSlot, TerminalFacts,
 };
 pub use turn::{
     apply_game_driven_result, finish_command_turn, finish_resumed_turn, Paging, TurnCtx,

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
-use crate::archive::load_archive;
+use crate::archive::{load_archive, read_archive_meta};
 use crate::config::{Cli, Config};
 use crate::engine::Engine;
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt_mut};
@@ -34,7 +34,7 @@ use crate::hints;
 use crate::ifid::compute_ifid;
 use crate::session::{apply_turn, GameSession};
 use crate::state::AppState;
-use crate::storage::{default_state_path, game_dir as story_game_dir, story_key_for, DiskBuild};
+use crate::storage::{default_state_path, quick_save_state_path, story_key_for};
 
 use super::{flush_screen_trace, flush_v6_trace};
 
@@ -53,12 +53,22 @@ pub struct BootRequest<'a> {
     pub overrides: &'a crate::launch_options::LaunchOverrides,
     /// The launch config (see the type's own docs for why it is owned).
     pub cfg: Config,
-    /// Where per-story saves and sidecars live: `<data_base>/<story-key>/`.
-    pub data_base: PathBuf,
+    /// Where per-story saves and sidecars live (`<player base>/<story-key>.save/`)
+    /// and where the shared catalogue lives (`<catalogue base>/<story-key>.save/`).
+    pub roots: crate::data_roots::DataRoots,
     /// The command-line facts boot reads ([`LaunchFlags::from`] a [`Cli`]).
     pub flags: LaunchFlags,
     /// What the terminal answered, or nothing for a headless host.
     pub terminal: TerminalFacts,
+    /// Skip resume selection ENTIRELY — no [`resume_source`] lookup, no
+    /// `load_archive`, mapper starts as [`Mapper::default`] — even when one of
+    /// the reserved slots holds a real resume point (SQ-1626). For a host whose
+    /// own "reboot"/"new game" is a genuinely separate boot that must not
+    /// resume anything, as opposed to `cfg.auto_load = false` (which still
+    /// offers the launch-resume dialog). Neither reserved save file is read OR
+    /// written when this is set — a quick save survives completely untouched,
+    /// ready to resume on the next ordinary boot. Default `false`.
+    pub fresh_start: bool,
 }
 
 /// The command-line facts a story boot reads, lifted off [`Cli`] so a host with
@@ -121,6 +131,56 @@ pub struct TerminalFacts {
     /// the constructor's 80x24 fallback — a host that is not a terminal can also
     /// pass the cell grid it intends to draw the whole frame on.
     pub size: Option<(u16, u16)>,
+    /// The smallest `(cols, rows)` the pre-boot story pane must come out to,
+    /// independently in each dimension — SQ-1596. Some v4+ stories read header
+    /// bytes $20/$21 once, at boot, and refuse to run below their own minimum
+    /// (*Bureaucracy* prints its own `[Screen too small.]` on the first turn and
+    /// a later resize of `size` above does not help, because the story never
+    /// looks at $20/$21 again). A host that can draw the game's grid windows at
+    /// a SMALLER cell size than its terminal's own — more, smaller cells in the
+    /// same physical space — can meet a story's floor this way even when `size`
+    /// itself is smaller than it, by having lanthorn seed an EFFECTIVE cell
+    /// count that clears the floor for the host to then render at whatever
+    /// per-cell pixel size actually fits. `None` (the default) applies no floor,
+    /// which is the honest answer for a host whose cells are physical terminal
+    /// cells it cannot subdivide. A dimension already at or above its floor in
+    /// `size` is left exactly alone — see `min_terminal_size_for_story_floor`.
+    /// A user-pinned `virtual_screen_cols`/`virtual_screen_rows` always wins
+    /// over this floor in that dimension, exactly as it wins in
+    /// [`crate::render::screen::story_screen_dims`] and
+    /// [`crate::render::screen::declared_story_screen_dims`] — explicit intent
+    /// outranks a floor lanthorn computed on the host's behalf.
+    pub min_story_screen: Option<(u16, u16)>,
+    /// The `(width, height)` in device pixels of ONE of the host's own text
+    /// cells, for sizing a Glulx story's Glk graphics-window canvases —
+    /// SQ-1598. A graphics canvas is measured as `(window cells) × (this
+    /// size)`, so a host whose cells are not the constructor's 8×16 fallback
+    /// (a proportional-font frontend, or any terminal at a font the in-game
+    /// image `Picker` cannot see — Glk graphics run independently of the
+    /// cover-art picker's own font probe) gets a canvas matching its actual
+    /// windows 1:1 instead of one it has to stretch unevenly to compensate
+    /// for. `None` (the default) leaves the existing cascade: the `game_picker`
+    /// probe's own font size, falling back to 8×16 when there is no picker
+    /// either — and, on that fallback-free path only, `Config::glk_pixel_scale`
+    /// still divides out the terminal's DPI scale (see `boot_story`). A value
+    /// given here is taken as the host's own stated physical cell size and is
+    /// used exactly as given, with no further scaling applied — the host is in
+    /// the best position to know what its own pixels already account for. Read
+    /// once at boot; change it on an already-booted session with
+    /// [`crate::host::screen::set_glk_cell_px`], which resizes any open
+    /// graphics canvases and delivers the game's own Arrange event, the same
+    /// as a terminal resize already does. Carried onto [`AppState::glk_cell_px`]
+    /// so an `@restart` (`crate::host::reset`) agrees with the boot that
+    /// preceded it rather than reverting to the picker/8×16 fallback.
+    ///
+    /// Fractional (SQ-1603): a host's real text cell need not land on a whole
+    /// device pixel (10.2×22.95 at a 17px font is typical), and rounding it
+    /// HERE — before lanthorn ever sees it — would force every graphics
+    /// window's canvas through one pre-rounded ratio, which drifts further
+    /// from the true cell size the more windows of different cell counts a
+    /// game opens. Carried exactly as given all the way to `canvas_size`
+    /// (`glk_backend.rs`), which multiplies and rounds PER WINDOW.
+    pub glk_cell_px: Option<(f64, f64)>,
 }
 
 /// The per-story result of [`boot_story`]: the running engine, its map, the
@@ -133,16 +193,109 @@ pub struct BootedStory {
     pub state: AppState,
     pub game_dir: PathBuf,
     pub ifid: String,
-    /// `<game_dir>/default.lanthorn`, the auto-save / resume archive.
+    /// `<game_dir>/default.lanthorn`, the per-turn/exit auto-save slot.
     pub arc_file: PathBuf,
+    /// `<game_dir>/quick-save.lanthorn`, the manual quick-save slot (Ctrl+S /
+    /// bare `/save-state` / the quit dialog's "Save State & quit") — kept apart
+    /// from `arc_file` so a quick-save survives the next auto-save (SQ-1624).
+    pub quick_save_file: PathBuf,
+    /// Whichever of `arc_file` / `quick_save_file` THIS boot actually resumed
+    /// from, per [`resume_source`] (SQ-1624/SQ-1626) — the archive the
+    /// launch-resume dialog's stashed save/transcript came from, so accepting
+    /// it (`apply_launch_resume`) re-reads the map/turns from the SAME file
+    /// rather than always `arc_file`. Falls back to `arc_file` when this boot
+    /// attempted no resume at all (`fresh_start`, or neither slot had
+    /// anything to offer).
+    pub resume_source_file: PathBuf,
     pub story_bytes: Vec<u8>,
     pub story_path: PathBuf,
-    pub data_base: PathBuf,
+    pub roots: crate::data_roots::DataRoots,
     /// Whether this boot resumed a past game from the archive at `arc_file`
     /// (`cfg.auto_load` on, a save present, and `Engine::restore_state`
     /// succeeded) rather than starting fresh. A headless host had no way to
     /// tell the two apart short of re-reading the archive itself (SQ-1545).
     pub resumed: bool,
+}
+
+/// Which of the two reserved save slots under a game's directory a resume
+/// would come from (SQ-1626).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeSlot {
+    /// `<game_dir>/default.lanthorn`, the per-turn/exit auto-save slot.
+    AutoSave,
+    /// `<game_dir>/quick-save.lanthorn`, the manual quick-save slot.
+    QuickSave,
+}
+
+impl ResumeSlot {
+    /// The archive path this slot names, under `game_dir`.
+    pub fn path(self, game_dir: &Path) -> PathBuf {
+        match self {
+            ResumeSlot::AutoSave => default_state_path(game_dir),
+            ResumeSlot::QuickSave => quick_save_state_path(game_dir),
+        }
+    }
+}
+
+/// `Meta::saved_at` plus whether the archive carries a real resume point —
+/// the two cheaply-read facts [`resume_source`]'s comparison needs about one
+/// candidate archive.
+struct SlotFacts {
+    saved_at: String,
+    has_resume: bool,
+}
+
+fn slot_facts(path: &Path) -> Option<SlotFacts> {
+    let meta = read_archive_meta(path).ok()?;
+    // A slot whose meta is readable but whose save-bytes probe fails (a
+    // truncated/corrupt entry) is treated as having no resume point, the
+    // same conservative answer `boot_story`'s own `load_archive` error arm
+    // gives today.
+    let has_resume = crate::archive::archive_has_resume_point(path).unwrap_or(false);
+    Some(SlotFacts { saved_at: meta.saved_at, has_resume })
+}
+
+/// Which of the two reserved slots under `game_dir` a normal (non-`fresh_start`)
+/// boot would resume from, or `None` when neither has anything to offer at all
+/// (SQ-1626). This is the ONE place the decision is made — `boot_story` itself
+/// calls this rather than re-deriving the comparison, so an external host
+/// wanting to label "Continue will resume X" can never disagree with what a
+/// boot actually does.
+///
+/// A slot with a REAL resume point always beats one without, regardless of
+/// timestamp: [`crate::host::persist::exit_clear_resume_save`] rewrites
+/// `default.lanthorn` with a fresh `Meta::saved_at` but an EMPTY resume point
+/// on every clean game-driven quit, and comparing `saved_at` alone let that
+/// freshly-cleared autosave always bury an older-but-real quick save — the bug
+/// this function's introduction fixes. Between two slots that both carry a
+/// resume point (or both carry none — see below), the newer `saved_at` wins;
+/// on an exact tie (`Meta::saved_at`'s RFC3339 string has one-second
+/// resolution) the quick save wins, since it is the more deliberate of the
+/// two saves. When NEITHER slot has a resume point, falls back to the newest
+/// of the two files that DO exist, so the mapper/aux/command-history a clean
+/// quit still leaves behind (`exit_clear_resume_save`'s own doc) comes from
+/// the most recently written slot rather than always `default.lanthorn`.
+pub fn resume_source(game_dir: &Path) -> Option<ResumeSlot> {
+    let arc_file = default_state_path(game_dir);
+    let quick_save_file = quick_save_state_path(game_dir);
+    let a = slot_facts(&arc_file);
+    let q = slot_facts(&quick_save_file);
+    match (a, q) {
+        (Some(a), Some(q)) => Some(match (a.has_resume, q.has_resume) {
+            (true, false) => ResumeSlot::AutoSave,
+            (false, true) => ResumeSlot::QuickSave,
+            _ => {
+                if q.saved_at >= a.saved_at {
+                    ResumeSlot::QuickSave
+                } else {
+                    ResumeSlot::AutoSave
+                }
+            }
+        }),
+        (Some(_), None) => Some(ResumeSlot::AutoSave),
+        (None, Some(_)) => Some(ResumeSlot::QuickSave),
+        (None, None) => None,
+    }
 }
 
 /// An unrecoverable per-story boot failure (unreadable or invalid story, an
@@ -264,8 +417,6 @@ fn pre_boot_host_screen(
     boot_state.pane_sizes = crate::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,
-        inv_dock_pct: cfg.inv_dock_pct,
-        room_dock_pct: cfg.room_dock_pct,
     };
     story_screen_in(&boot_state, terminal_size)
 }
@@ -282,8 +433,101 @@ pub fn story_screen_in(state: &AppState, (term_cols, term_rows): (u16, u16)) -> 
     if frame.width == 0 || frame.height == 0 {
         return None;
     }
-    let pane_layout = crate::layout::compute_pane_layout(frame, state, 0);
+    let pane_layout = crate::layout::compute_pane_layout(frame, state);
     crate::render::screen::story_screen_dims(pane_layout.story, state)
+}
+
+/// The smallest terminal `(cols, rows)` — at or above `real`, each dimension
+/// bumped independently — whose pre-boot story pane meets `floor` in that
+/// dimension (SQ-1596; see [`TerminalFacts::min_story_screen`]).
+///
+/// **Search, not algebra.** `story_screen_dims`' width side folds in the text
+/// margin, the upper-window border and the transcript gutter, and
+/// `compute_pane_layout` folds in `split_story_map`'s own ratatui `Percentage`
+/// rounding on top of that — the same shape `split_pct_for_story_width`
+/// (`crate::layout`) already inverts by search rather than by re-deriving
+/// ratatui's rounding by hand, and this is that precedent applied to boot's
+/// pre-session pane instead of a live drag. The row side has no ratio to
+/// invert (fixed additive rows only — the help bar, and zero-height bands at
+/// boot), but is swept the same way for one code path instead of two.
+///
+/// Cols and rows are independent inputs to this pane: `split_story_map` only
+/// ever divides the WIDTH, and the vertical reservations (help bar, command
+/// band, inventory dock) only ever consume ROWS — so sweeping one dimension
+/// with the other pinned at `real`'s own value for the probe is exact, not an
+/// approximation.
+///
+/// A dimension whose `floor` is `0`, or that the config has pinned via
+/// `virtual_screen_cols`/`virtual_screen_rows`, is left at `real` untouched —
+/// a pin already makes `story_screen_dims` ignore the pane's measured size in
+/// that dimension outright, so searching for a terminal size that moves a
+/// pinned answer would either loop uselessly or (worse) quietly try to argue
+/// with the pin. Explicit intent wins, exactly as it already does in
+/// [`crate::render::screen::story_screen_dims`] and
+/// [`crate::render::screen::declared_story_screen_dims`].
+///
+/// **Public since SQ-1606** for an embedding host to reach directly at a live
+/// resize, not only through boot/`@restart`'s own calls above — the same
+/// search, with the same six plain values a host already holds off its own
+/// `AppState` (`state.config`, `state.colors`, `state.garglk_overlay`,
+/// `state.layout`), lets a host re-derive the smallest terminal size that
+/// clears `state.min_story_screen` before laying out a resize itself, rather
+/// than re-implementing this search against `story_screen_in` by hand.
+pub fn min_terminal_size_for_story_floor(
+    cfg: &Config,
+    cs: &crate::colors::ColorScheme,
+    garglk_overlay: &Option<crate::garglk_ini::GarglkOverlay>,
+    layout: crate::state::Layout,
+    real: (u16, u16),
+    floor: (u16, u16),
+) -> (u16, u16) {
+    let (real_cols, real_rows) = real;
+    let (floor_cols, floor_rows) = floor;
+    let probe = |size: (u16, u16)| pre_boot_host_screen(cfg, cs, garglk_overlay, layout, size);
+
+    let cols = if floor_cols == 0 || cfg.virtual_screen_cols.is_some() {
+        real_cols
+    } else {
+        bump_dim_for_floor(real_cols, floor_cols, |candidate| {
+            probe((candidate, real_rows.max(1))).map(|(_, cols)| cols)
+        })
+    };
+    let rows = if floor_rows == 0 || cfg.virtual_screen_rows.is_some() {
+        real_rows
+    } else {
+        bump_dim_for_floor(real_rows, floor_rows, |candidate| {
+            probe((real_cols.max(1), candidate)).map(|(rows, _)| rows)
+        })
+    };
+    (cols, rows)
+}
+
+/// The smallest `dim >= current.max(1)` for which `probe(dim)` reports a story
+/// dimension at or above `floor`, searched upward one cell at a time.
+///
+/// Widening (or heightening) the terminal never shrinks the pane this feeds —
+/// `story_screen_dims` subtracts only FIXED chrome from the measured area, and
+/// `split_story_map`'s percentage split is monotonic non-decreasing in the
+/// total it divides — so the first candidate that clears the floor is the
+/// smallest one; nothing here needs to check further once it does. The 512
+/// cap is well past any terminal on offer (and past the 255 the header fields
+/// themselves clamp to downstream, `BootConfig::apply`); if nothing in range
+/// clears the floor, `current` is returned unchanged and the story boots
+/// under its own floor exactly as it would with no `min_story_screen` set —
+/// this function only ever WIDENS the seeded terminal size, never narrows it
+/// or fails the boot outright.
+///
+/// `pub(super)` since SQ-1606: [`host::screen::min_story_pane_for_floor`]'s
+/// pane-space search reuses this exact one-cell-at-a-time sweep rather than
+/// forking it — only what it probes differs (a pane's own chrome subtraction
+/// instead of a terminal's pre-boot pane derivation).
+///
+/// [`host::screen::min_story_pane_for_floor`]: super::screen::min_story_pane_for_floor
+pub(super) fn bump_dim_for_floor(current: u16, floor: u16, probe: impl Fn(u16) -> Option<u16>) -> u16 {
+    if probe(current).is_some_and(|v| v >= floor) {
+        return current;
+    }
+    (current.max(1)..=512).find(|&candidate| probe(candidate).is_some_and(|v| v >= floor)).unwrap_or(current)
 }
 
 /// Build the per-story engine + mapper + UI state for `req.story_path`, up to the
@@ -297,13 +541,15 @@ pub fn story_screen_in(state: &AppState, (term_cols, term_rows): (u16, u16)) -> 
 // See `pre_boot_host_screen` for the lint.
 #[allow(clippy::field_reassign_with_default)]
 pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<BootedStory, BootError> {
-    let BootRequest { story_path, disk_entry, overrides, mut cfg, data_base, flags, terminal } = req;
+    let BootRequest { story_path, disk_entry, overrides, mut cfg, roots, flags, terminal, fresh_start } = req;
     let TerminalFacts {
         game_picker,
         game_picker_query_answered,
         term_default_colors,
         query_sweep,
         size: terminal_size,
+        min_story_screen,
+        glk_cell_px,
     } = terminal;
 
     // `disk_entry` is which story on the image the browser row stood for
@@ -329,7 +575,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // title table applies is an engine question (SQ-0766).
     let is_scott = matches!(loaded, hints::LoadedStory::Scott(_));
 
-    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>.save/`,
+    // Storage (SQ-0284): saves/sidecars live in `<player base>/<story-key>.save/`,
     // keyed by the story filename — or, for a story mounted out of a disk image,
     // by that story's own release and serial, because one image holds several
     // games and the filename cannot tell them apart (SQ-0850). Both inputs are
@@ -338,18 +584,23 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // carries the `pictures` key, and that key decides the machine below; the
     // directory itself is created (and read from) further down, where it always
     // was.
-    let disk_build = disk_image.and_then(|kind| DiskBuild::of(&story_bytes, kind));
-    let game_dir = story_game_dir(
-        &data_base,
-        &story_key_for(crate::storage::StoryOrigin {
+    // `build_for_key` is `DiskBuild::of` for a real mount, unchanged — and for a
+    // LOOSE file (`disk_image: None`), also checks whether the story's own
+    // header names a KNOWN, CATALOGUED commercial release, in which case its
+    // saves are unified with a disk-mounted copy of the same build (SQ-1635).
+    let disk_build = crate::storage::build_for_key(&story_bytes, disk_image);
+    let story_key = story_key_for(crate::storage::StoryOrigin {
             path: &story_path,
             // The zip half of the same fact (SQ-1098): a container's entry is
             // what tells two of its games apart, and a zip has no build to be
             // keyed by, so leaving this out gave both of them one directory.
             entry: disk_entry,
             build: disk_build.as_ref(),
-        }),
-    );
+        });
+    let game_dir = roots.player_dir(&story_key);
+    // The shared half (SQ-1676): fetched metadata and covers. The same folder as
+    // `game_dir` for the default player.
+    let catalogue_dir = roots.catalogue_dir(&story_key);
     // SQ-0734 tier 3: has the user named a picture archive for this story? Read
     // and PARSED here, ahead of everything, because the flavour it turns out to
     // be is an input to the profile immediately below. The archive itself is
@@ -502,20 +753,38 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // them at their defaults. The picker is reused both for the Glulx session's
     // char-cell pixel size and, below, `AppState.game_picker` (the render side
     // already tolerates None).
-    let char_px = game_picker
-        .as_ref()
-        .map(|p| {
-            let f = p.font_size();
-            (f.width as u32, f.height as u32)
-        })
-        .unwrap_or((8, 16));
-    // SQ-0593: divide out the terminal's scale before the game sees it. A Glk game's
-    // graphics-window sizes are pixel constants its author picked against a
-    // conventional screen; a cell twice the reference height turns the same request
-    // into half the rows, shrinking the game's artwork against unchanged text. See
-    // `GlkPixelScale::resolve` for why this keys off the cell size rather than the
-    // display's DPI. No-op at `auto` on an unscaled display with a normal font.
-    let char_px = cfg.glk_pixel_scale.apply(char_px);
+    // SQ-1598: a host that states its own Glk cell size outright — a
+    // proportional-font frontend, or any host whose cells the cover-art
+    // `Picker` above cannot see — wins over the picker/8×16 cascade entirely,
+    // taken exactly as given (see `TerminalFacts::glk_cell_px`'s doc for why
+    // `glk_pixel_scale` is not applied to it too).
+    // SQ-1603: `GlkPixelScale::apply` stays integer — it only ever runs on
+    // this fallback arm, whose own input (`Picker::font_size`) is already a
+    // whole `u16` cell, so there is no fraction to preserve through it. The
+    // cast to `f64` below is only to unify this arm's type with the `Some`
+    // arm's now-fractional host-stated value; it introduces no rounding of
+    // its own.
+    let char_px: (f64, f64) = match glk_cell_px {
+        Some(px) => px,
+        None => {
+            let char_px = game_picker
+                .as_ref()
+                .map(|p| {
+                    let f = p.font_size();
+                    (f.width as u32, f.height as u32)
+                })
+                .unwrap_or((8, 16));
+            // SQ-0593: divide out the terminal's scale before the game sees it. A
+            // Glk game's graphics-window sizes are pixel constants its author
+            // picked against a conventional screen; a cell twice the reference
+            // height turns the same request into half the rows, shrinking the
+            // game's artwork against unchanged text. See `GlkPixelScale::resolve`
+            // for why this keys off the cell size rather than the display's DPI.
+            // No-op at `auto` on an unscaled display with a normal font.
+            let (w, h) = cfg.glk_pixel_scale.apply(char_px);
+            (w as f64, h as f64)
+        }
+    };
     // Pixel-precise mouse reporting (SQ-0563) is NOT switched on here. The probe
     // works — terminals answer "set" — but the cell size to divide the reported
     // pixels by does not: the Picker's `font_size` above is in logical points,
@@ -618,9 +887,14 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // SQ-0344: precedence mirrors honor_game_colours — an explicit per-game
     // `config.toml` value wins, else a discovered garglk.ini's `wborderx`/
     // `wbordery` (0 → borderless), else off.
-    let borderless = crate::styles::read_per_game_borderless(&game_dir)
-        .or_else(|| garglk_overlay.as_ref().and_then(|o| o.borderless))
-        .unwrap_or(false);
+    // SQ-1703: a story's Windows Glk `.cfg` `WindowBorders` comes next, below
+    // garglk.ini and above the default (`glk_cfg::resolve_borderless`).
+    let glk_design = crate::glk_cfg::discover(&story_path);
+    let borderless = crate::glk_cfg::resolve_borderless(
+        crate::styles::read_per_game_borderless(&game_dir),
+        garglk_overlay.as_ref(),
+        glk_design.as_ref(),
+    );
     // SQ-0304: per-game map-panel visibility. `Some(false)` → start with the map
     // hidden (captured here before `cfg` is moved into the engine build below).
     let start_map_hidden = crate::styles::read_per_game_show_map(&game_dir) == Some(false);
@@ -703,8 +977,27 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     } else {
         crate::state::Layout::Split
     };
-    let host_screen = terminal_size
-        .and_then(|size| pre_boot_host_screen(&cfg, &cs, &garglk_overlay, boot_layout, size));
+    // SQ-1596: a host willing to draw the story's grid windows at a smaller
+    // cell size than its own terminal's may ask for an EFFECTIVE pane no
+    // smaller than `min_story_screen` in each dimension, so a story that reads
+    // $20/$21 once at boot and refuses below its own minimum still starts —
+    // the host then renders that (possibly larger) cell count at whatever
+    // per-cell pixel size actually fits its real screen. A no-op for a host
+    // that left `min_story_screen` unset, and for v1-3/v6 stories: below v4
+    // `write_screen_dims` never writes $20/$21 at all, and a v6 boot below
+    // never reads `host_screen` in the first place (it seeds windows 0/1 from
+    // `screen_px` instead, see `BootConfig::apply`) — so seeding a bumped
+    // grid neither of them looks at is harmless, and needs no special case
+    // here beyond the search itself declining to run for a pinned dimension.
+    let host_screen = terminal_size.and_then(|size| {
+        let size = match min_story_screen {
+            Some(floor) => {
+                min_terminal_size_for_story_floor(&cfg, &cs, &garglk_overlay, boot_layout, size, floor)
+            }
+            None => size,
+        };
+        pre_boot_host_screen(&cfg, &cs, &garglk_overlay, boot_layout, size)
+    });
 
     // SQ-0811: the seed every engine's PRNG starts from, drawn ONCE here and
     // handed to whichever engine builds below, so the console line further down
@@ -1012,8 +1305,11 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         }
         crate::hints::LoadedStory::Glulx(bytes) => {
             let pict_blorb = resolve_pict_blorb(&story_path, cfg.images);
-            match GlulxSession::new_in(
-                game_dir.clone(),
+            // The learned-address sidecars (`room-global`/`player-global`) are the
+            // catalogue's, shared by every player (SQ-1676); the saves are not.
+            match GlulxSession::new_with_store(
+                crate::glulx_session::GameStore::writable(game_dir.clone())
+                    .with_catalogue(catalogue_dir.clone()),
                 bytes,
                 cfg.virtual_screen_cols.unwrap_or(crate::config::FALLBACK_SCREEN_COLS) as u32,
                 cfg.virtual_screen_rows.unwrap_or(crate::config::FALLBACK_SCREEN_ROWS) as u32,
@@ -1101,6 +1397,18 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // and created before the engine build too. The IFID stays for title/hint/
     // display and the per-game style reload below.
     let arc_file = default_state_path(&game_dir);
+    let quick_save_file = quick_save_state_path(&game_dir);
+
+    // Two reserved slots can each hold a resume point (SQ-1624): the auto-save's
+    // `arc_file` and the manual quick-save's `quick_save_file`. `resume_source`
+    // (SQ-1626) is the ONE place that decides which of them a normal boot
+    // resumes from — see its doc for the has-a-resume-point-beats-newest rule
+    // and the same-second quick-save tie-break. `fresh_start` (SQ-1626) skips
+    // the lookup entirely: no resume is attempted from either slot, neither
+    // file is read or written, and `resume_path` is `None` exactly as if
+    // neither reserved slot existed for this one boot.
+    let resume_path: Option<PathBuf> =
+        if fresh_start { None } else { resume_source(&game_dir).map(|slot| slot.path(&game_dir)) };
 
     // Load mapper (and optionally restore the game save) from the archive.
     let mut startup_transcript: crate::state::LoadedTranscript = None;
@@ -1122,8 +1430,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // Whether this boot actually resumed a past game (auto_load on, a save
     // present, and the restore succeeded) — `BootedStory::resumed` (SQ-1545).
     let mut resumed = false;
-    let mut mapper = if arc_file.exists() {
-        match load_archive(&arc_file) {
+    let mut mapper = if let Some(resume_path) = resume_path.as_ref().filter(|p| p.exists()) {
+        match load_archive(resume_path) {
             Ok(ac) => {
                 // Restore the machine from the saved game state only when auto_load is enabled.
                 if cfg.auto_load {
@@ -1170,7 +1478,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 if cfg.auto_load { ac.mapper } else { Mapper::default() }
             }
             Err(e) => {
-                hooks.console(&format!("warning: could not load archive {}: {}", arc_file.display(), e));
+                hooks.console(&format!("warning: could not load archive {}: {}", resume_path.display(), e));
                 Mapper::default()
             }
         }
@@ -1223,6 +1531,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // Stash the garglk.ini overlay (already folded into `cs` above) so the
     // post-IFID reload_style below — and every later /reload — re-applies it.
     state.garglk_overlay = garglk_overlay;
+    state.glk_design = glk_design;
     for w in style_w1.into_iter().chain(style_w2) {
         state.push_notice(&format!("[{}]", w));
     }
@@ -1241,13 +1550,20 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
     state.game_picker_query_answered = game_picker_query_answered;
+    state.glk_cell_px = glk_cell_px;
+    // SQ-1703 P3: a story with a `.cfg` design size lays out at it and is
+    // stretched over the pane, unless the per-game `glk_design = false`.
+    // `state.config` is only assigned below, and `apply_glk_design` resolves the
+    // global `glk_design` / `glk_design_fit` keys (SQ-1707) through it.
+    state.config.glk_design = cfg.glk_design;
+    state.config.glk_design_fit = cfg.glk_design_fit;
+    crate::host::screen::apply_glk_design(&mut *session, &mut state, &game_dir);
+    state.min_story_screen = min_story_screen;
     state.term_default_colors = term_default_colors;
     state.query_sweep = query_sweep;
     state.pane_sizes = crate::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,
-        inv_dock_pct: cfg.inv_dock_pct,
-        room_dock_pct: cfg.room_dock_pct,
     };
     // `[command_panel] auto_open` — open the command panel with the story, for
     // players who want it as their default input surface rather than a thing to
@@ -1391,10 +1707,15 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         None => words,
     };
 
-    // Open whichever panel this story starts with (SQ-1123, widened to a
-    // three-state cycle by SQ-1237): the per-game override, or the global
+    // Open whichever panel this story starts with (SQ-1123): the per-game override, or the global
     // `[command_panel] auto_open` fallback resolved into `initial_panel` above.
     // Instant (no slide) so the first frame is already the settled layout.
+    // The Journal reopens on the tab this story was last left on (SQ-1684). Set
+    // directly, not through `Action::SetJournalTab`, which would write the
+    // sidecar back for a value that just came out of it.
+    if let Some(tab) = crate::styles::read_per_game_journal_tab(&game_dir) {
+        state.journal_tab = tab;
+    }
     match initial_panel {
         crate::state::SidePanel::Command => {
             let mut mapper_noop = mapper::mapper::Mapper::default();
@@ -1405,11 +1726,6 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
             crate::input::open_command_band(&mut state, &mut mapper_noop, true);
             state.band_dock.toggle_to(true, true);
         }
-        crate::state::SidePanel::Inventory => {
-            // Same non-persisting rule as the command panel above.
-            crate::input::open_inventory_panel(&mut state, true);
-            state.inv_dock.toggle_to(true, true);
-        }
         crate::state::SidePanel::None => {}
     }
 
@@ -1417,9 +1733,18 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // ordered elements (text + any startup/cover images); the Z-machine returns
     // empty here and falls back to the flat string path. Either way `banner` is the
     // banner text for title extraction (the elems' concatenated Text equals it).
-    let banner_elems = session.take_transcript_elems();
+    //
+    // SQ-1629 Fix 2: `Engine::seed_turn` is now the ONE boot drain (see its own doc) — it
+    // drains the exact same transcript/elems this banner is built from, and (for engines that
+    // override it, e.g. `GameSession`) also captures the STARTING room's own `description`/
+    // `items` off that same still-warm text, applied further down once `mapper`/`state.turns`
+    // are in scope. `std::mem::take` lifts just those two fields out of `seed_result` so the
+    // rest of it (`location`, `description`, `items`, …) survives for that later use — a second
+    // drain call there would find an already-empty transcript.
+    let mut seed_result = session.seed_turn();
+    let banner_elems = std::mem::take(&mut seed_result.transcript_elems);
     let banner: String = if banner_elems.is_empty() {
-        session.take_transcript()
+        std::mem::take(&mut seed_result.transcript)
     } else {
         banner_elems
             .iter()
@@ -1436,13 +1761,24 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // names the game the way the list does. The banner heuristic is the tier
     // below it, and the filename stem is the last resort it was meant to be.
     let meta_title =
-        crate::picker::metadata_title_in(&story_path, &game_dir, &ifid, is_scott, &story_bytes);
+        crate::picker::metadata_title_in(&story_path, &catalogue_dir, &ifid, is_scott, &story_bytes);
     state.title =
         crate::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     state.pane_title =
         crate::session::format_pane_title(&state.title, story_filename, disk_image.is_some());
     state.ifid = ifid.clone();
+    // SQ-1633: which physical copy of this release actually wrote this session's
+    // saves — the file name, the disk-image entry (if any), and the machine the
+    // medium implies (if any). Informational only, for display: `storage::
+    // game_dir`'s IFID-keyed grouping of every copy of a release into one shared
+    // save folder, and resume-slot selection, never read this — see
+    // `archive::SaveSource`'s own doc.
+    state.source = crate::archive::SaveSource {
+        story_file: story_path.file_name().and_then(|n| n.to_str()).map(str::to_string),
+        disk_entry: disk_entry.map(str::to_string),
+        machine: disk_image.and_then(blorb::medium::DiskImage::machine).map(Into::into),
+    };
     state.game_dir = game_dir.clone();
     // Restore the per-game map-panel visibility (SQ-0304): if the user last hid
     // the map for this story, start with it hidden.
@@ -1516,16 +1852,29 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
 
     // Observe the starting room so it appears on the map immediately.
     //
-    // Built by [`Engine::seed_turn`] and NOT by a `TurnResult { … }` literal: the
-    // literal that used to stand here spelled `erase_lower: false` into itself, so
-    // an `erase_window` the game issued during its own boot was never drained and
-    // the first real turn took it instead — wiping the banner and the opening room
-    // description one command late (SQ-1106). Taken UNCONDITIONALLY, before the
-    // location test below, because a story whose starting room is undetectable still
-    // has a boot to drain.
-    let seed_result = session.seed_turn();
+    // `seed_result` — built by [`Engine::seed_turn`], not a `TurnResult { … }` literal (a
+    // literal that spelled `erase_lower: false` into itself once left an `erase_window` issued
+    // during boot undrained until the first real turn took it instead, wiping the banner and
+    // the opening room description one command late, SQ-1106) — was already taken above,
+    // alongside the banner (SQ-1629 Fix 2: one boot drain, not two — see that call site's own
+    // comment). Applied UNCONDITIONALLY, before the location test below, because a story whose
+    // starting room is undetectable still has a boot to drain.
     if let Some(snap_number) = seed_result.location.as_ref().map(|snap| snap.number) {
         apply_turn(&mut mapper, "", &seed_result, &mut state.death_watch);
+        // SQ-1629 Fix 2: the starting room's own description/items, off the SAME boot drain —
+        // `apply_room_description`/`apply_item_observations` are the identical engine-neutral
+        // calls `finish_command_turn`/`finish_resumed_turn` already make for every later turn
+        // (SQ-1625/SQ-1627); this closes the one gap those lanes left — the room the story
+        // STARTS in, which no command ever arrives for and which the player has not yet typed
+        // `look` at either.
+        // SQ-1634: `state.turns` isn't restored from the save until further down
+        // (`startup_turns`, applied below) — on a resume, stamping this drain's
+        // observations with the pre-restore `state.turns` (still 0) instead of
+        // the save's actual turn count loses "last seen at move N" for the
+        // starting room's own description and every item it re-observes here.
+        let drain_turns = startup_turns.unwrap_or(state.turns);
+        crate::session::apply_room_description(&mut mapper, drain_turns, &seed_result);
+        crate::session::apply_item_observations(&mut mapper, drain_turns, &seed_result);
         flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
         flush_v6_trace(&state.config.user_dir, &mut *session, state.config.trace.v6);
         if state.config.trace.any() {
@@ -1575,6 +1924,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     if let Some((lines, kinds, runs, para, images)) = startup_transcript {
         state.transcript = lines;
         state.clear_anchor = None;
+        state.top_anchor = None;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
         state.transcript_para = para;
@@ -1632,6 +1982,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         // shadow of Counterfeit Monkey re-runs the initialisation this launch
         // skipped, which is the whole of SQ-1121's "too slow to probe".
         store: game_dir.clone(),
+        catalogue: Some(catalogue_dir.clone()),
         // Taken from the LIVE SESSION rather than from the sidecar on disk: on a
         // first launch the sidecar is empty and the session's is not, and it is
         // the session's that makes the shadow cheap.
@@ -1652,10 +2003,103 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         state,
         game_dir,
         ifid,
-        arc_file,
+        arc_file: arc_file.clone(),
+        quick_save_file,
+        // No resume was attempted at all (fresh_start, or neither slot had
+        // anything to offer) — fall back to `arc_file`, same as the "nothing
+        // to resume" case always has.
+        resume_source_file: resume_path.unwrap_or(arc_file),
         story_bytes,
         story_path,
-        data_base,
+        roots,
         resumed,
     })
+}
+
+// ── SQ-1596: min_story_screen's pure inversion, independent of a real boot ──
+
+#[cfg(all(test, feature = "t-session"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bump_dim_for_floor_returns_current_when_already_at_floor() {
+        assert_eq!(bump_dim_for_floor(50, 40, Some), 50);
+    }
+
+    #[test]
+    fn bump_dim_for_floor_searches_upward_for_the_smallest_dim_that_clears_the_floor() {
+        // A toy probe modelling "half the candidate" — the same shape
+        // `story_screen_dims`' width side has under a 50/50 split.
+        let probe = |c: u16| Some(c / 2);
+        assert_eq!(bump_dim_for_floor(10, 40, probe), 80, "the smallest candidate whose half clears 40");
+    }
+
+    #[test]
+    fn bump_dim_for_floor_leaves_current_untouched_when_nothing_in_range_clears_it() {
+        // A probe that never reaches the floor: the search must not spin
+        // forever or panic, and gives back `current` unchanged.
+        assert_eq!(bump_dim_for_floor(5, 1000, |_| Some(0)), 5);
+    }
+
+    #[test]
+    fn bump_dim_for_floor_skips_a_none_probe_rather_than_stopping_on_it() {
+        // Candidate 6 answers `None` (as a zero-height pane would) but 7
+        // clears the floor — the search must not treat `None` as failure.
+        let probe = |c: u16| if c == 6 { None } else { Some(c) };
+        assert_eq!(bump_dim_for_floor(5, 7, probe), 7);
+    }
+
+    #[test]
+    fn min_terminal_size_for_story_floor_bumps_only_the_short_dimension() {
+        let cfg = Config::default();
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let (cols, rows) = min_terminal_size_for_story_floor(
+            &cfg,
+            &cs,
+            &None,
+            crate::state::Layout::Split,
+            (80, 24),
+            (40, 19),
+        );
+        // 80 cols split 50/50 (the default `split_ratio`) falls short of the
+        // 40-col floor; 24 rows already clears the 19-row one.
+        assert!(cols > 80, "cols must be bumped past the real terminal width: got {cols}");
+        assert_eq!(rows, 24, "rows already cleared the floor and must be left exactly alone: got {rows}");
+
+        // And the bumped size really does clear the floor, round-tripped
+        // through the same measurement a boot uses.
+        let mut state = AppState::default();
+        state.config = cfg.clone();
+        state.colors = cs.clone();
+        let seeded = story_screen_in(&state, (cols, rows)).expect("a non-zero pane");
+        assert!(seeded.1 >= 40 && seeded.0 >= 19, "the bumped size clears the floor: {seeded:?}");
+    }
+
+    #[test]
+    fn min_terminal_size_for_story_floor_respects_a_pin() {
+        let mut cfg = Config::default();
+        cfg.virtual_screen_cols = Some(10);
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let (cols, _rows) = min_terminal_size_for_story_floor(
+            &cfg,
+            &cs,
+            &None,
+            crate::state::Layout::Split,
+            (80, 24),
+            (40, 19),
+        );
+        assert_eq!(cols, 80, "a pinned virtual_screen_cols must leave the real terminal cols untouched");
+    }
+
+    #[test]
+    fn min_terminal_size_for_story_floor_is_a_noop_for_a_zero_floor() {
+        let cfg = Config::default();
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let real = (30, 10);
+        assert_eq!(
+            min_terminal_size_for_story_floor(&cfg, &cs, &None, crate::state::Layout::Split, real, (0, 0)),
+            real
+        );
+    }
 }

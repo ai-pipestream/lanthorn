@@ -1,8 +1,9 @@
 //! Room-info body: the story-facing view of one room, drawn by the room dock.
 //!
-//! Shows the room's notes and its EXIT CARD — one line per direction, in the matrix view's
-//! vocabulary, with destination names spelled out (SQ-0666). When the displayed room is the
-//! player's current room, also lists the objects in that room queried live from the Z-machine
+//! Shows the room's captured description (SQ-1628), its notes, and its EXIT CARD — one line per
+//! direction, in the matrix view's vocabulary, with destination names spelled out (SQ-0666).
+//! When the displayed room is the player's current room, also lists the objects in that room
+//! queried live from the Z-machine
 //! object tree. (The room's NAME and layer are the dock header's job — see
 //! [`crate::render::room_dock`] — so the body does not repeat them.)
 //!
@@ -282,6 +283,19 @@ fn build_info_rows(
 
     let value_style = body;
     let section_style = heading;
+
+    // The room's captured description (SQ-1628), if lanthorn has one — the game's own last-seen
+    // text for THIS room, shown for whichever room is being inspected (not gated to the player's
+    // current room, same as Notes below). Above Notes per the quest's own placement: the
+    // narrative text first, the player's annotations on it second. Word-wrapped the same
+    // char/width-aware way as Notes (see the comment below) — a description is exactly as
+    // capable of holding a multibyte character as a note is.
+    if let Some(description) = room.description.as_deref().filter(|d| !d.is_empty()) {
+        let description_style = theme.get("room_panel.description").style;
+        for line in crate::render::transcript::wrap_line(description, width) {
+            rows.push(Row::Line(line, description_style));
+        }
+    }
 
     // Notes (if any), word-wrapped char/width-aware (SQ-0638): a raw byte-offset
     // slice panics on a multibyte note (e.g. one full of '€') since a slice
@@ -668,6 +682,51 @@ mod tests {
         g.set_notes(room1, "€".repeat(12));
         let text = render_body(&g, &[], room1, None, 60, 20);
         assert!(text.contains("€"), "the multibyte note text should still render");
+    }
+
+    /// SQ-1628: a room with a captured description shows it, wrapped, above Notes — for
+    /// whichever room is being INSPECTED, not gated to the player's current room (same as
+    /// Notes' own gate, which is none).
+    #[test]
+    fn room_info_shows_description_above_notes_when_captured() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.set_description(room1, Some("A drafty hall with a cold stone floor.".into()), 1);
+        g.set_notes(room1, "check the floor for traps".into());
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(
+            text.contains("A drafty hall with a cold stone floor."),
+            "the captured description renders:\n{text}"
+        );
+        assert!(text.contains("check the floor for traps"), "…and the note still renders too:\n{text}");
+        let desc_line = text.lines().position(|l| l.contains("A drafty hall")).unwrap();
+        let note_line = text.lines().position(|l| l.contains("check the floor")).unwrap();
+        assert!(desc_line < note_line, "the description comes above Notes:\n{text}");
+    }
+
+    /// The companion case: a room with no captured description shows nothing extra — no stray
+    /// heading, no blank line eating a row a scroll would otherwise show.
+    #[test]
+    fn room_info_shows_no_description_line_without_one() {
+        let (g, room1, _) = make_graph_with_rooms();
+        let (with_desc_absent, total_without) = render_body_scrolled(&g, &[], room1, None, 60, 20, 0);
+        assert!(!with_desc_absent.contains("A drafty hall"), "nothing to show, so nothing shows");
+
+        // The row count is identical to a room with no notes and no description either — an
+        // absent description contributes no rows at all, not an empty one.
+        let (mut g2, room2, _) = make_graph_with_rooms();
+        g2.set_description(room2, None, 1);
+        let (_, total_explicit_none) = render_body_scrolled(&g2, &[], room2, None, 60, 20, 0);
+        assert_eq!(total_without, total_explicit_none, "an absent description adds no rows");
+    }
+
+    /// SQ-1628, same shape as [`room_info_notes_with_multibyte_chars_does_not_panic`]: a
+    /// description full of multibyte characters must not panic the word-wrap.
+    #[test]
+    fn room_info_description_with_multibyte_chars_does_not_panic() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.set_description(room1, Some("€".repeat(12)), 1);
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(text.contains("€"), "the multibyte description text should still render");
     }
 
     #[test]

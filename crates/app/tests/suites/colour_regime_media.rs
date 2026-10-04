@@ -732,6 +732,7 @@ fn a_host_save_state_does_not_carry_a_colour_regime_across() {
                 location: None,
                 score: None,
                 trigger: app::archive::SaveTrigger::HostState,
+                source: app::archive::SaveSource::default(),
             },
             &app::archive::SessionRecord::empty(),
             &src.session.pictures_png(),

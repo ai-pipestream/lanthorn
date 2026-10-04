@@ -189,6 +189,7 @@ fn save_restore_perturb(b: Booted, rebook: impl Fn() -> Option<Booted>) -> (Boot
             location: None,
             score: None,
             trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &b.session.pictures_png(),

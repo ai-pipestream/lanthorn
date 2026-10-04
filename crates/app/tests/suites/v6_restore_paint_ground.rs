@@ -149,6 +149,7 @@ fn meta() -> app::archive::Meta {
         location: None,
         score: None,
         trigger: app::archive::SaveTrigger::HostState,
+        source: app::archive::SaveSource::default(),
     }
 }
 

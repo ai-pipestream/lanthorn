@@ -187,14 +187,21 @@ mod tests {
         }
     }
 
-    /// One lock for every test that runs `exit_auto_save` (or asserts on the
-    /// process-global exit-save flag): the flag is one static for the whole
-    /// process, so under `cargo test`'s shared-process model two of these
+    /// One lock for every test that runs `exit_auto_save` or `exit_clear_resume_save`
+    /// (both unconditionally construct `crate::ExitSaveGuard`), or that otherwise
+    /// asserts on the process-global exit-save flag: the flag is one static for the
+    /// whole process, so under `cargo test`'s shared-process model two of these
     /// tests on parallel threads see each other's saves — the watchdog test's
     /// "nothing running before" raced exactly that on CI's Linux runner while
     /// nextest's per-test processes structurally could not show it (the
     /// SQ-0904 class, SQ-1184's flush test being the new second writer).
-    /// Poison-proof: a panicking holder must not fail its neighbours twice.
+    /// SQ-1641: four callers of `exit_auto_save`/`exit_clear_resume_save` had never
+    /// taken this lock at all — the doc above described the discipline but nothing
+    /// enforced it, so a test that never touched the lock could still flip the
+    /// atomic out from under the one test asserting on it. Every test below that
+    /// calls either function now takes this lock, not just the ones that assert on
+    /// the flag directly. Poison-proof: a panicking holder must not fail its
+    /// neighbours twice.
     static EXIT_SAVE_FLAG: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn exit_save_lock() -> std::sync::MutexGuard<'static, ()> {
         EXIT_SAVE_FLAG.lock().unwrap_or_else(|p| p.into_inner())
@@ -242,8 +249,13 @@ mod tests {
     /// is running" for the whole write — observed here from INSIDE the save, via
     /// the `aux_data` the archive writer calls mid-write — and clear it after.
     ///
-    /// One test, not three: the flag is process-global, so separate tests
-    /// asserting "not running" would race each other under the parallel harness.
+    /// One test, not three, asserts directly on the flag's value: the flag is
+    /// process-global, so separate tests asserting "not running" would race each
+    /// other under the parallel harness even with the lock above held individually.
+    /// (Every other test in this module that merely calls `exit_auto_save`/
+    /// `exit_clear_resume_save` without asserting on the flag still takes the same
+    /// lock — see `exit_save_lock`'s doc — because the guard those functions
+    /// construct flips the flag regardless of whether the test looks at it.)
     #[test]
     fn exit_auto_save_publishes_its_progress_to_the_termination_watchdog() {
         let _flag = exit_save_lock();
@@ -368,6 +380,7 @@ mod tests {
                 location: None,
                 score: None,
                 trigger: app::archive::SaveTrigger::HostState,
+                source: app::archive::SaveSource::default(),
             },
             session: app::archive::SessionRecord::empty().snapshot(),
             pictures: Vec::new(),
@@ -396,6 +409,7 @@ mod tests {
     /// survive exactly as a normal exit leaves them.
     #[test]
     fn exit_clear_resume_save_empties_the_save_but_keeps_mapper_aux_and_command_history_sq1342() {
+        let _flag = exit_save_lock();
         let dir = app::scratch_dir("lifecycle-clear-resume");
         let arc_file = dir.join("default.lanthorn");
 
@@ -421,6 +435,7 @@ mod tests {
             location: Some("Lab".to_string()),
             score: Some(10),
             trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         };
         let lines = vec!["You are in a lab.".to_string()];
         let kinds = vec![app::state::TranscriptKind::Story];
@@ -467,6 +482,7 @@ mod tests {
     /// right back (SQ-1342).
     #[test]
     fn exit_clear_resume_save_flushes_a_pending_background_write_before_its_own_write_sq1342() {
+        let _flag = exit_save_lock();
         let dir = app::scratch_dir("lifecycle-clear-resume-flush");
         let arc_file = dir.join("default.lanthorn");
 
@@ -502,6 +518,7 @@ mod tests {
                 location: None,
                 score: None,
                 trigger: app::archive::SaveTrigger::HostState,
+                source: app::archive::SaveSource::default(),
             },
             session: app::archive::SessionRecord::empty().snapshot(),
             pictures: Vec::new(),
@@ -519,5 +536,57 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-1633: the booted session's source rides along on every exit write ───
+
+    /// `exit_auto_save` delegates to `app::host::persist::write_save_state`,
+    /// which `save_state_now` also shares (see `host::persist`'s own doc) — so
+    /// this one case covers both, rather than being duplicated per caller.
+    #[test]
+    fn exit_auto_save_writes_the_booted_sessions_source_sq1633() {
+        let _flag = exit_save_lock();
+        let mut engine = SnapshotableEngine::new();
+        let mut state = app::state::AppState::default();
+        state.config.auto_save = true;
+        state.source = app::archive::SaveSource {
+            story_file: Some("Zork I - The Great Underground Empire.adf".to_string()),
+            disk_entry: None,
+            machine: Some(app::archive::MachineDto::Amiga),
+        };
+        let mapper = mapper::mapper::Mapper::default();
+        let arc_file = std::env::temp_dir().join(format!("bm-sq1633-exit-source-{}.lanthorn", std::process::id()));
+        let _ = std::fs::remove_file(&arc_file);
+
+        super::exit_auto_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+
+        let meta = app::archive::read_archive_meta(&arc_file).expect("archive readable");
+        assert_eq!(meta.source, state.source, "the exit auto-save must name the booted copy's own source");
+        let _ = std::fs::remove_file(&arc_file);
+    }
+
+    /// The clean-quit clearing write (`write_cleared_resume_archive`) is a
+    /// SEPARATE function from `write_save_state` above — it must carry `source`
+    /// too, not just the ordinary save.
+    #[test]
+    fn exit_clear_resume_save_writes_the_booted_sessions_source_sq1633() {
+        let _flag = exit_save_lock();
+        let mut engine = SnapshotableEngine::new();
+        let mut state = app::state::AppState::default();
+        state.config.auto_save = true;
+        state.source = app::archive::SaveSource {
+            story_file: Some("zork1-r88-s840726.z3".to_string()),
+            disk_entry: None,
+            machine: None,
+        };
+        let mapper = mapper::mapper::Mapper::default();
+        let arc_file = std::env::temp_dir().join(format!("bm-sq1633-clear-source-{}.lanthorn", std::process::id()));
+        let _ = std::fs::remove_file(&arc_file);
+
+        super::exit_clear_resume_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+
+        let meta = app::archive::read_archive_meta(&arc_file).expect("archive readable");
+        assert_eq!(meta.source, state.source, "the clearing write must still name the booted copy's own source");
+        let _ = std::fs::remove_file(&arc_file);
     }
 }

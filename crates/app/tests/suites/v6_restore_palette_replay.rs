@@ -103,6 +103,7 @@ fn a_restored_canvas_survives_the_next_palette_change() {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(),
             location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         // No display list: this test pins the LEGACY (pixels-only) restore path.

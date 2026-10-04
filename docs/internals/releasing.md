@@ -44,7 +44,16 @@ against a tag.
   bullets a player downloading the build cares about most, a breaking change
   first if there is one.
 - Bump `version` in the workspace `Cargo.toml`'s `[workspace.package]` —
-  every crate and every binary's `--version` follow from that one line.
+  every crate and every binary's `--version` follow from that one line. This
+  does **not** reach every internal path-dependency's own `version = "X.Y.Z"`
+  requirement string (`crates/*/Cargo.toml`, e.g. `zvm = { path = "../zvm",
+  version = "0.7.2" }`) — those are separate, exact pins Cargo checks even
+  for a path dependency, and `cargo check` fails immediately if they lag
+  behind. Bump every one of them to match:
+  `grep -rl 'version = "OLD.VER"' --include=Cargo.toml . | xargs sed -i ''
+  's/version = "OLD.VER"/version = "NEW.VER"/g'` (drop the `''` after `-i`
+  on Linux), then `cargo check --workspace` to update `Cargo.lock` and
+  confirm nothing was missed.
 - Commit, push to `main`, wait for green.
 
 ## 4. Tag

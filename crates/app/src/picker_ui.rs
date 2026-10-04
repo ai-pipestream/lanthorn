@@ -35,6 +35,18 @@ enum PickerView {
     Gallery,
 }
 
+/// The info panel's "Create documents folder" button label (SQ-1679).
+const DOCS_BUTTON_LABEL: &str = "Create documents folder";
+
+/// What a click on the documents button reports in the panel's link rects, where
+/// a URL would sit: not a URL, so the click handler runs the command instead.
+const PANEL_ACTION_CREATE_DOCS: &str = "lanthorn-action:create-documents-folder";
+
+/// The info panel's "Download documents…" button label and what a click on it
+/// reports (SQ-1680) — the same arrangement as the create button above.
+const DOWNLOAD_DOCS_LABEL: &str = "Download documents…";
+const PANEL_ACTION_DOWNLOAD_DOCS: &str = "lanthorn-action:download-documents";
+
 /// A previewable bundled resource the info panel links to (SQ-0347): an image
 /// (`Pict`) or a sound (`Snd `). Carries where to re-read the bytes from (the
 /// story's own blorb, or its sidecar) since the panel's `ChunkInfo` list holds
@@ -45,12 +57,17 @@ struct ResourceRef {
     kind: PreviewKind,
     number: u32,
     label: String,
+    /// A row of the Documents section (SQ-1700): the file to open, with
+    /// `kind == PreviewKind::Document`. `None` for a blorb resource.
+    doc: Option<app::documents::DocEntry>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PreviewKind {
     Image,
     Sound,
+    /// A file in the story's documents folder (SQ-1700).
+    Document,
 }
 
 /// A bundled resource being shown in the picker's preview modal (SQ-0347): a
@@ -75,6 +92,9 @@ struct ResourcePreview {
     status: Option<String>,
     /// Current zoom (SQ-0486): `Fit` on open; `+`/`-`/wheel step it.
     zoom: PreviewZoom,
+    /// A text document (SQ-1700), paged with the Documents tab's own pager; the
+    /// keys and the wheel scroll it instead of zooming.
+    text: Option<app::documents_tab::Pager>,
 }
 
 /// Image-preview zoom (SQ-0486). `Fit` scales the image (up or down, at
@@ -506,17 +526,71 @@ fn ensure_aux(
     cache: &mut [Option<app::picker::StoryAux>],
     stories: &[app::picker::StoryEntry],
     idx: usize,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     hint_index: &app::hints::HintIndex,
 ) {
     if let Some(slot) = cache.get_mut(idx) {
         if slot.is_none() {
             // A folder has no aux to resolve (and nothing to open).
             if let Some(entry) = stories.get(idx).filter(|e| !e.is_folder()) {
-                *slot = Some(app::picker::resolve_aux(entry, data_base, hint_index));
+                *slot = Some(app::picker::resolve_aux(entry, roots, hint_index));
             }
         }
     }
+}
+
+/// The `create-documents-folder` action (SQ-1679): make the folder for the story
+/// at `idx` if it is linked and has none, and answer the status line to show.
+/// On success every cached aux is dropped (other rows of the same game read the
+/// same folder) and the selected one is re-read, so the panel shows the real path
+/// without its "(not created)" mark and the button goes away.
+fn create_documents_folder(
+    roots: &app::data_roots::DataRoots,
+    stories: &[app::picker::StoryEntry],
+    idx: usize,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    hint_index: &app::hints::HintIndex,
+) -> String {
+    let Some(entry) = stories.get(idx).filter(|e| !e.is_folder()) else { return String::new() };
+    match app::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title) {
+        app::documents::Location::Unlinked => {
+            "Link this game to IFDB first: a documents folder is named for its IFDB id".to_string()
+        }
+        app::documents::Location::Exists(p) => {
+            format!("Documents folder already exists: {}", abbreviate_home(&p))
+        }
+        app::documents::Location::Missing(_) => {
+            let tuid = entry.meta.ifdb_tuid.as_deref().unwrap_or_default();
+            match app::documents::ensure_documents_dir(roots, tuid, &entry.title) {
+                Ok(p) => {
+                    *aux_cache = (0..stories.len()).map(|_| None).collect();
+                    ensure_aux(aux_cache, stories, idx, roots, hint_index);
+                    format!("Created documents folder: {}", abbreviate_home(&p))
+                }
+                Err(e) => format!("Could not create the documents folder: {e}"),
+            }
+        }
+    }
+}
+
+/// The IFDB id and title of the story `entry` if it is linked to IFDB, which is
+/// what the documents chooser needs and a game IFDB does not know cannot give.
+fn documents_target(roots: &app::data_roots::DataRoots, entry: &app::picker::StoryEntry) -> Option<(String, String)> {
+    match app::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title) {
+        app::documents::Location::Unlinked => None,
+        _ => entry.meta.ifdb_tuid.clone().map(|t| (t, entry.title.clone())),
+    }
+}
+
+/// The per-story menu for row `idx`, with its IFDB-record items disabled when
+/// the story is not linked (SQ-1680).
+fn menu_for(
+    stories: &[app::picker::StoryEntry],
+    idx: usize,
+    roots: &app::data_roots::DataRoots,
+) -> app::story_menu::StoryMenu {
+    let linked = stories.get(idx).is_some_and(|e| documents_target(roots, e).is_some());
+    app::story_menu::StoryMenu::for_story(idx, linked)
 }
 
 /// The rows the picker lists for `dir`: a library shows the folder at `dir`
@@ -526,11 +600,11 @@ fn rows_for(
     source: &app::picker::StorySource,
     dir: &std::path::Path,
     root: &std::path::Path,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
 ) -> Vec<app::picker::StoryEntry> {
     match source {
-        app::picker::StorySource::Library(_) => app::picker::library_rows(dir, root, data_base),
-        other @ app::picker::StorySource::DiskSet { .. } => other.scan(data_base),
+        app::picker::StorySource::Library(_) => app::picker::library_rows(dir, root, roots),
+        other @ app::picker::StorySource::DiskSet { .. } => other.scan(roots),
     }
 }
 
@@ -560,17 +634,17 @@ fn first_story(stories: &[app::picker::StoryEntry]) -> Option<&app::picker::Stor
 fn resolve_picker_position(
     source: &app::picker::StorySource,
     root: &std::path::Path,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     restore: Option<&PickerPosition>,
 ) -> (std::path::PathBuf, Vec<app::picker::StoryEntry>, usize) {
     let mut dir = restore
         .map(|p| p.dir.clone())
         .filter(|d| d.is_dir())
         .unwrap_or_else(|| root.to_path_buf());
-    let mut stories = rows_for(source, &dir, root, data_base);
+    let mut stories = rows_for(source, &dir, root, roots);
     if stories.is_empty() && dir != root {
         dir = root.to_path_buf();
-        stories = rows_for(source, &dir, root, data_base);
+        stories = rows_for(source, &dir, root, roots);
     }
     let selected = restore
         .and_then(|p| stories.iter().position(|e| e.is(&p.path, p.disk_entry.as_deref())))
@@ -602,16 +676,16 @@ fn enter_folder(
     row_badges: &mut Vec<app::picker::RowBadges>,
     aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
     list: &mut app::list_scroll::ListScroll,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     hint_index: &app::hints::HintIndex,
     viewport: usize,
     anim: &app::config::AnimationConfig,
 ) {
     let came_from = std::mem::replace(dir, target.to_path_buf());
-    *stories = rows_for(source, dir, root, data_base);
+    *stories = rows_for(source, dir, root, roots);
     *row_badges = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .map(|e| app::picker::compute_row_badges(e, roots, hint_index))
         .collect();
     *aux_cache = (0..stories.len()).map(|_| None).collect();
     list.len(stories.len());
@@ -630,13 +704,13 @@ fn apply_find(
     row_badges: &mut Vec<app::picker::RowBadges>,
     aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
     list: &mut app::list_scroll::ListScroll,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     hint_index: &app::hints::HintIndex,
 ) {
     *stories = app::picker::search_library(index, root, query);
     *row_badges = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .map(|e| app::picker::compute_row_badges(e, roots, hint_index))
         .collect();
     *aux_cache = (0..stories.len()).map(|_| None).collect();
     list.len(stories.len());
@@ -661,14 +735,14 @@ fn show_gallery_scope(
     row_badges: &mut Vec<app::picker::RowBadges>,
     aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
     list: &mut app::list_scroll::ListScroll,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     hint_index: &app::hints::HintIndex,
 ) {
     let keep = stories.get(list.selected).filter(|e| !e.is_folder()).map(|e| (e.path.clone(), e.meta.disk_entry.clone()));
     *stories = app::picker::search_library_under(index, root, dir, "");
     *row_badges = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .map(|e| app::picker::compute_row_badges(e, roots, hint_index))
         .collect();
     *aux_cache = (0..stories.len()).map(|_| None).collect();
     list.len(stories.len());
@@ -829,13 +903,13 @@ fn resort_list(
     sort: app::picker::Sort,
     row_badges: &mut Vec<app::picker::RowBadges>,
     aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     hint_index: &app::hints::HintIndex,
 ) -> usize {
     let new_idx = app::picker::resort_preserving_selection(stories, selected, sort);
     *row_badges = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .map(|e| app::picker::compute_row_badges(e, roots, hint_index))
         .collect();
     *aux_cache = (0..stories.len()).map(|_| None).collect();
     new_idx
@@ -1097,9 +1171,9 @@ fn launch_scroll_recipe(
 fn open_launch_options(
     entry: &app::picker::StoryEntry,
     cfg: &app::config::Config,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
 ) -> app::launch_options::LaunchOptionsState {
-    let game_dir = entry.game_dir(data_base);
+    let game_dir = entry.game_dir(roots);
     // What this story already inherits, which is what every "did the user change
     // it?" comparison is against.
     let inherited_pictures = app::styles::read_per_game_pictures(&game_dir);
@@ -1236,7 +1310,7 @@ fn right_click_action(hit: Option<(usize, bool)>) -> (Option<usize>, Option<usiz
 pub(crate) fn run_story_picker(
     mut source: app::picker::StorySource,
     cfg: &app::config::Config,
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     restore: Option<&PickerPosition>,
 ) -> Option<PickedStory> {
     // The library root, and the folder currently listed. They part company the
@@ -1244,26 +1318,26 @@ pub(crate) fn run_story_picker(
     // meet again on Backspace; downloads land in `dir`, the folder on screen.
     let root = source.dir().to_path_buf();
     let (mut dir, mut stories, restored_idx) =
-        resolve_picker_position(&source, &root, data_base, restore);
+        resolve_picker_position(&source, &root, roots, restore);
     if stories.is_empty() {
         eprintln!("lanthorn: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
     }
 
     // Resolve themed colors the same way the game does, so the picker matches.
-    let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let (base, _w1) = app::style::load_style_for(cfg);
     // No story is booted here, so no machine names a colour table: the picker
     // resolves standard colour numbers through §8.3.1's own (SQ-1393).
     let (cs, _set, _w2) =
         app::style::resolve(&base, &cfg.user_dir, zvm::screen::Palette::Standard);
 
-    // Row badges: each story's per-game dir under `data_base` + one shared hint
+    // Row badges: each story's per-game dir under `roots` + one shared hint
     // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
     // list reorders, so it stays index-aligned with `stories`.
     let hint_index = app::hints::load_hint_index(&cfg.user_dir);
     let mut row_badges: Vec<app::picker::RowBadges> = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
+        .map(|e| app::picker::compute_row_badges(e, roots, &hint_index))
         .collect();
     let sym_cfg = app::style::finalize_symbols(&base.symbols);
     let badge_glyphs = app::picker::BadgeGlyphs::from_symbols(&sym_cfg);
@@ -1354,7 +1428,7 @@ pub(crate) fn run_story_picker(
     // sender, which ends the worker thread's `recv()` loop.
     let fetcher = app::fetch_worker::Fetcher::new(
         Box::new(app::ifdb::IfdbClient::new()),
-        data_base.to_path_buf(),
+        roots.clone(),
         Duration::from_millis(500),
     );
     // On-demand InvisiClues downloader (SQ-0445): `H` fetches a matching hint
@@ -1393,7 +1467,7 @@ pub(crate) fn run_story_picker(
     let mut find_field: Option<app::text_field::TextField> = None;
     let index_rx = match &source {
         app::picker::StorySource::Library(_) => {
-            Some(app::picker::spawn_library_index(root.clone(), data_base.to_path_buf()))
+            Some(app::picker::spawn_library_index(root.clone(), roots.clone()))
         }
         // A multi-disk set is one release, not a tree; there is nothing to walk.
         app::picker::StorySource::DiskSet { .. } => None,
@@ -1413,14 +1487,22 @@ pub(crate) fn run_story_picker(
     // `fetch`/`fetch_by_id` — to populate the story's sidecar + cover from the
     // iFiction record already resolved for the download, with zero extra
     // metadata requests. See `ifdb_search.rs`'s module header.
+    // One gate for this picker's two IFDB workers (search + documents), so a
+    // request from a chooser just closed finishes before the next starts.
+    let ifdb_gate = app::ifdb_search::IfdbGate::default();
     let search_worker = app::ifdb_search::SearchWorker::new(
+        ifdb_gate.clone(),
         Box::new(app::ifdb_search::IfdbSearchClient::new()),
         Box::new(app::ifdb::IfdbClient::new()),
-        data_base.to_path_buf(),
+        roots.clone(),
     );
     let mut search_modal: Option<app::ifdb_search_modal::SearchModal> = None;
     let mut search_area = Rect::new(0, 0, 0, 0);
     let mut search_close_rect: Option<Rect> = None;
+    // The documents chooser (SQ-1680): `Shift-D`, the story menu's row and the
+    // info panel's button open it for the selected story. Its worker is its own
+    // (one request at a time, like the search worker's), built per open.
+    let mut docs_session: Option<app::documents_chooser::DocumentsSession> = None;
 
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
@@ -1447,6 +1529,10 @@ pub(crate) fn run_story_picker(
     let mut preview_close_rect: Option<Rect> = None;
     let mut preview_button_rects: Vec<(app::render::dialog::ButtonId, Rect)> = Vec::new();
     let mut preview_area = Rect::new(0, 0, 0, 0);
+    // A spoiler-flagged document awaiting the "open it?" answer (SQ-1700), with
+    // the focused button (0 = Open it, 1 = Cancel) and where the last draw put it.
+    let mut doc_confirm: Option<(app::documents::DocEntry, usize)> = None;
+    let mut doc_confirm_rects: Option<app::render::confirm_spoiler_dialog::ConfirmSpoilerDialogRects> = None;
 
     // Async cover decode: a background worker decodes off the main loop; results
     // are drained into `cover` each iteration. `requested` tracks in-flight paths
@@ -1564,7 +1650,7 @@ pub(crate) fn run_story_picker(
                             &stories, list.selected, &mut gallery_first_row,
                             &mut gallery_restore_rows_from_top, &heading, &cs, &keymap,
                             cover_picker.as_ref(), gallery_scroll_in_motion(gallery_scroll_motion_at),
-                            &mut cover, &mut tile_encoder, data_base, list_area, buf,
+                            &mut cover, &mut tile_encoder, roots, list_area, buf,
                         );
                         gallery_cols = cols.max(1);
                         gallery_vis = vis.max(1);
@@ -1639,9 +1725,9 @@ pub(crate) fn run_story_picker(
                         cover_picker.as_ref(),
                         &mut cover,
                         &entry.path,
-                        &entry.cover_key(data_base),
+                        &entry.cover_key(roots),
                         slide.active(),
-                        entry.hint_sidecar.as_deref(),
+                        &app::picker::hint_status(entry, roots, &hint_index),
                         &cs,
                         buf,
                         &mut panel_link_rects,
@@ -1675,6 +1761,17 @@ pub(crate) fn run_story_picker(
                 search_area = rects.area;
                 search_close_rect = rects.close;
             }
+
+            // Documents chooser (SQ-1680): a modal like the search one, and
+            // never open with it.
+            if let Some(ds) = &docs_session {
+                app::documents_chooser::draw_documents(&ds.chooser, area, &cs, buf);
+            }
+
+            // The spoiler question for a Documents row (SQ-1700).
+            doc_confirm_rects = doc_confirm.as_ref().and_then(|(e, focus)| {
+                app::render::confirm_spoiler_dialog::draw_spoiler_confirm(&e.id, *focus, &cs, area, buf)
+            });
 
             // Launch-options dialog (SQ-0789): topmost of all, since it is the
             // last thing between the user and a booting story.
@@ -1741,14 +1838,20 @@ pub(crate) fn run_story_picker(
                 stories
                     .get(list.selected)
                     .filter(|e| !e.is_folder())
-                    .map(|e| (e.cover_key(data_base), e.game_dir(data_base)))
+                    .map(|e| (e.cover_key(roots), e.catalogue_dir(roots)))
             })
             .flatten()
         {
-            ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+            ensure_aux(&mut aux_cache, &stories, list.selected, roots, &hint_index);
             if list.selected != last_sel {
                 last_sel = list.selected;
                 sel_changed_at = Instant::now();
+                // Re-selecting a story re-reads its documents folder (SQ-1700), so
+                // a file dropped in by hand appears — the rest of the aux (medium
+                // scans) stays cached.
+                if let (Some(Some(a)), Some(e)) = (aux_cache.get_mut(list.selected), stories.get(list.selected)) {
+                    app::picker::refresh_doc_files(a, roots, e);
+                }
             }
             // Settle-debounce: only request once the selection has been stable, so a
             // fling through the list costs one decode instead of one per row.
@@ -1768,9 +1871,9 @@ pub(crate) fn run_story_picker(
         if view == PickerView::Gallery {
             for &idx in &gallery_visible {
                 if let Some(entry) = stories.get(idx).filter(|e| !e.is_folder()) {
-                    let p = entry.cover_key(data_base);
+                    let p = entry.cover_key(roots);
                     if !cover.has(&p) && !requested.contains(&p) {
-                        decoder.request(p.clone(), entry.game_dir(data_base));
+                        decoder.request(p.clone(), entry.catalogue_dir(roots));
                         requested.insert(p);
                     }
                 }
@@ -1807,9 +1910,9 @@ pub(crate) fn run_story_picker(
         }
         if index_grew {
             if let Some(field) = &find_field {
-                apply_find(&index, &root, field.as_str(), &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                apply_find(&index, &root, field.as_str(), &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
             } else if gallery_all_folders(view, false, index_rx.is_some()) {
-                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
             }
         }
 
@@ -1833,7 +1936,7 @@ pub(crate) fn run_story_picker(
                 // that share one path, and only the disk entry says which of
                 // them this result belongs to (SQ-0859).
                 let disk_entry = p.disk_entry.as_deref();
-                if let Some(fresh) = app::picker::resolve_entry_from(&p.path, disk_entry, data_base)
+                if let Some(fresh) = app::picker::resolve_entry_from(&p.path, disk_entry, roots)
                 {
                     if let Some(slot) = stories.iter_mut().find(|e| e.is(&p.path, disk_entry)) {
                         *slot = fresh;
@@ -1846,7 +1949,7 @@ pub(crate) fn run_story_picker(
                     if let Some(key) = stories
                         .iter()
                         .find(|e| e.is(&p.path, disk_entry))
-                        .map(|e| e.cover_key(data_base))
+                        .map(|e| e.cover_key(roots))
                     {
                         cover.forget(&key);
                         requested.remove(&key);
@@ -1882,7 +1985,7 @@ pub(crate) fn run_story_picker(
                 }
             }
             list.select(
-                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, roots, &hint_index),
                 viewport,
                 anim,
             );
@@ -1896,20 +1999,11 @@ pub(crate) fn run_story_picker(
         let mut hint_arrived = false;
         for r in hint_dl.drain() {
             hint_arrived = true;
-            match r.outcome {
-                app::hint_download::HintDlOutcome::Done => {
-                    if let Some(idx) =
-                        stories.iter().position(|e| e.is(&r.story, r.disk_entry.as_deref()))
-                    {
-                        stories[idx].hint_sidecar = Some(r.dest);
-                        row_badges[idx] = app::picker::compute_row_badges(&stories[idx], data_base, &hint_index);
-                    }
-                    progress_line = Some(format!("Downloaded hints for {}", r.title));
-                }
-                app::hint_download::HintDlOutcome::Failed(msg) => {
-                    progress_line = Some(format!("Hint download failed: {msg}"));
-                }
+            let (idx, line) = app::picker::apply_hint_download(&mut stories, &r);
+            if let Some(idx) = idx {
+                row_badges[idx] = app::picker::compute_row_badges(&stories[idx], roots, &hint_index);
             }
+            progress_line = Some(line);
         }
 
         // Drain the open-a-URL downloads (SQ-1086). A finished one lands in
@@ -1935,15 +2029,15 @@ pub(crate) fn run_story_picker(
                             members.push(new_path.clone());
                         }
                     }
-                    stories = rows_for(&source, &dir, &root, data_base);
+                    stories = rows_for(&source, &dir, &root, roots);
                     merge_index(&mut index, &stories);
                     if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
-                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                     }
                     app::picker::resort_preserving_selection(&mut stories, 0, sort);
                     row_badges = stories
                         .iter()
-                        .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
+                        .map(|e| app::picker::compute_row_badges(e, roots, &hint_index))
                         .collect();
                     aux_cache = (0..stories.len()).map(|_| None).collect();
                     list.len(stories.len());
@@ -1968,6 +2062,16 @@ pub(crate) fn run_story_picker(
         // cursor on the new story; other events (search results, download
         // options, errors) update the modal's own state machine, which may hand
         // back a follow-up action.
+        let mut docs_arrived = false;
+        if let Some(ds) = docs_session.as_mut() {
+            docs_arrived = ds.pump();
+            if ds.chooser.take_saved() {
+                // Files landed in the game's folder: the info panel's
+                // Documents line is read afresh (as after creating the folder).
+                aux_cache = (0..stories.len()).map(|_| None).collect();
+                ensure_aux(&mut aux_cache, &stories, list.selected, roots, &hint_index);
+            }
+        }
         let mut search_arrived = false;
         for ev in search_worker.drain() {
             search_arrived = true;
@@ -1990,15 +2094,15 @@ pub(crate) fn run_story_picker(
                         members.push(new_path.clone());
                     }
                 }
-                stories = rows_for(&source, &dir, &root, data_base);
+                stories = rows_for(&source, &dir, &root, roots);
                     merge_index(&mut index, &stories);
                     if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
-                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                     }
                 app::picker::resort_preserving_selection(&mut stories, 0, sort);
                 row_badges = stories
                     .iter()
-                    .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
+                    .map(|e| app::picker::compute_row_badges(e, roots, &hint_index))
                     .collect();
                 aux_cache = (0..stories.len()).map(|_| None).collect();
                 list.len(stories.len());
@@ -2028,7 +2132,7 @@ pub(crate) fn run_story_picker(
         // `index_grew` too (SQ-none): a find's matches and the gallery's scope
         // widen as folders are indexed, and a header that counts them must
         // repaint without waiting for a key.
-        if cover_arrived || fetch_arrived || hint_arrived || search_arrived || url_arrived || index_grew {
+        if cover_arrived || fetch_arrived || hint_arrived || search_arrived || docs_arrived || url_arrived || index_grew {
             list.finalize_if_done();
             continue;
         }
@@ -2047,6 +2151,7 @@ pub(crate) fn run_story_picker(
             && (!requested.is_empty() || tile_encoder.pending());
         let cover_busy = panel_busy || gallery_busy;
         let search_busy = search_modal.as_ref().is_some_and(|m| m.busy()) || search_worker.busy();
+        let docs_busy = docs_session.as_ref().is_some_and(|d| d.busy() || d.chooser.has_active_animation());
         // The modal's own lists ease exactly as `list` does (SQ-0598), so they
         // need the same tick — without it a scroll would freeze mid-tween until
         // the next keypress.
@@ -2057,12 +2162,15 @@ pub(crate) fn run_story_picker(
         // its real payload fires on its own, without waiting for another key —
         // mirroring `has_active_animation()` pulling in `transcript_scroll_in_motion`
         // for the transcript's own debounce (SQ-1198).
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || url_dl.busy() || search_busy || search_scrolling || gallery_scroll_in_motion(gallery_scroll_motion_at))
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || url_dl.busy() || search_busy || docs_busy || search_scrolling || gallery_scroll_in_motion(gallery_scroll_motion_at))
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
             if let Some(m) = &mut search_modal {
                 m.finalize_if_done();
+            }
+            if let Some(d) = &mut docs_session {
+                d.chooser.finalize_if_done();
             }
             continue;
         }
@@ -2129,8 +2237,7 @@ pub(crate) fn run_story_picker(
                                 // Keyed on the story the dialog was opened
                                 // for, which on a compilation is not the one
                                 // the image's path resolves to (SQ-0859).
-                                let game_dir = app::storage::game_dir(
-                                    data_base,
+                                let game_dir = roots.player_dir(
                                     &app::storage::story_key_at_from(
                                         &lo.story_path,
                                         lo.disk_entry.as_deref(),
@@ -2168,6 +2275,21 @@ pub(crate) fn run_story_picker(
                 // The key reference (SQ-1227) captures all keys while open: Esc,
                 // `?` again, `q` or Enter close it, everything else is swallowed
                 // rather than acting on the list behind it.
+                } else if let Some((entry, focus)) = doc_confirm.as_mut() {
+                    // The spoiler question (SQ-1700), same keys as the Journal's.
+                    use app::render::confirm_spoiler_dialog::{confirm_spoiler_key_focused, ConfirmSpoilerAction};
+                    match k.code {
+                        Tab | BackTab | Left | Right => *focus = 1 - *focus,
+                        code => match confirm_spoiler_key_focused(code, *focus) {
+                            ConfirmSpoilerAction::Open => {
+                                let entry = entry.clone();
+                                doc_confirm = None;
+                                run_document_row(&entry, &mut preview, &mut progress_line);
+                            }
+                            ConfirmSpoilerAction::Cancel => doc_confirm = None,
+                            ConfirmSpoilerAction::None => {}
+                        },
+                    }
                 } else if keys_dialog {
                     if matches!(k.code, Esc | Enter | Char('q') | Char('?')) {
                         keys_dialog = false;
@@ -2192,6 +2314,12 @@ pub(crate) fn run_story_picker(
                 } else if search_modal.is_some() {
                     let action = search_modal.as_mut().unwrap().on_key(k.code, anim);
                     dispatch_search_action(action, &search_worker, &dir, &mut search_modal);
+                // The documents chooser (SQ-1680) captures all keys while open:
+                // Tab/Shift-Tab focus, Enter activates, Esc closes.
+                } else if let Some(ds) = docs_session.as_mut() {
+                    if ds.on_key(k.code, anim) == app::documents_chooser::KeyOutcome::Close {
+                        docs_session = None;
+                    }
                 // The resource-preview modal (SQ-0347) captures all keys while
                 // open: `+`/`=`/`-`/`0` step the zoom (SQ-0486, intercepted
                 // ahead of dismissal); any of Esc/Enter/q/Space dismisses it
@@ -2206,6 +2334,22 @@ pub(crate) fn run_story_picker(
                         }
                         Char('0') => {
                             preview.as_mut().unwrap().zoom = PreviewZoom::Fit;
+                        }
+                        // A text document scrolls (SQ-1700); the draw clamps.
+                        Up | Down | PageUp | PageDown | Home | End
+                            if preview.as_ref().is_some_and(|p| p.text.is_some()) =>
+                        {
+                            if let Some(t) = preview.as_ref().and_then(|p| p.text.as_ref()) {
+                                let cur = t.scroll.get();
+                                t.scroll.set(match k.code {
+                                    Up => cur.saturating_sub(1),
+                                    Down => cur + 1,
+                                    PageUp => cur.saturating_sub(10),
+                                    PageDown => cur + 10,
+                                    Home => 0,
+                                    _ => usize::MAX / 2,
+                                });
+                            }
                         }
                         Esc | Enter | Char('q') | Char(' ') => {
                             // Free the modal's upload before dropping the struct
@@ -2231,10 +2375,10 @@ pub(crate) fn run_story_picker(
                             find_field = None;
                             panel_scroll = 0;
                             if gallery_all_folders(view, false, index_rx.is_some()) {
-                                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                             } else {
                                 let here = dir.clone();
-                                enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                                enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index, viewport, anim);
                             }
                         }
                         Enter => {
@@ -2271,7 +2415,7 @@ pub(crate) fn run_story_picker(
                     if refilter {
                         panel_scroll = 0;
                         let query = find_field.as_ref().map(|f| f.as_str().to_string()).unwrap_or_default();
-                        apply_find(&index, &root, &query, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                        apply_find(&index, &root, &query, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                     }
                 } else if let Some(field) = manual_ifdb.as_mut() {
                     match k.code {
@@ -2400,8 +2544,10 @@ pub(crate) fn run_story_picker(
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if launch_opts.is_none()
                         && search_modal.is_none()
+                        && docs_session.is_none()
                         && preview.is_none()
                         && !keys_dialog
+                        && doc_confirm.is_none()
                     {
                         let hit = row_rects
                             .iter()
@@ -2412,11 +2558,26 @@ pub(crate) fn run_story_picker(
                             panel_scroll = 0;
                             list.select(idx, viewport, anim);
                         }
-                        story_menu = open.map(app::story_menu::StoryMenu::new);
+                        story_menu = open.map(|i| menu_for(&stories, i, roots));
                     }
                 } else if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if keys_dialog {
+                    if doc_confirm.is_some() {
+                        // The spoiler question (SQ-1700): a button answers it, the
+                        // ✕ or a click outside cancels, a click inside is swallowed.
+                        let hit = |r: Option<Rect>| r.is_some_and(|r| r.contains(pt));
+                        let (open, cancel, close, inside) = doc_confirm_rects.as_ref().map_or(
+                            (false, false, false, true),
+                            |r| (hit(r.open), hit(r.cancel), hit(r.close), r.area.contains(pt)),
+                        );
+                        if open {
+                            if let Some((entry, _)) = doc_confirm.take() {
+                                run_document_row(&entry, &mut preview, &mut progress_line);
+                            }
+                        } else if cancel || close || !inside {
+                            doc_confirm = None;
+                        }
+                    } else if keys_dialog {
                         // The key reference (SQ-1227): ✕, Done, or a click
                         // outside closes it; a click inside is swallowed.
                         let on_close = keys_close_rect.is_some_and(|r| r.contains(pt));
@@ -2462,8 +2623,7 @@ pub(crate) fn run_story_picker(
                                 // Keyed on the story the dialog was opened
                                 // for, which on a compilation is not the one
                                 // the image's path resolves to (SQ-0859).
-                                let game_dir = app::storage::game_dir(
-                                    data_base,
+                                let game_dir = roots.player_dir(
                                     &app::storage::story_key_at_from(
                                         &lo.story_path,
                                         lo.disk_entry.as_deref(),
@@ -2500,6 +2660,14 @@ pub(crate) fn run_story_picker(
                         {
                             launch_opts = None;
                         }
+                    } else if docs_session.is_some() {
+                        // Documents chooser (SQ-1680): ✕ / outside / Close dismiss,
+                        // Download acts, a click inside the list is swallowed.
+                        if let Some(ds) = docs_session.as_mut() {
+                            if ds.on_click_at(pt) == app::documents_chooser::KeyOutcome::Close {
+                                docs_session = None;
+                            }
+                        }
                     } else if search_modal.is_some() {
                         // IFDB search modal (SQ-0413): the ✕ or a click outside the
                         // dialog closes it; a click inside is swallowed (its lists
@@ -2527,11 +2695,28 @@ pub(crate) fn run_story_picker(
                     } else if let Some((_, rref)) = panel_resource_rects.iter().find(|(r, _)| r.contains(pt)) {
                         // Click on a previewable Pict/Snd resource row (SQ-0347):
                         // open its modal (image renders / sound plays).
-                        preview = Some(open_resource_preview(rref, &mut audio, cfg.volume));
+                        if let Some(doc) = &rref.doc {
+                            // A Documents row (SQ-1700): opens as the Journal's
+                            // Documents tab opens it, asking first for a spoiler.
+                            if app::documents_tab::needs_spoiler_confirm(doc) {
+                                doc_confirm = Some((doc.clone(), 1));
+                            } else {
+                                run_document_row(doc, &mut preview, &mut progress_line);
+                            }
+                        } else {
+                            preview = Some(open_resource_preview(rref, &mut audio, cfg.volume));
+                        }
                     } else if let Some((_, url)) = panel_link_rects.iter().find(|(r, _)| r.contains(pt)) {
                         // Click on an info-panel OSC 8 link (SQ-0367): the terminal
-                        // can't act on it while we hold mouse capture, so open it.
-                        open_url(url);
+                        // can't act on it while we hold mouse capture, so open it —
+                        // except the documents button, which runs its command.
+                        if url == PANEL_ACTION_CREATE_DOCS {
+                            pending_command = Some("create-documents-folder");
+                        } else if url == PANEL_ACTION_DOWNLOAD_DOCS {
+                            pending_command = Some("download-documents");
+                        } else {
+                            open_url(url);
+                        }
                     } else if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
                         let idx = *idx;
                         let now = Instant::now();
@@ -2543,7 +2728,7 @@ pub(crate) fn run_story_picker(
                             // A double-click on a folder enters it, like Enter.
                             let target = stories[idx].path.clone();
                             panel_scroll = 0;
-                            enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                            enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index, viewport, anim);
                             last_click = None;
                         } else if double {
                             let (rows_from_top, gallery_rows_from_top) =
@@ -2555,7 +2740,7 @@ pub(crate) fn run_story_picker(
                             panel_scroll = 0;
                             list.select(idx, viewport, anim);
                             if slide.open {
-                                ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                                ensure_aux(&mut aux_cache, &stories, list.selected, roots, &hint_index);
                             }
                             last_click = Some((idx, now));
                         }
@@ -2569,7 +2754,7 @@ pub(crate) fn run_story_picker(
                             sort.desc = false;
                         }
                         list.select(
-                            resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                            resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, roots, &hint_index),
                             viewport,
                             anim,
                         );
@@ -2578,9 +2763,9 @@ pub(crate) fn run_story_picker(
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     match wheel_target(
                         launch_opts.is_some(),
-                        keys_dialog,
+                        keys_dialog || doc_confirm.is_some(),
                         story_menu.is_some(),
-                        search_modal.is_some(),
+                        search_modal.is_some() || docs_session.is_some(),
                         preview.is_some(),
                         slide.open && last_panel_area.contains(pt),
                     ) {
@@ -2593,13 +2778,19 @@ pub(crate) fn run_story_picker(
                         WheelTarget::Search => {
                             if let Some(sm) = search_modal.as_mut() {
                                 sm.on_wheel(d, anim);
+                            } else if let Some(ds) = docs_session.as_mut() {
+                                ds.chooser.on_wheel(d, anim);
                             }
                         }
                         // Over the preview modal, the wheel zooms instead of
                         // scrolling the list behind it (SQ-0486; a no-op prior to
                         // that, per SQ-0347): up zooms in, down zooms out.
                         WheelTarget::PreviewZoom => {
-                            if let Some(pv) = preview.as_mut() {
+                            if let Some(t) = preview.as_ref().and_then(|p| p.text.as_ref()) {
+                                // A text document scrolls instead (SQ-1700).
+                                let cur = t.scroll.get() as isize;
+                                t.scroll.set((cur + 3 * d).max(0) as usize);
+                            } else if let Some(pv) = preview.as_mut() {
                                 pv.zoom = if d < 0 { pv.zoom.step_in() } else { pv.zoom.step_out() };
                             }
                         }
@@ -2712,7 +2903,7 @@ pub(crate) fn run_story_picker(
                 Some(entry) if entry.is_folder() => {
                     let target = entry.path.clone();
                     panel_scroll = 0;
-                    enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                    enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index, viewport, anim);
                 }
                 Some(entry) => {
                     let (rows_from_top, gallery_rows_from_top) =
@@ -2729,7 +2920,7 @@ pub(crate) fn run_story_picker(
             // as well.
             Some(app::browser::BrowserAction::OpenLaunchOptions) => {
                 if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder()) {
-                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
+                    launch_opts = Some(open_launch_options(entry, cfg, roots));
                 }
             }
             // The per-story menu (SQ-1227). A folder has none of these
@@ -2737,7 +2928,7 @@ pub(crate) fn run_story_picker(
             // inert on one, exactly as launch options already are.
             Some(app::browser::BrowserAction::OpenStoryMenu) => {
                 if stories.get(list.selected).is_some_and(|e| !e.is_folder()) {
-                    story_menu = Some(app::story_menu::StoryMenu::new(list.selected));
+                    story_menu = Some(menu_for(&stories, list.selected, roots));
                 }
             }
             Some(app::browser::BrowserAction::ShowBrowserKeys) => {
@@ -2752,7 +2943,7 @@ pub(crate) fn run_story_picker(
                     find_field = Some(app::text_field::TextField::new(""));
                     progress_line = None;
                     panel_scroll = 0;
-                    apply_find(&index, &root, "", &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                    apply_find(&index, &root, "", &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                 }
             }
             // Up one folder; inert at the root.
@@ -2762,9 +2953,9 @@ pub(crate) fn run_story_picker(
                         panel_scroll = 0;
                         if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
                             dir = parent;
-                            show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                            show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                         } else {
-                            enter_folder(&source, &mut dir, &root, &parent, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                            enter_folder(&source, &mut dir, &root, &parent, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index, viewport, anim);
                         }
                     }
                 }
@@ -2787,7 +2978,7 @@ pub(crate) fn run_story_picker(
                     slide.arm(&cfg.animation);
                     if target {
                         panel_scroll = 0;
-                        ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                        ensure_aux(&mut aux_cache, &stories, list.selected, roots, &hint_index);
                     }
                 }
             }
@@ -2807,15 +2998,24 @@ pub(crate) fn run_story_picker(
                 if find_field.is_none() && index_rx.is_some() {
                     panel_scroll = 0;
                     if matches!(view, PickerView::Gallery) {
-                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index);
                     } else {
                         let keep = stories.get(list.selected).map(|e| e.path.clone());
                         let here = dir.clone();
-                        enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                        enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, roots, &hint_index, viewport, anim);
                         if let Some(idx) = keep.and_then(|p| stories.iter().position(|e| e.path == p)) {
                             list.select(idx, viewport, anim);
                         }
                     }
+                }
+            }
+            // Create the selected story's documents folder (SQ-1679): the info
+            // panel's button, the `m` key and the story menu all land here.
+            Some(app::browser::BrowserAction::CreateDocumentsFolder) => {
+                if stories.get(list.selected).is_some_and(|e| !e.is_folder()) {
+                    progress_line = Some(create_documents_folder(
+                        roots, &stories, list.selected, &mut aux_cache, &hint_index,
+                    ));
                 }
             }
             // Refetch only the selected story, ignoring its cache.
@@ -2886,6 +3086,26 @@ pub(crate) fn run_story_picker(
                     progress_line = None;
                 }
             }
+            // Choose manuals, feelies and maps from the selected story's
+            // IFDB record (SQ-1680). A story IFDB does not know has no record
+            // to read, so it says so instead.
+            Some(app::browser::BrowserAction::DownloadDocuments) => {
+                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder()) {
+                    match documents_target(roots, entry) {
+                        None => progress_line = Some(app::documents_chooser::LINK_FIRST.to_string()),
+                        Some((tuid, title)) => {
+                            docs_session = Some(app::documents_chooser::DocumentsSession::open(
+                                ifdb_gate.clone(),
+                                app::documents_chooser::default_source(),
+                                roots.clone(),
+                                &tuid,
+                                &title,
+                            ));
+                            progress_line = None;
+                        }
+                    }
+                }
+            }
             Some(app::browser::BrowserAction::SearchIfdb) => {
                 let mut sm = app::ifdb_search_modal::SearchModal::new();
                 // So the chooser can mark files this directory
@@ -2900,31 +3120,12 @@ pub(crate) fn run_story_picker(
             // Download a matching InvisiClues hint file for the
             // selected story (SQ-0445) when it has none locally — SLAG
             // (IF Archive) preferred, else the Internet Archive izm set.
-            // Saved beside the story; ignored while one is downloading.
+            // Saved in the IFDB-linked game's documents folder, else beside
+            // the story (SQ-1690); ignored while one is downloading.
             Some(app::browser::BrowserAction::DownloadHints) => {
-                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder() && !hint_dl.busy()) {
-                    if entry.hint_sidecar.is_some() {
-                        progress_line = Some(format!("{} already has a hint file", entry.title));
-                    } else {
-                        match app::hints::hint_download_for(&entry.meta.ifid) {
-                            Some(dl) => {
-                                let dest = entry.path.with_file_name(&dl.filename);
-                                progress_line =
-                                    Some(format!("Downloading hints for {}…", entry.title));
-                                hint_dl.start(
-                                    dl.url,
-                                    dest,
-                                    entry.path.clone(),
-                                    entry.meta.disk_entry.clone(),
-                                    entry.title.clone(),
-                                );
-                            }
-                            None => {
-                                progress_line =
-                                    Some(format!("No InvisiClues found for {}", entry.title));
-                            }
-                        }
-                    }
+                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder()) {
+                    progress_line =
+                        Some(app::host::hints::start_story_download(&mut hint_dl, entry, roots, &hint_index));
                 }
             }
             // Cycle the sort column, keeping direction; or toggle the
@@ -2939,7 +3140,7 @@ pub(crate) fn run_story_picker(
                     app::picker::SortKey::Type => app::picker::SortKey::Title,
                 };
                 list.select(
-                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, roots, &hint_index),
                     viewport,
                     anim,
                 );
@@ -2947,7 +3148,7 @@ pub(crate) fn run_story_picker(
             Some(app::browser::BrowserAction::ReverseSort) => {
                 sort.desc = !sort.desc;
                 list.select(
-                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, roots, &hint_index),
                     viewport,
                     anim,
                 );
@@ -3293,7 +3494,7 @@ fn draw_story_gallery(
     // Where per-game directories live: a tile's cover is cached under the ROW's
     // key, which for one of several stories off a disk image is that story's own
     // directory (SQ-0859).
-    data_base: &std::path::Path,
+    roots: &app::data_roots::DataRoots,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
 ) -> (Vec<(usize, Rect)>, usize, usize) {
@@ -3372,7 +3573,7 @@ fn draw_story_gallery(
             }
             let mut drew_cover = false;
             if let Some(picker) = picker.filter(|_| !entry.is_folder()) {
-                let key = entry.cover_key(data_base);
+                let key = entry.cover_key(roots);
                 if cover.has(&key) {
                     // Centre the cover in the tile via a self-computed fitted rect
                     // (image aspect + cell size), so it centres on both axes no
@@ -3544,22 +3745,7 @@ fn dispatch_search_action(
 /// OSC 8 hyperlink (SQ-0367) — we open it ourselves instead. Fire-and-forget:
 /// the URL is passed as a single argument (no shell), so it needs no escaping.
 fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = std::process::Command::new("xdg-open");
-
-    let _ = cmd
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    app::opener::open(url);
 }
 
 /// Draw the highlighted story's metadata panel: title, filesystem info,
@@ -3596,7 +3782,7 @@ fn draw_info_panel(
     // (SQ-0859). See `app::picker::StoryEntry::cover_key`.
     cover_key: &std::path::Path,
     animating: bool,
-    hint_sidecar: Option<&std::path::Path>,
+    hint: &app::picker::HintStatus,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
     link_rects: &mut Vec<(Rect, String)>,
@@ -3617,6 +3803,8 @@ fn draw_info_panel(
     let story_info_cover = cs.theme.get("story_info_cover").style;
     let story_info_artwork = cs.theme.get("story_info_artwork").style;
     let story_info_artwork_active = cs.theme.get("story_info_artwork:active").style;
+    let story_info_documents = cs.theme.get("story_info_documents").style;
+    let story_info_documents_button = cs.theme.get("story_info_documents_button").style;
     let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -3700,6 +3888,9 @@ fn draw_info_panel(
     let mut link_urls: Vec<(usize, String)> = Vec::new();
     // Line index → previewable resource (SQ-0347), for the Pict/Snd rows below.
     let mut resource_refs: Vec<(usize, ResourceRef)> = Vec::new();
+    // Line indices that are the documents button (SQ-1679): clickable, reported
+    // through `link_rects` under [`PANEL_ACTION_CREATE_DOCS`].
+    let mut button_rows: Vec<(usize, &'static str)> = Vec::new();
 
     // Title.
     lines.push((title.to_string(), story_info_title));
@@ -3762,10 +3953,16 @@ fn draw_info_panel(
     // beside the story and hidden from the list. Named here so the player sees
     // hints are available and which file supplies them. With no local file, note
     // when a matching InvisiClues can be downloaded with `H` (SQ-0445).
-    if let Some(name) = hint_sidecar.and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
-        lines.push((format!("Hints: {name}"), story_info_value));
-    } else if app::hints::hint_download_for(&meta.ifid).is_some() {
-        lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
+    match hint {
+        app::picker::HintStatus::File(p) => {
+            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                lines.push((format!("Hints: {name}"), story_info_value));
+            }
+        }
+        app::picker::HintStatus::Downloadable => {
+            lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
+        }
+        app::picker::HintStatus::None => {}
     }
     // author · year · genre (SQ-0348): one line, present parts only — a story
     // with none of the three renders no line at all, so a no-metadata panel
@@ -3812,6 +4009,55 @@ fn draw_info_panel(
         let url = app::ifdb::search_url(title);
         link_urls.push((lines.len(), url.clone()));
         lines.push((format!("IFDB search: {url}"), story_info_link));
+    }
+    // Documents folder (SQ-1679): where the manuals and maps for this game go. A
+    // folder that exists is a `file://` link; one that does not shows the path it
+    // would be created at, with a button; a game not linked to IFDB has no folder
+    // and says how to get one.
+    if let Some(a) = aux {
+        match &a.documents {
+            app::documents::Location::Exists(p) => {
+                link_urls.push((lines.len(), app::documents::file_url(p)));
+                lines.push((format!("Documents: {}", abbreviate_home(p)), story_info_documents));
+                button_rows.push((lines.len(), PANEL_ACTION_DOWNLOAD_DOCS));
+                lines.push((format!(" [ {DOWNLOAD_DOCS_LABEL} ] "), story_info_documents_button));
+            }
+            app::documents::Location::Missing(p) => {
+                lines.push((format!("Documents: {} (not created)", abbreviate_home(p)), story_info_documents));
+                button_rows.push((lines.len(), PANEL_ACTION_CREATE_DOCS));
+                lines.push((format!(" [ {DOCS_BUTTON_LABEL} ] "), story_info_documents_button));
+                button_rows.push((lines.len(), PANEL_ACTION_DOWNLOAD_DOCS));
+                lines.push((format!(" [ {DOWNLOAD_DOCS_LABEL} ] "), story_info_documents_button));
+            }
+            app::documents::Location::Unlinked => {
+                lines.push(("Documents: Link to IFDB for a documents folder".to_string(), story_info_documents));
+                // Disabled: drawn as plain text, not as a button, and not clickable.
+                lines.push((
+                    format!(" [ {DOWNLOAD_DOCS_LABEL} ] {}", app::documents_chooser::LINK_FIRST),
+                    story_info_documents,
+                ));
+            }
+        }
+    }
+    // The folder's files (SQ-1700), like Resources lists a blorb's chunks. The list
+    // is the Documents tab's own (`documents_tab::entries_for`, cached in the aux);
+    // each row is the tab's wording, clickable, and opens as the tab opens it.
+    if let Some(a) = aux.filter(|a| !a.doc_files.is_empty()) {
+        lines.push((format!("Documents ({})", a.doc_files.len()), story_info_label));
+        for e in &a.doc_files {
+            let flag = if app::documents_tab::is_spoiler(e) { app::documents_tab::SPOILER_FLAG } else { "" };
+            resource_refs.push((
+                lines.len(),
+                ResourceRef {
+                    blorb_path: e.path.clone(),
+                    kind: PreviewKind::Document,
+                    number: 0,
+                    label: e.id.clone(),
+                    doc: Some(e.clone()),
+                },
+            ));
+            lines.push((format!(" {} \u{2014} {}{flag}", e.id, app::documents_tab::row_meta(e)), story_info_link));
+        }
     }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux, meta.scott_pictures);
@@ -3967,6 +4213,7 @@ fn draw_info_panel(
                             kind,
                             number: c.number,
                             label: format!("{} #{}", resource_usage_label(&c.usage), c.number),
+                            doc: None,
                         },
                     ));
                     lines.push((line, story_info_link));
@@ -4152,6 +4399,12 @@ fn draw_info_panel(
             link_rects.push((rect, url.clone()));
             continue;
         }
+        if let Some((_, action)) = button_rows.iter().find(|(row, _)| *row == li) {
+            draw_str_clipped(buf, row_area.x, y, text, *style, row_area);
+            let w = (text.chars().count() as u16).min(row_area.width);
+            link_rects.push((Rect::new(row_area.x, y, w, 1), action.to_string()));
+            continue;
+        }
         if let Some((_, rref)) = resource_refs.iter().find(|(idx, _)| *idx == li) {
             // A previewable Pict/Snd row (SQ-0347): draw it, and record its rect
             // so a click can open the resource preview modal.
@@ -4190,15 +4443,70 @@ fn open_resource_preview(
             let status = image
                 .is_none()
                 .then(|| "Can't preview this image (unsupported format).".to_string());
-            ResourcePreview { title: rref.label.clone(), image, proto: None, status, zoom: PreviewZoom::Fit }
+            ResourcePreview { title: rref.label.clone(), image, proto: None, status, zoom: PreviewZoom::Fit, text: None }
         }
         PreviewKind::Sound => {
             let status = play_preview_sound(blorb.as_ref(), rref.number, audio, volume);
             ResourcePreview {
                 title: rref.label.clone(), image: None, proto: None, status: Some(status),
-                zoom: PreviewZoom::Fit,
+                zoom: PreviewZoom::Fit, text: None,
             }
         }
+        // Opened by `open_document_row`, never through a blorb.
+        PreviewKind::Document => ResourcePreview {
+            title: rref.label.clone(), image: None, proto: None,
+            status: Some("Nothing to preview.".to_string()), zoom: PreviewZoom::Fit, text: None,
+        },
+    }
+}
+
+/// Open a Documents row (SQ-1700) the way the Journal's Documents tab does:
+/// `documents_tab::decide_open` picks the viewer, so an image or text file opens
+/// in the preview modal, a hint program only says where it opens, and anything
+/// else goes to the system opener (never in web mode). The spoiler question is
+/// the caller's (`needs_spoiler_confirm`). Returns the preview to show, or the
+/// status line to print.
+fn open_document_row(
+    entry: &app::documents::DocEntry,
+    web: bool,
+    opener: &mut dyn FnMut(&str),
+) -> Result<ResourcePreview, String> {
+    use app::documents_tab::{decide_open, OpenDecision};
+    let blank = |image, text| ResourcePreview {
+        title: entry.id.clone(), image, proto: None, status: None, zoom: PreviewZoom::Fit, text,
+    };
+    match decide_open(entry) {
+        OpenDecision::HintProgram(_) => Err(format!(
+            "{} is a hint program \u{2014} it opens in the Hints tab of a running game",
+            entry.id
+        )),
+        OpenDecision::Text(p) => Ok(blank(None, Some(p))),
+        OpenDecision::Image(img) => Ok(blank(Some(img), None)),
+        OpenDecision::External { note } => {
+            if web {
+                Err(format!("Cannot open {} here: {}", entry.id, entry.path.display()))
+            } else {
+                opener(&entry.path.to_string_lossy());
+                Err(match note {
+                    Some(n) => format!("Opened {} with the system viewer. {n}", entry.id),
+                    None => format!("Opened {} with the system viewer", entry.id),
+                })
+            }
+        }
+        OpenDecision::Failed(why) => Err(why),
+    }
+}
+
+/// [`open_document_row`] with the real opener and web check, putting the result
+/// into the loop's `preview` / status line.
+fn run_document_row(
+    entry: &app::documents::DocEntry,
+    preview: &mut Option<ResourcePreview>,
+    progress_line: &mut Option<String>,
+) {
+    match open_document_row(entry, app::opener::is_web_mode(), &mut |t| app::opener::open(t)) {
+        Ok(pv) => *preview = Some(pv),
+        Err(msg) => *progress_line = Some(msg),
     }
 }
 
@@ -4266,6 +4574,18 @@ fn draw_resource_preview(
     let rects = draw_dialog(buf, area, &spec, &st);
 
     let content = rects.content;
+    // A text document (SQ-1700): the Documents tab's pager, wrapped to the modal.
+    if let Some(p) = &pv.text {
+        let lines = p.wrapped_for(content.width);
+        let max = lines.len().saturating_sub(content.height as usize);
+        let top = p.scroll.get().min(max);
+        p.scroll.set(top);
+        let style = cs.theme.get("story_info_value").style;
+        for (i, l) in lines.iter().skip(top).take(content.height as usize).enumerate() {
+            draw_str_clipped(buf, content.x, content.y + i as u16, l, style, content);
+        }
+        return rects;
+    }
     // Render the image fitted (or zoomed) + centred, else the status line centred.
     let mut drew_image = false;
     if let (Some(picker), Some(img)) = (picker, pv.image.as_ref()) {
@@ -4689,7 +5009,7 @@ mod tests {
             ifdb_link: None,
             ifdb_rating: None,
             ifdb_rating_count: None,
-            fetch_not_found: false,
+            fetch_not_found: false, ifdb_tuid: None,
         };
         assert_eq!(super::interp_label(&meta, false), "Scott (z80)");
         // And it fits the fixed-width TYPE column, which is what SQ-1458
@@ -4705,7 +5025,7 @@ mod tests {
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
             author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         // Z-code: "Z<v>", plus " (blorb)" only when blorb'd.
         assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("5")), false), "Z5");
@@ -4735,7 +5055,7 @@ mod tests {
             version: Some("6".into()), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image, disk_entry: None,
             author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         assert_eq!(super::interp_label(&meta(Some(DiskImage::Adf)), false), "Z6 (ADF)");
         assert_eq!(super::interp_label(&meta(Some(DiskImage::Hfs)), false), "Z6 (HFS)");
@@ -4776,7 +5096,7 @@ mod tests {
             version: None, serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image, disk_entry: None,
             author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         assert_eq!(super::interp_label(&meta(Some(DiskImage::CommodoreD64)), false), "Scott (CBM)");
         assert_eq!(super::interp_label(&meta(Some(DiskImage::AtariDos2)), false), "Scott (Atari DOS)");
@@ -4804,7 +5124,7 @@ mod tests {
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
             author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let check = |meta: &StoryMeta, blorb: bool| {
             let label = super::interp_label(meta, blorb);
@@ -4894,7 +5214,7 @@ mod tests {
                 "z5" | "z6" => None,
                 _ => continue,
             };
-            let Some(entry) = app::picker::resolve_entry(&path, &data_base) else {
+            let Some(entry) = app::picker::resolve_entry(&path, &app::data_roots::DataRoots::single(&data_base)) else {
                 continue; // not launchable — the picker wouldn't list it either
             };
             let label = super::interp_label(&entry.meta, false);
@@ -4947,7 +5267,7 @@ mod tests {
                 size_bytes: 1, story_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
             },
             hint_sidecar: None,
             kind: app::picker::RowKind::Story,
@@ -4968,7 +5288,7 @@ mod tests {
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
                 author: author.map(String::from), year: year.map(String::from),
-                genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+                genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
             },
             hint_sidecar: None,
             kind: app::picker::RowKind::Story,
@@ -5785,14 +6105,14 @@ mod tests {
             format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
             ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
             self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None, author: None, year: None, genre: None, language: None,
-            description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         // Single-border top-left corner (BorderStyle::Single default).
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
@@ -5829,7 +6149,7 @@ mod tests {
             ]),
             frontispiece: None,
             scott_pictures: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let game_dir = std::path::PathBuf::from("/tmp/lanthorn-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -5869,6 +6189,8 @@ mod tests {
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
         let area = Rect::new(0, 0, 100, 25);
@@ -5876,7 +6198,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
 
         let text = buffer_to_string(&buf, area);
@@ -5977,7 +6299,7 @@ mod tests {
             frontispiece: None,
             scott_pictures: None,
             author: None, year: None, genre: None, language: None, description: None,
-            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         }
     }
 
@@ -6002,7 +6324,7 @@ mod tests {
         let entry_path = std::path::Path::new(COMPILATION_FILE);
         super::draw_info_panel(
             "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, 0, area, None,
-            &mut cover, entry_path, entry_path, false, None, &cs, &mut buf,
+            &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf,
             &mut Vec::new(), &mut Vec::new(),
         );
         let flat = panel_text_flat(&buf, area);
@@ -6045,7 +6367,7 @@ mod tests {
         let entry_path = std::path::Path::new(COMPILATION_FILE);
         super::draw_info_panel(
             "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, 0, area, None,
-            &mut cover, entry_path, entry_path, false, None, &cs, &mut buf,
+            &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf,
             &mut Vec::new(), &mut Vec::new(),
         );
         let rows = panel_rows(&buf, area);
@@ -6086,7 +6408,7 @@ mod tests {
             features: app::picker::Features::default(),
             disk_image: None, disk_entry: None, self_blorb: None, frontispiece: None, scott_pictures: None,
             author: None, year: None, genre: None, language: None, description: None,
-            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let area = Rect::new(0, 0, 60, 20);
         let mut buf = Buffer::empty(area);
@@ -6094,7 +6416,7 @@ mod tests {
         let entry_path = std::path::Path::new("zork1.z3");
         let max_scroll = super::draw_info_panel(
             "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path,
-            entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         assert_eq!(max_scroll, 0, "content that fits must not become scrollable");
         let rows = panel_rows(&buf, area);
@@ -6144,7 +6466,7 @@ mod tests {
         let mut render = |scroll: usize, buf: &mut Buffer| {
             super::draw_info_panel(
                 "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, scroll, area, None,
-                &mut cover, entry_path, entry_path, false, None, &cs, buf,
+                &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, buf,
                 &mut Vec::new(), &mut Vec::new(),
             )
         };
@@ -6201,7 +6523,7 @@ mod tests {
         super::draw_info_panel(
             "Game", "game.z5", &meta, None, 0, area, None, &mut cover,
             std::path::Path::new("game.z5"), std::path::Path::new("game.z5"),
-            false, None, &cs, &mut buf, &mut links, &mut Vec::new(),
+            false, &app::picker::HintStatus::None, &cs, &mut buf, &mut links, &mut Vec::new(),
         );
         assert!(links.len() > 1, "the link must wrap onto more than one row: {links:?}");
         assert!(links.iter().all(|(_, u)| u == url), "every row opens the full URL: {links:?}");
@@ -6233,7 +6555,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             super::draw_info_panel(
                 "宇宙船の物語", COMPILATION_FILE, &meta, None, 0, area, None, &mut cover,
-                entry_path, entry_path, false, None, &cs, &mut buf,
+                entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf,
                 &mut Vec::new(), &mut Vec::new(),
             );
         }
@@ -6296,14 +6618,14 @@ mod tests {
             scott_pictures: None,
             disk_image: None,
             disk_entry: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         let max_scroll = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text_top = buffer_to_string(&buf, area);
         assert!(max_scroll > 0, "content should overflow a 10-row panel");
@@ -6312,7 +6634,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
         );
         let text_scrolled = buffer_to_string(&buf2, area);
         assert_eq!(max_scroll2, max_scroll);
@@ -6321,7 +6643,7 @@ mod tests {
         // Scrolling past max clamps to the same view as scroll == max_scroll.
         let mut buf3 = Buffer::empty(area);
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf3, &mut Vec::new(), &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf3, &mut Vec::new(), &mut Vec::new(),
         );
         let text_over = buffer_to_string(&buf3, area);
         assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
@@ -6333,7 +6655,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None, frontispiece: None, scott_pictures: None, disk_image: None, disk_entry: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         }
     }
 
@@ -6353,7 +6675,7 @@ mod tests {
                 ifid: "IFID-SCOTT".into(), features: app::picker::Features::default(),
                 self_blorb: None, frontispiece: None, scott_pictures, disk_image: None, disk_entry: None,
                 author: None, year: None, genre: None, language: None, description: None,
-                ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+                ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
             },
             hint_sidecar: None,
             kind: app::picker::RowKind::Story,
@@ -6376,7 +6698,7 @@ mod tests {
             &story,
             Some(app::picker::ScottPictures::NativeC64 { pictures: 11 }),
         );
-        let st = super::open_launch_options(&native, &cfg, &dir);
+        let st = super::open_launch_options(&native, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(st.scott_native_pictures, "a native C64 entry must offer the row");
 
         // SQ-1480: the ZX Spectrum releases decode through the SAME
@@ -6385,15 +6707,15 @@ mod tests {
             &story,
             Some(app::picker::ScottPictures::NativeZx { pictures: 11 }),
         );
-        let st = super::open_launch_options(&native_zx, &cfg, &dir);
+        let st = super::open_launch_options(&native_zx, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(st.scott_native_pictures, "a native ZX Spectrum entry must offer the row too");
 
         let blorb = scott_entry_with_pictures(&story, Some(app::picker::ScottPictures::Blorb));
-        let st = super::open_launch_options(&blorb, &cfg, &dir);
+        let st = super::open_launch_options(&blorb, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(!st.scott_native_pictures, "a Blorb's pictures have no second resolution");
 
         let text_only = scott_entry_with_pictures(&story, None);
-        let st = super::open_launch_options(&text_only, &cfg, &dir);
+        let st = super::open_launch_options(&text_only, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(!st.scott_native_pictures, "a text-only story has no row at all");
 
         // SQ-1475: family C is bitmaps, so there is no second resolution to
@@ -6405,7 +6727,7 @@ mod tests {
                 pictures: 70,
             }),
         );
-        let st = super::open_launch_options(&saga, &cfg, &dir);
+        let st = super::open_launch_options(&saga, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(!st.scott_native_pictures, "family C is bitmaps — one resolution only");
 
         // SQ-1524/SQ-1525/SQ-1526: the Atari's line-art format draws at a
@@ -6420,7 +6742,7 @@ mod tests {
                 pictures: 12,
             }),
         );
-        let st = super::open_launch_options(&atari_bitmap, &cfg, &dir);
+        let st = super::open_launch_options(&atari_bitmap, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(!st.scott_native_pictures, "Atari family-C is bitmaps too — one resolution only");
 
         let atari_line_art = scott_entry_with_pictures(
@@ -6430,7 +6752,7 @@ mod tests {
                 pictures: 92,
             }),
         );
-        let st = super::open_launch_options(&atari_line_art, &cfg, &dir);
+        let st = super::open_launch_options(&atari_line_art, &cfg, &app::data_roots::DataRoots::single(&dir));
         assert!(st.scott_native_pictures, "Atari line art must offer the resolution row");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -6572,7 +6894,7 @@ mod tests {
             version: None, serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, frontispiece: None, scott_pictures, disk_image: None, disk_entry: None,
             author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let dos = meta(Some(ScottPictures::SagaDosCga { pictures: 68 }));
         assert_eq!(super::interp_label(&dos, false), "Scott (zip)");
@@ -6599,7 +6921,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             let entry_path = std::path::Path::new(name);
             super::draw_info_panel(
-                "Zork I", name, meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None,
+                "Zork I", name, meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None,
                 &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
@@ -6641,7 +6963,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         let lines: Vec<&str> = text.lines().collect();
@@ -6679,7 +7001,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Michael S. Gentry"), "author should render: {text:?}");
@@ -6722,13 +7044,15 @@ mod tests {
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         super::draw_info_panel(
             "Beyond Zork", "beyondzork-r57-s871221.z5", &meta, Some(&aux), 0, area, None,
-            &mut cover, std::path::Path::new("beyondzork-r57-s871221.z5"), std::path::Path::new("beyondzork-r57-s871221.z5"), false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            &mut cover, std::path::Path::new("beyondzork-r57-s871221.z5"), std::path::Path::new("beyondzork-r57-s871221.z5"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Resource blorb: beyondzork.blb"), "sidecar named up-front: {text:?}");
@@ -6751,7 +7075,7 @@ mod tests {
         if !z0.is_file() {
             return;
         }
-        let candidates = app::launch_options::discover_art_candidates(&z0, None);
+        let candidates = app::launch_options::discover_art_candidates(&z0, None, None);
         assert!(!candidates.is_empty(), "Zork Zero's archives sit beside it");
         let cs = app::colors::ColorScheme::terminal_default();
         let meta = minimal_story_meta();
@@ -6769,6 +7093,8 @@ mod tests {
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         // Tall enough that the block is on screen without scrolling.
         let area = Rect::new(0, 0, 62, 40);
@@ -6776,7 +7102,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         super::draw_info_panel(
             "Zork Zero", "zork0-r393-s890714.z6", &meta, Some(&aux), 0, area, None,
-            &mut cover, &z0, &z0, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            &mut cover, &z0, &z0, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         println!("{text}");
@@ -6839,6 +7165,8 @@ mod tests {
                 },
             ],
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
@@ -6846,7 +7174,7 @@ mod tests {
         let p = std::path::Path::new("arthur.z6");
         super::draw_info_panel(
             "Arthur", "arthur.z6", &meta, Some(&aux), 0, area, None, &mut cover, p, p, false,
-            None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         println!("{text}");
@@ -6894,6 +7222,8 @@ mod tests {
             art_in_use: None,
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
             system_fonts: vec![
                 app::system_fonts::SystemFace {
                     disk: "MacOS_6.0.8_System_Startup.img".into(),
@@ -6931,7 +7261,7 @@ mod tests {
         let p = std::path::Path::new("arthur.z6");
         super::draw_info_panel(
             "Arthur", "arthur.z6", &meta, Some(&aux), 0, area, None, &mut cover, p, p, false,
-            None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         println!("{text}");
@@ -6990,7 +7320,7 @@ mod tests {
         if !arthur.is_file() || !arthur.with_file_name("arthur.eg2").is_file() {
             return; // gitignored fixtures
         }
-        let candidates = app::launch_options::discover_art_candidates(&arthur, None);
+        let candidates = app::launch_options::discover_art_candidates(&arthur, None, None);
         let cs = app::colors::ColorScheme::terminal_default();
         let meta = minimal_story_meta();
         let aux = app::picker::StoryAux {
@@ -7006,13 +7336,15 @@ mod tests {
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         super::draw_info_panel(
             "Arthur", "arthur-r74-s890714.z6", &meta, Some(&aux), 0, area, None,
-            &mut cover, &arthur, &arthur, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            &mut cover, &arthur, &arthur, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         println!("{text}");
@@ -7045,13 +7377,15 @@ mod tests {
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
             system_fonts: Vec::new(),
+            documents: Default::default(),
+            doc_files: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 30);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         super::draw_info_panel(
             "Zork Zero", "zork0.z6", &meta, Some(&aux), 0, area, None, &mut cover,
-            std::path::Path::new("zork0.z6"), std::path::Path::new("zork0.z6"), false, None, &cs, &mut buf, &mut Vec::new(),
+            std::path::Path::new("zork0.z6"), std::path::Path::new("zork0.z6"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(),
             &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
@@ -7076,7 +7410,7 @@ mod tests {
         let mut links: Vec<(Rect, String)> = Vec::new();
         super::draw_info_panel(
             "Game", "game.z5", &meta, None, 0, area, None, &mut cover,
-            std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, None, &cs, &mut buf, &mut links, &mut Vec::new(),
+            std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut links, &mut Vec::new(),
         );
         let (rect, _) = links.first().expect("a link rect was recorded");
         let first = buf.cell(Position::new(rect.x, rect.y)).expect("link first cell");
@@ -7084,6 +7418,268 @@ mod tests {
             matches!(first.diff_option, CellDiffOption::ForcedWidth(w) if w.get() == 1),
             "link first cell must be pinned to width 1, was {:?}", first.diff_option
         );
+    }
+
+    /// An aux with only the documents location set (SQ-1679).
+    fn docs_aux(documents: app::documents::Location) -> app::picker::StoryAux {
+        app::picker::StoryAux {
+            assoc_blorb: None, saves: vec![], hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/docs-aux"),
+            qzl_saves: vec![], auto_saves: vec![], sidecars: vec![],
+            art_candidates: vec![], art_in_use: None, disk_sounds: vec![],
+            disk_fonts: vec![], system_fonts: vec![], documents, doc_files: Vec::new(),
+        }
+    }
+
+    /// SQ-1679: the info box names the documents folder for a linked game, shows
+    /// the would-be path with a button while it does not exist, and a hint for a
+    /// game with no IFDB link.
+    #[test]
+    fn info_panel_shows_the_documents_folder_its_button_and_the_unlinked_hint() {
+        use app::documents::Location;
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 70, 14);
+        let render = |loc: Location| {
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            let mut links = Vec::new();
+            let aux = docs_aux(loc);
+            super::draw_info_panel(
+                "Game", "game.z5", &minimal_story_meta(), Some(&aux), 0, area, None, &mut cover,
+                std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut links, &mut Vec::new(),
+            );
+            (buffer_to_string(&buf, area), links)
+        };
+        let dir = std::path::PathBuf::from("/nowhere/documents/Game [t1]");
+        let (text, links) = render(Location::Exists(dir.clone()));
+        assert!(text.contains("Documents: /nowhere/documents/Game [t1]"), "{text}");
+        assert!(!text.contains("not created") && !text.contains("Create documents folder"), "{text}");
+        assert!(links.iter().any(|(_, u)| u.starts_with("file:///nowhere/documents/Game%20%5Bt1%5D")), "{links:?}");
+        // SQ-1680: the folder exists, so the download button sits under its line.
+        assert!(text.contains("[ Download documents… ]"), "{text}");
+        assert!(links.iter().any(|(_, u)| u == super::PANEL_ACTION_DOWNLOAD_DOCS), "clickable: {links:?}");
+
+        let (text, links) = render(Location::Missing(dir));
+        assert!(text.contains("Documents: /nowhere/documents/Game [t1] (not created)"), "{text}");
+        assert!(text.contains("[ Create documents folder ]"), "{text}");
+        assert!(links.iter().any(|(_, u)| u == super::PANEL_ACTION_CREATE_DOCS), "the button is clickable: {links:?}");
+        assert!(text.contains("[ Download documents… ]"), "a linked game can download before the folder exists: {text}");
+        assert!(links.iter().any(|(_, u)| u == super::PANEL_ACTION_DOWNLOAD_DOCS), "{links:?}");
+
+        let (text, links) = render(Location::Unlinked);
+        assert!(text.contains("Link to IFDB for a documents folder"), "{text}");
+        assert!(!text.contains("Create documents folder"), "an unlinked game has no button: {text}");
+        assert!(links.iter().all(|(_, u)| u != super::PANEL_ACTION_CREATE_DOCS));
+        // SQ-1680: the download button is there, disabled, and says why.
+        assert!(text.contains("[ Download documents… ] Link to IFDB first"), "{text}");
+        assert!(links.iter().all(|(_, u)| u != super::PANEL_ACTION_DOWNLOAD_DOCS), "not clickable: {links:?}");
+    }
+
+    /// SQ-1680: a story's menu disables the documents row exactly when the story
+    /// has no IFDB id, and the chooser's target is the id and title the documents
+    /// folder is named for.
+    #[test]
+    fn the_story_menu_and_the_chooser_target_follow_the_stories_ifdb_link() {
+        let roots = app::data_roots::DataRoots::single(std::path::PathBuf::from("/nowhere"));
+        let mut linked = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/l.prg"), None);
+        linked.title = "Linked Game".into();
+        linked.meta.ifdb_tuid = Some("tuid123".into());
+        let mut unlinked = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/u.prg"), None);
+        unlinked.title = "Plain Game".into();
+        assert_eq!(super::documents_target(&roots, &linked), Some(("tuid123".to_string(), "Linked Game".to_string())));
+        assert_eq!(super::documents_target(&roots, &unlinked), None);
+        let stories = [linked, unlinked];
+        assert!(super::menu_for(&stories, 0, &roots).disabled("download-documents").is_none());
+        assert_eq!(
+            super::menu_for(&stories, 1, &roots).disabled("download-documents"),
+            Some(app::documents_chooser::LINK_FIRST)
+        );
+        assert!(super::menu_for(&stories, 9, &roots).disabled("download-documents").is_some(), "no row: nothing to link");
+    }
+
+    /// SQ-1679: activating the button creates exactly `<Title> [<TUID>]` under the
+    /// (possibly overridden) root, refreshes the panel's aux, and then there is
+    /// nothing left to create.
+    #[test]
+    fn creating_the_documents_folder_makes_it_refreshes_the_panel_and_hides_the_button() {
+        use app::documents::Location;
+        let home = app::scratch_dir("docs-button");
+        let manuals = home.join("my manuals");
+        let settings = app::data_roots::DocumentsSettings { dir: Some(manuals.clone()), auto_create: false };
+        let roots = app::data_roots::DataRoots::resolve(&home, None, None, &settings);
+        let hint_index = app::hints::load_hint_index(&home);
+        let mut linked = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/linked.prg"), None);
+        linked.title = "Zork: I".into();
+        linked.meta.ifdb_tuid = Some("tuid9".into());
+        let mut unlinked = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/unlinked.prg"), None);
+        unlinked.title = "Unlinked".into();
+        let stories = vec![linked, unlinked];
+        let mut cache: Vec<Option<app::picker::StoryAux>> = vec![None, None];
+
+        super::ensure_aux(&mut cache, &stories, 0, &roots, &hint_index);
+        let want = manuals.join("Zork_ I [tuid9]");
+        assert_eq!(cache[0].as_ref().unwrap().documents, Location::Missing(want.clone()), "the overridden root, nothing created yet");
+        assert!(!manuals.exists());
+
+        let status = super::create_documents_folder(&roots, &stories, 0, &mut cache, &hint_index);
+        assert!(status.starts_with("Created documents folder"), "{status}");
+        assert!(want.is_dir());
+        assert_eq!(std::fs::read_dir(&manuals).unwrap().count(), 1, "exactly the one folder");
+        assert_eq!(cache[0].as_ref().unwrap().documents, Location::Exists(want), "the panel re-reads it");
+
+        let again = super::create_documents_folder(&roots, &stories, 0, &mut cache, &hint_index);
+        assert!(again.contains("already exists"), "{again}");
+
+        let none = super::create_documents_folder(&roots, &stories, 1, &mut cache, &hint_index);
+        assert!(none.contains("Link this game to IFDB"), "{none}");
+        assert_eq!(std::fs::read_dir(&manuals).unwrap().count(), 1, "an unlinked game makes nothing");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A documents folder with a PDF, a PNG, and a spoiler-named text file.
+    fn docs_folder_with_three_files(tag: &str) -> std::path::PathBuf {
+        let dir = app::scratch_dir(tag);
+        std::fs::write(dir.join("manual.pdf"), b"%PDF-1.4\n").unwrap();
+        image::RgbImage::new(4, 4).save(dir.join("map.png")).unwrap();
+        std::fs::write(dir.join("walkthrough.txt"), "go north\nthen east\n").unwrap();
+        dir
+    }
+
+    /// Render the info panel for `aux`, answering the text and the clickable doc rows.
+    fn panel_for_docs(aux: &app::picker::StoryAux) -> (String, Vec<(ratatui::layout::Rect, super::ResourceRef)>) {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut rects = Vec::new();
+        super::draw_info_panel(
+            "Game", "game.z5", &minimal_story_meta(), Some(aux), 0, area, None, &mut cover,
+            std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false,
+            &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut rects,
+        );
+        (buffer_to_string(&buf, area), rects)
+    }
+
+    /// SQ-1700: the panel lists the folder's files with the Documents tab's wording
+    /// (name, kind, size, spoiler marker); a missing or empty folder has no section.
+    #[test]
+    fn info_panel_lists_the_documents_folder_files_and_omits_the_section_when_empty() {
+        use app::documents::Location;
+        let dir = docs_folder_with_three_files("docs-panel-list");
+        let mut aux = docs_aux(Location::Exists(dir.clone()));
+        aux.doc_files = app::picker::doc_files_of(&aux.documents);
+        let (text, rects) = panel_for_docs(&aux);
+        assert!(text.contains("Documents (3)"), "{text}");
+        assert!(text.contains("manual.pdf") && text.contains("PDF"), "{text}");
+        assert!(text.contains("map.png") && text.contains("image"), "{text}");
+        let wt = text.lines().find(|l| l.contains("walkthrough.txt")).expect("row");
+        assert!(wt.contains("text") && wt.contains("spoiler"), "{wt}");
+        assert!(!text.lines().find(|l| l.contains("manual.pdf")).unwrap().contains("spoiler"));
+        assert_eq!(rects.iter().filter(|(_, r)| r.kind == super::PreviewKind::Document).count(), 3, "clickable rows");
+
+        let empty = app::scratch_dir("docs-panel-empty");
+        let mut aux = docs_aux(Location::Exists(empty));
+        aux.doc_files = app::picker::doc_files_of(&aux.documents);
+        assert!(!panel_for_docs(&aux).0.contains("Documents ("), "empty folder: no section");
+        let aux = docs_aux(Location::Missing(dir.join("nope")));
+        assert!(!panel_for_docs(&aux).0.contains("Documents ("), "missing folder: no section");
+        let aux = docs_aux(Location::Unlinked);
+        assert!(!panel_for_docs(&aux).0.contains("Documents ("), "unlinked: no section");
+    }
+
+    /// SQ-1700: a file that lands in the folder (a download, or one dropped in by
+    /// hand) appears once the aux's documents are re-read.
+    #[test]
+    fn a_new_file_appears_after_the_documents_are_refreshed() {
+        use app::documents::Location;
+        let home = app::scratch_dir("docs-panel-refresh");
+        let settings = app::data_roots::DocumentsSettings { dir: Some(home.join("manuals")), auto_create: false };
+        let roots = app::data_roots::DataRoots::resolve(&home, None, None, &settings);
+        let hint_index = app::hints::load_hint_index(&home);
+        let mut linked = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/linked.prg"), None);
+        linked.title = "Zork: I".into();
+        linked.meta.ifdb_tuid = Some("tuid9".into());
+        let stories = vec![linked];
+        let mut cache: Vec<Option<app::picker::StoryAux>> = vec![None];
+        super::ensure_aux(&mut cache, &stories, 0, &roots, &hint_index);
+        let _ = super::create_documents_folder(&roots, &stories, 0, &mut cache, &hint_index);
+        let Location::Exists(dir) = cache[0].as_ref().unwrap().documents.clone() else { panic!("created") };
+        assert!(cache[0].as_ref().unwrap().doc_files.is_empty());
+        std::fs::write(dir.join("hints.txt"), "x").unwrap();
+        // Re-selecting the row.
+        app::picker::refresh_doc_files(cache[0].as_mut().unwrap(), &roots, &stories[0]);
+        assert_eq!(cache[0].as_ref().unwrap().doc_files.len(), 1);
+        // The download path drops the whole aux cache and resolves again.
+        std::fs::write(dir.join("map.txt"), "y").unwrap();
+        cache = vec![None];
+        super::ensure_aux(&mut cache, &stories, 0, &roots, &hint_index);
+        assert_eq!(cache[0].as_ref().unwrap().doc_files.len(), 2);
+        assert!(panel_for_docs(cache[0].as_ref().unwrap()).0.contains("Documents (2)"));
+    }
+
+    /// SQ-1700: a clicked row opens as the Documents tab opens it — images and
+    /// text in the preview, a PDF through the opener (never in web mode), a
+    /// spoiler asks first, a hint program only says where it opens.
+    #[test]
+    fn a_documents_row_opens_in_app_or_through_the_opener() {
+        use app::documents::Location;
+        let dir = docs_folder_with_three_files("docs-panel-open");
+        let entries = app::picker::doc_files_of(&Location::Exists(dir));
+        let by = |id: &str| entries.iter().find(|e| e.id == id).unwrap().clone();
+
+        let mut opened: Vec<String> = Vec::new();
+        let pv = super::open_document_row(&by("map.png"), false, &mut |t| opened.push(t.to_string()))
+            .expect("image previews in-app");
+        assert!(pv.image.is_some() && pv.text.is_none() && opened.is_empty());
+        let pv = super::open_document_row(&by("walkthrough.txt"), false, &mut |t| opened.push(t.to_string()))
+            .expect("text previews in-app");
+        assert!(pv.text.is_some() && opened.is_empty());
+
+        let pdf = by("manual.pdf");
+        let msg = super::open_document_row(&pdf, false, &mut |t| opened.push(t.to_string())).err().expect("status");
+        assert_eq!(opened, vec![pdf.path.to_string_lossy().to_string()], "{msg}");
+        let mut web_opened = Vec::new();
+        let msg = super::open_document_row(&pdf, true, &mut |t| web_opened.push(t.to_string())).err().expect("status");
+        assert!(web_opened.is_empty() && msg.contains("Cannot open"), "{msg}");
+
+        assert!(app::documents_tab::needs_spoiler_confirm(&by("walkthrough.txt")), "a spoiler asks first");
+        assert!(!app::documents_tab::needs_spoiler_confirm(&pdf));
+        let mut hint = by("map.png");
+        hint.kind = app::documents::DocKind::HintProgram;
+        hint.spoiler = true;
+        let mut none = Vec::new();
+        let msg = super::open_document_row(&hint, false, &mut |t| none.push(t.to_string())).err().expect("status");
+        assert!(none.is_empty() && msg.contains("Hints tab"), "{msg}");
+        assert!(!app::documents_tab::needs_spoiler_confirm(&hint));
+    }
+
+    /// A folder made by hand is found even with auto-creation off, and a failure
+    /// to create one surfaces as the error text.
+    #[test]
+    fn a_hand_made_folder_is_found_and_a_create_failure_is_reported() {
+        use app::documents::Location;
+        let home = app::scratch_dir("docs-button-err");
+        let roots = app::data_roots::DataRoots::resolve(&home, None, None, &Default::default());
+        let hint_index = app::hints::load_hint_index(&home);
+        let mut e = scott_entry_with_pictures(std::path::Path::new("/tmp/lib/g.prg"), None);
+        e.meta.ifdb_tuid = Some("tuidx".into());
+        let stories = vec![e];
+        let mut cache: Vec<Option<app::picker::StoryAux>> = vec![None];
+        let mine = roots.documents().join("My Own Name [tuidx]");
+        std::fs::create_dir_all(&mine).unwrap();
+        super::ensure_aux(&mut cache, &stories, 0, &roots, &hint_index);
+        assert_eq!(cache[0].as_ref().unwrap().documents, Location::Exists(mine));
+        // A root that cannot be created (a file is in the way).
+        let blocked = app::scratch_dir("docs-button-blocked").join("file");
+        std::fs::write(&blocked, b"x").unwrap();
+        let settings = app::data_roots::DocumentsSettings { dir: Some(blocked.join("sub")), auto_create: false };
+        let roots = app::data_roots::DataRoots::resolve(&home, None, None, &settings);
+        let mut cache: Vec<Option<app::picker::StoryAux>> = vec![None];
+        let msg = super::create_documents_folder(&roots, &stories, 0, &mut cache, &hint_index);
+        assert!(msg.starts_with("Could not create the documents folder"), "{msg}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -7096,7 +7692,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 "Game", "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+                std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -7124,7 +7720,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 title, "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+                std::path::Path::new("game.z5"), std::path::Path::new("game.z5"), false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -7161,7 +7757,7 @@ mod tests {
         let mut rects: Vec<(Rect, String)> = Vec::new();
         super::draw_info_panel(
             "Zork I", "game.z5", &minimal_story_meta(), None, 0, area, None, &mut cover,
-            path, path, false, None, &cs, &mut buf, &mut rects, &mut Vec::new(),
+            path, path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut rects, &mut Vec::new(),
         );
         assert!(rects.is_empty(), "no link rects before a fetch: {rects:?}");
 
@@ -7173,7 +7769,7 @@ mod tests {
         rects.clear();
         super::draw_info_panel(
             "Zork I", "game.z5", &fetched, None, 0, area, None, &mut cover,
-            path, path, false, None, &cs, &mut buf, &mut rects, &mut Vec::new(),
+            path, path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut rects, &mut Vec::new(),
         );
         assert_eq!(rects.len(), 1, "one link rect once fetched: {rects:?}");
         let (rect, got) = &rects[0];
@@ -7201,7 +7797,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         let max_scroll = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         assert!(max_scroll > 0, "a long wrapped blurb should overflow an 8-row panel");
         let text_top = buffer_to_string(&buf, area);
@@ -7209,7 +7805,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
         );
         assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
         let text_scrolled = buffer_to_string(&buf2, area);
@@ -7237,7 +7833,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         let max_scroll = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         assert!(max_scroll > 0, "blurb should overflow so the scrollbar shows");
         let text = buffer_to_string(&buf, area);
@@ -7275,7 +7871,7 @@ mod tests {
 
         super::draw_info_panel(
             "Cover Test", "cover-test.gblorb", &meta, None,
-            0, area, Some(&picker), &mut cover, &path, &path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            0, area, Some(&picker), &mut cover, &path, &path, false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
 
         // Half-blocks emit the upper-half-block glyph in the reserved top band.
@@ -7406,6 +8002,23 @@ mod tests {
         app::scratch_dir(&format!("picker-ui-{tag}"))
     }
 
+    /// SQ-1677: the hint index is install-wide, so the browser must load it from
+    /// the user dir. It was once loaded from the saves base in one place and the
+    /// user dir in another, and with `--data-dir` or a named player the two see
+    /// different files. A guard on the source, in the repo's style for facts a
+    /// caller has no reason to know: every `load_hint_index(` call outside the
+    /// tests names `cfg.user_dir`.
+    #[test]
+    fn the_hint_index_is_always_loaded_from_the_user_dir() {
+        let src = include_str!("picker_ui.rs");
+        let production = &src[..src.find("#[cfg(all(test, feature = \"t-picker\"))]\nmod tests {").unwrap()];
+        let calls: Vec<&str> = production.match_indices("load_hint_index(").map(|(i, _)| &production[i..]).collect();
+        assert!(!calls.is_empty(), "the browser loads a hint index");
+        for call in calls {
+            assert!(call.starts_with("load_hint_index(&cfg.user_dir)"), "not the user dir: {}", &call[..call.len().min(60)]);
+        }
+    }
+
     #[test]
     fn resort_list_keeps_row_badges_and_aux_cache_aligned_with_the_new_order() {
         let stories_dir = temp_dir("resort-align");
@@ -7414,17 +8027,20 @@ mod tests {
         b_bytes[0x12] = b'9'; // distinct serial → distinct IFID from a.z5
         std::fs::write(stories_dir.join("b.z5"), b_bytes).unwrap();
         let data_base = temp_dir("resort-align-data");
-        let hint_index = app::hints::load_hint_index(&data_base);
+        // The hint index is install-wide (SQ-1677): it lives under the user dir,
+        // never under the saves base the player's files sit in.
+        let user_dir = temp_dir("resort-align-user");
+        let hint_index = app::hints::load_hint_index(&user_dir);
 
-        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        let mut stories = app::picker::scan_stories(&stories_dir, &app::data_roots::DataRoots::single(&data_base));
         assert_eq!(stories.len(), 2);
         let mut row_badges: Vec<app::picker::RowBadges> = stories
             .iter()
-            .map(|e| app::picker::compute_row_badges(e, &data_base, &hint_index))
+            .map(|e| app::picker::compute_row_badges(e, &app::data_roots::DataRoots::single(&data_base), &hint_index))
             .collect();
         let mut aux_cache: Vec<Option<app::picker::StoryAux>> = vec![Some(app::picker::resolve_aux(
             &stories[0],
-            &data_base,
+            &app::data_roots::DataRoots::single(&data_base),
             &hint_index,
         ))];
         aux_cache.push(None);
@@ -7436,7 +8052,7 @@ mod tests {
             app::picker::Sort { key: app::picker::SortKey::Title, desc: true },
             &mut row_badges,
             &mut aux_cache,
-            &data_base,
+            &app::data_roots::DataRoots::single(&data_base),
             &hint_index,
         );
 
@@ -7518,7 +8134,7 @@ mod tests {
         std::fs::write(stories_dir.join("zork2.z5"), b_bytes.clone()).unwrap();
         let data_base = temp_dir("sweep-data");
 
-        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        let mut stories = app::picker::scan_stories(&stories_dir, &app::data_roots::DataRoots::single(&data_base));
         assert_eq!(stories.len(), 2);
         let selected = stories.iter().position(|e| e.path.ends_with("zork2.z5")).unwrap();
         let ifid_b = stories[selected].meta.ifid.clone();
@@ -7527,7 +8143,7 @@ mod tests {
         title_by_ifid.insert(ifid_b, "AAA Brand New Title".to_string());
         let fetcher = app::fetch_worker::Fetcher::new(
             Box::new(FakeSource { title_by_ifid }),
-            data_base.clone(),
+            app::data_roots::DataRoots::single(&data_base),
             std::time::Duration::ZERO,
         );
         let order: Vec<app::fetch_worker::FetchTarget> =
@@ -7548,7 +8164,7 @@ mod tests {
 
         // Exactly what the picker loop's drain handler does per progress item.
         for p in &progress {
-            if let Some(fresh) = app::picker::resolve_entry(&p.path, &data_base) {
+            if let Some(fresh) = app::picker::resolve_entry(&p.path, &app::data_roots::DataRoots::single(&data_base)) {
                 if let Some(slot) = stories.iter_mut().find(|e| e.path == p.path) {
                     *slot = fresh;
                 }
@@ -7582,7 +8198,7 @@ mod tests {
         let mut first_row = 0usize;
         // No picker → no cover art → each tile shows its title centred in the band.
         let (rects, cols, vis) = super::draw_story_gallery(
-            &stories, 1, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &stories, 1, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
 
         assert!(cols >= 1 && vis >= 1);
@@ -7680,7 +8296,7 @@ mod tests {
             disk_image: None,
             disk_entry: None,
             author: None, year: None, genre: None, language: None, description: None,
-            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false, ifdb_tuid: None,
         };
         let area = Rect::new(0, 0, 40, 30);
         let mut buf = Buffer::empty(area);
@@ -7689,7 +8305,7 @@ mod tests {
         let mut resource_rects: Vec<(Rect, super::ResourceRef)> = Vec::new();
         super::draw_info_panel(
             "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, entry_path,
-            false, None, &cs, &mut buf, &mut Vec::new(), &mut resource_rects,
+            false, &app::picker::HintStatus::None, &cs, &mut buf, &mut Vec::new(), &mut resource_rects,
         );
         assert_eq!(resource_rects.len(), 1, "the Pict row is clickable");
         let (_, rref) = &resource_rects[0];
@@ -7704,7 +8320,7 @@ mod tests {
         let path = dir.join(format!("lanthorn-preview-{}.blb", std::process::id()));
         std::fs::write(&path, blorb_with_pict(&tiny_png())).unwrap();
 
-        let rref = super::ResourceRef {
+        let rref = super::ResourceRef { doc: None,
             blorb_path: path.clone(),
             kind: super::PreviewKind::Image,
             number: 1,
@@ -7720,7 +8336,7 @@ mod tests {
 
     #[test]
     fn open_preview_of_a_missing_blorb_yields_a_status_not_a_panic() {
-        let rref = super::ResourceRef {
+        let rref = super::ResourceRef { doc: None,
             blorb_path: std::path::PathBuf::from("/no/such/file.blb"),
             kind: super::PreviewKind::Image,
             number: 1,
@@ -7736,7 +8352,7 @@ mod tests {
 
     #[test]
     fn open_resource_preview_starts_at_fit_zoom() {
-        let rref = super::ResourceRef {
+        let rref = super::ResourceRef { doc: None,
             blorb_path: std::path::PathBuf::from("/no/such/file.blb"),
             kind: super::PreviewKind::Image,
             number: 1,
@@ -7831,7 +8447,7 @@ mod tests {
         let mut tiles = app::cover::TileEncoder::detached();
         let mut first_row = 0usize;
         let (rects, _cols, _vis) = super::draw_story_gallery(
-            &stories, 39, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &stories, 39, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert!(first_row > 0, "grid scrolled down to keep the last cover visible");
         assert!(rects.iter().any(|(i, _)| *i == 39), "the selected tile is on screen");
@@ -7854,7 +8470,7 @@ mod tests {
         let (_, cols, vis) = super::draw_story_gallery(
             &stories, 23, &mut first_row, &mut restore,
             &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false,
-            &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert_eq!(cols, 4, "sanity: the grid really is 4 columns wide at this area");
         assert_eq!(vis, 3, "sanity: 3 rows visible");
@@ -7869,7 +8485,7 @@ mod tests {
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut restore,
             &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false,
-            &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert_eq!(first_row, 0, "ordinary scroll_to pulled the window back up to the new selection");
     }
@@ -7963,7 +8579,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             super::draw_story_gallery(
                 &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-                &cs, &km(), Some(&picker), true, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+                &cs, &km(), Some(&picker), true, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
             );
             assert!(!has_payload(&buf), "mid-scroll must not carry a sixel payload");
             assert!(!tiles.pending(), "mid-scroll must not queue an encode either");
@@ -7973,7 +8589,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert!(tiles.pending(), "the settled render queues the tile's encode");
 
@@ -7984,7 +8600,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert!(has_payload(&buf), "settled render must place the real sixel payload");
     }
@@ -8033,7 +8649,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let (rects, _, _) = super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert_eq!(rects.len(), stories.len(), "sanity: every tile is on screen");
         assert!(!has_payload(&buf), "the draw must not build a protocol on this thread");
@@ -8044,7 +8660,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert!(tiles.take_requests().is_empty(), "in-flight tiles are not re-requested");
 
@@ -8066,7 +8682,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         assert!(has_payload(&buf), "delivered tiles paint on the next draw");
     }
@@ -8100,7 +8716,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         let queued = tiles.take_requests();
         assert_eq!(queued.len(), 1, "one tile, one request");
@@ -8132,7 +8748,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_gallery(
             &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
-            &cs, &km(), Some(&wide), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            &cs, &km(), Some(&wide), false, &mut cover, &mut tiles, &app::data_roots::DataRoots::single(std::path::Path::new("/tmp")), area, &mut buf,
         );
         let again = tiles.take_requests();
         assert_eq!(again.len(), 1, "the new cell's tile is requested afresh");
@@ -8190,7 +8806,7 @@ mod tests {
         };
 
         let (dir, stories, selected) =
-            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+            super::resolve_picker_position(&source, &root, &app::data_roots::DataRoots::single(&root), Some(&restore));
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(dir, sub, "lands back on the sub-directory, not the root");
@@ -8207,7 +8823,7 @@ mod tests {
         std::fs::create_dir_all(&sub2).unwrap();
         std::fs::write(sub2.join("alpha.z5"), minimal_v3_story()).unwrap();
         let (dir2, _stories2, selected2) =
-            super::resolve_picker_position(&source, &root2, &root2, None);
+            super::resolve_picker_position(&source, &root2, &app::data_roots::DataRoots::single(&root2), None);
         let _ = std::fs::remove_dir_all(&root2);
         assert_eq!(dir2, root2, "no restore: opens on the root");
         assert_eq!(selected2, 0, "no restore: top row selected");
@@ -8230,7 +8846,7 @@ mod tests {
         };
 
         let (dir, stories, selected) =
-            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+            super::resolve_picker_position(&source, &root, &app::data_roots::DataRoots::single(&root), Some(&restore));
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(dir, root, "the zip's own directory, not a folder inside it");
@@ -8262,7 +8878,7 @@ mod tests {
         };
 
         let (_dir, stories, selected) =
-            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+            super::resolve_picker_position(&source, &root, &app::data_roots::DataRoots::single(&root), Some(&restore));
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(
@@ -8291,7 +8907,7 @@ mod tests {
         };
 
         let (dir, stories, _selected) =
-            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+            super::resolve_picker_position(&source, &root, &app::data_roots::DataRoots::single(&root), Some(&restore));
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(dir, root, "a deleted sub-directory falls back to the root");

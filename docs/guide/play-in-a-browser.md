@@ -73,8 +73,8 @@ since a one-finger drag that starts moving up or down is read as a scroll.
 browser handle touch its own way.
 
 The edges you drag are made wider here than on a desktop, because a fingertip
-is not a mouse pointer: the splitter between the story and the map, and the
-top edges of the inventory and room panels, are four cells deep instead of
+is not a mouse pointer: the splitter between the story and the Journal, and the
+top edge of the command panel, are four cells deep instead of
 two. `LANTHORN_WEB_GRAB_ZONE` sets that (anything from 1 to 6), and whatever
 you set in lanthorn's own settings screen wins over it from then on.
 
@@ -141,6 +141,25 @@ and download into `/stories`, and any writable terminal is an interactive
 program running on your machine. Set `LANTHORN_WEB_CREDENTIAL` for HTTP
 basic auth, and put a reverse proxy (Caddy, nginx, Traefik) in front for TLS
 before exposing it any further than that.
+
+## One account per person, behind a login proxy
+
+lanthorn does no logins itself, but it can play each person as their own
+player — own saves, map and settings — when a reverse proxy you run in front
+of it does the login. Set `LANTHORN_WEB_AUTH_HEADER` to the request header your
+proxy fills in with the signed-in username:
+
+```yaml
+environment:
+  LANTHORN_WEB_AUTH_HEADER: "X-Forwarded-User"
+```
+
+The proxy must route the page to port 7681 and `/lanthorn-audio/*` to port
+7682 (sound), set the header on both, and overwrite any copy the browser sends.
+Neither port may be reachable except through the proxy, since lanthorn trusts
+the header completely. The username must be a valid player name (1-29 letters,
+digits, `.`, `_`, `-`); anything else is refused. Leave `LANTHORN_WEB_CREDENTIAL`
+unset — the container refuses to start with both.
 
 ## Publishing
 

@@ -6,10 +6,10 @@ For anyone installing lanthorn for the first time and opening their first story.
 
 Grab the archive for your platform from the
 [latest release](https://github.com/sharkusk/lanthorn/releases) — Linux
-(x86_64), macOS (universal) and Windows (x86_64) all ship with every release.
-Each archive holds four binaries: `lanthorn` itself, plus the no-map CLI
-players `zvm-cli`, `gvm-cli` and `scott-cli`. Extract it and run `lanthorn`
-from a terminal.
+(x86_64), Linux (aarch64, e.g. Raspberry Pi OS 64-bit), macOS (universal) and
+Windows (x86_64) all ship with every release. Each archive holds four
+binaries: `lanthorn` itself, plus the no-map CLI players `zvm-cli`,
+`gvm-cli` and `scott-cli`. Extract it and run `lanthorn` from a terminal.
 
 On Windows, two things are worth knowing up front. Closing the console
 window (rather than quitting from inside lanthorn) kills the process before
@@ -68,6 +68,52 @@ IFDB page — each with its own key shown alongside, so you learn the key by
 using the menu and then stop needing it. The line along the bottom of the
 screen names only the keys that act on the *library*, and `?` shows the
 full list whenever you want it.
+
+**A folder for each game's manual and maps.** Once a story is linked to its
+IFDB page, the info panel shows its *documents folder*: a place to keep the
+manual, the feelies, a map scan, whatever came in the box. It is named
+`<Title> [<IFDB id>]` and lives under `~/.lanthorn/documents/`, shared by every
+release of the game and by every player. Lanthorn finds it by the id in the
+brackets, so a title that IFDB later corrects never loses your files, and a folder
+you make or rename yourself works as long as it ends in ` [<id>]`. Lanthorn does
+not create these on its own unless you ask it to: until the folder exists the
+panel shows where it would go and a **Create documents folder** button (also `m`,
+or the story menu). Set `create_documents_folders = true` in `config.toml` to have
+lanthorn make each linked game's folder as it finds it, and `documents_dir = "..."`
+to keep them somewhere other than `~/.lanthorn/documents`. Both are read from the
+shared `config.toml` only, so a named player's file cannot move or switch them.
+A story that is not linked to IFDB has no documents folder; the panel says so.
+Once the folder has files in it, the panel lists them under it (name, kind, size,
+and a *spoiler* mark on walkthroughs); click one to open it, the same way the Documents
+tab does: images and text show right there, anything else goes to your system's viewer.
+
+**Fetching what IFDB lists.** IFDB's page for a game often links its manual, a
+map, a transcript of the original packaging, or a walkthrough. Press `Shift+D`
+on a linked story, or choose **Download documents from IFDB…** from its menu, or
+click **Download documents…** in the info panel, to see them in a list. (Inside a
+game, `/download-documents` does the same.) Move with the arrow keys, press
+`Space` to mark the ones you want, and `Enter` to save them into the game's
+documents folder, which is made if it is not there yet. With nothing marked,
+`Enter` saves the row you are on.
+
+- **Files you already have are marked.** A row whose file is already in the
+  folder says *In your documents*, its tick is greyed, and it is never fetched
+  twice; if you have since changed the file, the row says *different size* and you
+  can still take a fresh copy.
+- **Spoilers are tagged.** A link from IFDB's solutions or hints directories is
+  marked *spoiler* in the list, so you do not open a walkthrough by accident.
+- **Zips open without being downloaded.** Press `→` on a zip to see its contents:
+  lanthorn asks the server for the end of the file, where the table of contents
+  lives, and nothing more. Mark single files inside (a file named for your game is
+  starred) and only those are fetched, so you can take *ZorkI.txt* out of a bundle
+  of solutions for fifty games. If a server will not hand out part of a file, the
+  row says *contents unknown* and the whole zip is all you can take.
+- **Peek at text first.** `p` shows the first twenty lines of a text file, or of
+  a text file inside a zip, before you decide.
+- Nothing is fetched until you ask for it, one request at a time, and a file over
+  100 MB is refused. A name that already exists in the folder is never overwritten:
+  the new file is saved as `manual (2).pdf`. A game that is not linked to IFDB
+  shows the button and menu row greyed out with *Link to IFDB first*.
 
 **A multi-disk release shows up as one shelf, not a pile of disks.** Point
 lanthorn at any volume from a set — the seven Apple II floppies of *The Lost

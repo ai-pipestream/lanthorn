@@ -1,0 +1,172 @@
+# SQ-1600: a verified command sequence for Lost Pig (LostPig.z8, Eric Eve,
+# Release 2 / Serial 080406, Inform v6.30 6/11), reconstructed by booting the
+# real game headlessly and driving it turn by turn, checking every reply
+# against the actual interpreter, and confirming the final score against the
+# game's own SCORE/FULL command output. This is NOT a copy of any published
+# walkthrough's prose -- it is this project's own derived list of literal game
+# commands, produced for automated regression testing
+# (crates/app/tests/suites/walkthrough_lostpig.rs).
+#
+# A web search surfaced only vague, partly-inaccurate prose summaries of the
+# solution (no IF-Archive .sol file for this title was found); those were used
+# only as a rough guide to WHICH puzzle areas exist (a pole, a coin-op box, a
+# gnome, a missing book page) -- every individual command below was derived and
+# checked against the real interpreter's actual replies, and several of the
+# guide's specific claims (e.g. a literal "coin" on the stairs, dousing lit
+# powder with water) turned out to be wrong once checked.
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. A line submitted while the game is at a single-keypress (Char)
+# prompt is sent as a keypress (its first character); otherwise it is
+# submitted as an ordinary typed line.
+#
+# This game carries its own maximum score of 7, confirmed via the in-game
+# SCORE/FULL commands. The walkthrough below reaches all 7 points and the
+# game's best ending, "*** Grunk bring pig back to farm and make new friend
+# ***" -- one point ("earn gnome respect") is earned only by returning BOTH
+# the key and the color-magnet pole to the store room (Shelf Room) AND
+# closing the secret door behind you in the Windy Cave before leaving through
+# the maze; skipping either half of that leaves the score at 6/7 with the
+# plainer ending "*** Grunk bring pig back to farm ***".
+#
+# The walkthroughs.rs-style harness (walkthrough_lostpig.rs) injects its
+# mid-script persistence checks (an in-game @save/@restore round trip and a
+# host Save State/Restore State round trip) right after the `give paper to
+# gnome` below (back in the Gnome Room, mid-conversation, at a Line prompt)
+# -- see that file's `CHECKPOINT_AFTER_COMMAND` for exactly where and why.
+
+listen
+search bushes
+ne
+take torch
+examine stairs
+take metal thing
+east
+se
+take pole
+nw
+north
+south
+east
+point pole at red thing
+west
+north
+take hat
+south
+east
+fill hat with water
+west
+se
+unlock chest with key
+open chest
+pour water on powder
+light torch
+examine torch
+nw
+sw
+take chair
+ne
+se
+put chair on floor
+stand on chair
+look on top shelf
+take book
+examine book
+get down
+west
+give book to gnome
+ask gnome about book
+ask gnome about ball
+take ball
+east
+nw
+west
+look in crack
+rub pole with torch
+rub torch on pole
+put soot on pole
+examine pole
+poke paper with pole
+take paper
+examine paper
+read paper
+east
+se
+west
+give paper to gnome
+z
+west
+ne
+look in fountain
+search fountain
+look under fountain
+sw
+put coin in slot
+pull lever
+look in basket
+take brick
+break brick
+ne
+give brick to pig
+west
+look
+drop brick
+z
+z
+z
+z
+take pig
+east
+sw
+hit box
+take coin
+put coin in slot
+pull lever
+look in basket
+take brick
+break whole brick
+inventory
+hit box
+take coin
+put coin in slot
+pull lever
+take brick
+break whole brick
+inventory
+ne
+west
+east
+se
+drop half bricks
+z
+z
+z
+z
+take pig
+drop key
+drop pole
+nw
+north
+put torch in statue's hand
+south
+sw
+east
+take ball
+west
+ne
+north
+take torch
+south
+sw
+east
+give torch to gnome
+west
+ne
+north
+north
+close door
+north
+shout
+se
+down
+south

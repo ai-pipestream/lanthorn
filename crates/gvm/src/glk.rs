@@ -759,6 +759,67 @@ impl WinTree {
 
 // ── Backend trait ─────────────────────────────────────────────────────────────
 
+/// The Glk screen as the backend measures it: ONE value carrying every fact
+/// the layout needs, so a caller cannot supply a plausible subset (the
+/// `MachineBoot` / `FrameGeometry` shape).
+///
+/// Two different things were one number before: the **layout unit** (what a
+/// window `Rect` is measured in, and what a split divides) and the **text
+/// cell** (how big one character is, which only decides how many characters a
+/// text window reports). In cell mode they coincide; in design mode they do not.
+///
+/// * **Cell mode** ([`GlkScreen::cells`]): one unit is one terminal cell,
+///   `unit_px` is the cell's pixel size (what a graphics window multiplies
+///   by), `text_cell` is `(1.0, 1.0)`. Every rect is whole cells.
+/// * **Design mode** ([`GlkScreen::design`]): one unit is one design pixel
+///   (`unit_px == (1, 1)`), `text_cell` is the fractional, possibly
+///   non-square, character cell in those pixels. Splits divide in exact
+///   pixels, as a GUI Glk does; a text window reports
+///   `floor(px / text_cell)` characters per axis; a graphics window reports
+///   its exact pixel size.
+///
+/// Rects in the window tree are in layout units either way; the screen that
+/// produced them is [`Model::screen`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlkScreen {
+    /// Screen size in layout units.
+    pub size: (u32, u32),
+    /// Pixels per layout unit `(x, y)`.
+    pub unit_px: (u32, u32),
+    /// One text character's size in layout units `(w, h)`; may be fractional.
+    pub text_cell: (f64, f64),
+}
+
+impl GlkScreen {
+    /// Cell mode: `size` cells of `char_px` pixels each.
+    pub fn cells(size: (u32, u32), char_px: (u32, u32)) -> GlkScreen {
+        GlkScreen { size, unit_px: char_px, text_cell: (1.0, 1.0) }
+    }
+    /// Design mode: a `size_px` screen of 1px units with a `text_cell_px`
+    /// character cell (each axis must be positive).
+    pub fn design(size_px: (u32, u32), text_cell_px: (f64, f64)) -> GlkScreen {
+        GlkScreen { size: size_px, unit_px: (1, 1), text_cell: text_cell_px }
+    }
+    /// How many whole characters fit in `units` layout units on one axis. The
+    /// ONE rule reporting uses; [`GlkScreen::units_for_chars`] is its inverse.
+    pub fn chars_in(&self, units: u32, vertical: bool) -> u32 {
+        let cell = if vertical { self.text_cell.1 } else { self.text_cell.0 };
+        if cell == 1.0 {
+            return units;
+        }
+        ((units as f64 + 1e-9) / cell.max(1e-9)).floor() as u32
+    }
+    /// Layout units needed to hold `chars` characters on one axis (rounded up,
+    /// so `chars_in(units_for_chars(n)) >= n`).
+    pub fn units_for_chars(&self, chars: u32, vertical: bool) -> u32 {
+        let cell = if vertical { self.text_cell.1 } else { self.text_cell.0 };
+        if cell == 1.0 {
+            return chars;
+        }
+        ((chars as f64 * cell) - 1e-9).ceil().max(0.0) as u32
+    }
+}
+
 /// A display backend the VM drives for all output-side effects. The Glk state
 /// (window tree, streams, current style) lives in [`Model`]; the backend renders
 /// it. Every method has a no-op default so a backend implements only what it
@@ -824,6 +885,12 @@ pub trait GlkBackend {
     /// `(width, height)`. The model lays the window tree out within this.
     fn screen_size(&self) -> (u32, u32) {
         (80, 24)
+    }
+    /// The whole screen as one [`GlkScreen`] — what the model lays out from.
+    /// The default is cell mode built from [`Self::screen_size`] and
+    /// [`Self::char_pixels`]; a host with a design-pixel screen overrides it.
+    fn screen(&self) -> GlkScreen {
+        GlkScreen::cells(self.screen_size(), self.char_pixels())
     }
     /// A host layout preference (SQ-0341/SQ-1402), not a Glk mechanism the
     /// story can query or set: `true` makes every split abut with no reserved
@@ -1721,9 +1788,10 @@ pub struct Model {
     /// Non-colour rendered stylehints (Weight, Oblique), same `[row][style]`
     /// indexing as `style_hints`. Compared by `glk_style_distinguish`.
     style_attrs: [[StyleAttrs; NUMSTYLES as usize]; 2],
-    /// Pixel size of one character cell (w, h), set by `relayout` for graphics
-    /// fixed-split conversion. (1,1) until the backend reports otherwise.
-    char_px: (u32, u32),
+    /// The screen the last `relayout` laid out against (layout unit, pixels
+    /// per unit, text cell). Cell mode with 1px units until the backend
+    /// reports otherwise.
+    screen: GlkScreen,
     /// Set whenever the file VFS is mutated (a file is created/truncated,
     /// written, or deleted), so hosts can flush the sidecar only when it
     /// changed. Mirrors the Z-machine's `aux_dirty`. Not serialized.
@@ -1812,7 +1880,7 @@ impl Model {
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
             style_attrs: [[StyleAttrs::default(); NUMSTYLES as usize]; 2],
-            char_px: (1, 1),
+            screen: GlkScreen::cells((80, 24), (1, 1)),
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
@@ -2549,12 +2617,19 @@ impl Model {
     /// `None` for a parentless root (no preference), `Some(false)` for a
     /// `winmethod_NoBorder` split, `Some(true)` for the default (`winmethod_Border`).
     ///
-    /// `char_px` and `borderless` are both the backend's, handed in fresh each
+    /// `screen` and `borderless` are both the backend's, handed in fresh each
     /// call the same way: the model has no standing coupling to
     /// `dyn GlkBackend`, so the caller (`Machine::step`, which owns both) reads
     /// [`GlkBackend::borderless`] and passes the answer through (SQ-1402).
     pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32), borderless: bool) -> Vec<(u32, WinType, Rect, Option<bool>)> {
-        self.char_px = char_px;
+        self.relayout_screen(&GlkScreen::cells((width, height), char_px), borderless)
+    }
+
+    /// [`relayout`](Self::relayout) taking the whole screen as one
+    /// [`GlkScreen`] (cell or design mode) instead of cell-mode positional facts.
+    pub fn relayout_screen(&mut self, screen: &GlkScreen, borderless: bool) -> Vec<(u32, WinType, Rect, Option<bool>)> {
+        self.screen = *screen;
+        let (width, height) = screen.size;
         self.borderless = borderless;
         // The whole screen is laid out, always. Each proportional split divides
         // its own parent in virtual pixels and floors each child to whole cells
@@ -2591,13 +2666,14 @@ impl Model {
         };
         match wintype {
             WinType::TextGrid => {
+                let (cols, rows) = (self.screen.chars_in(rect.width, false), self.screen.chars_in(rect.height, true));
                 if let Some(w) = self.win_mut(id) {
-                    w.grid.width = rect.width;
-                    w.grid.height = rect.height;
-                    if w.grid.cx >= rect.width {
+                    w.grid.width = cols;
+                    w.grid.height = rows;
+                    if w.grid.cx >= cols {
                         w.grid.cx = 0;
                     }
-                    if w.grid.cy >= rect.height {
+                    if w.grid.cy >= rows {
                         w.grid.cy = 0;
                     }
                 }
@@ -2612,7 +2688,7 @@ impl Model {
                 let _ = key;
                 let dir = method & WINMETHOD_DIRMASK;
                 let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
-                let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
+                let cell_px = if vertical { self.screen.unit_px.1 } else { self.screen.unit_px.0 }.max(1);
                 let total = if vertical { rect.height } else { rect.width };
                 let border = self.split_border(method).min(total);
                 let content = total - border;
@@ -2646,7 +2722,7 @@ impl Model {
                     // asked for — see `window_pixel_size` — so its layout math
                     // isn't thrown off by the cell rounding.
                     let key_is_graphics = self.win(child2).map(|w| w.wintype) == Some(WinType::Graphics);
-                    let n = if key_is_graphics { size.div_ceil(cell_px) } else { size }.min(content);
+                    let n = if key_is_graphics { size.div_ceil(cell_px) } else { self.screen.units_for_chars(size, vertical) }.min(content);
                     (content - n, n)
                 };
                 let (r_old, r_new) = split_rect(rect, method, old_size, new_size);
@@ -2690,7 +2766,20 @@ impl Model {
         if w.wintype == WinType::Blank {
             return Some((0, 0));
         }
+        if matches!(w.wintype, WinType::TextGrid | WinType::TextBuffer) {
+            return Some((self.screen.chars_in(w.rect.width, false), self.screen.chars_in(w.rect.height, true)));
+        }
         Some((w.rect.width, w.rect.height))
+    }
+    /// The screen the last [`relayout`](Self::relayout) laid out against: the
+    /// unit every window `Rect` in [`window_tree`](Self::window_tree) is in.
+    pub fn screen(&self) -> GlkScreen {
+        self.screen
+    }
+    /// A window's whole rect in PIXELS (`rect × unit_px`), whatever its type.
+    pub fn window_rect_px(&self, win: u32) -> Option<(u32, u32)> {
+        let w = self.win(win)?;
+        Some((w.rect.width * self.screen.unit_px.0, w.rect.height * self.screen.unit_px.1))
     }
     /// gvm's live window tree as a [`WinTree`], reflecting the rects from the
     /// most recent [`relayout`](Self::relayout). `None` when no root is open.
@@ -2736,7 +2825,7 @@ impl Model {
         // to a whole cell (SQ-1565). Nothing to carry for a text first child.
         let split_px = match &first {
             WinTree::Leaf { id, wintype: WinType::Graphics, .. } => {
-                self.window_pixel_size(*id, self.char_px).map(|(pw, ph)| if vertical { ph } else { pw })
+                self.window_pixel_size_in_screen(*id).map(|(pw, ph)| if vertical { ph } else { pw })
             }
             _ => None,
         };
@@ -2780,6 +2869,17 @@ impl Model {
     ///
     /// `None` if invalid or not a graphics window.
     pub fn window_pixel_size(&self, win: u32, char_px: (u32, u32)) -> Option<(u32, u32)> {
+        self.pixel_size_at(win, char_px)
+    }
+
+    /// [`window_pixel_size`](Self::window_pixel_size) measured against the screen
+    /// of the last relayout (its `unit_px`), so design mode needs no caller-side
+    /// cell size.
+    pub fn window_pixel_size_in_screen(&self, win: u32) -> Option<(u32, u32)> {
+        self.pixel_size_at(win, self.screen.unit_px)
+    }
+
+    fn pixel_size_at(&self, win: u32, char_px: (u32, u32)) -> Option<(u32, u32)> {
         let w = self.win(win)?;
         if w.wintype != WinType::Graphics {
             return None;
@@ -3692,6 +3792,15 @@ impl Model {
                     }
                     w(&mut out, win.mouse_req as u32);
                     w(&mut out, win.hyperlink_req as u32);
+                    // Line-input terminators + echo-line setting (SQ-1616, v7): a HOST
+                    // snapshot resumes the VM without the game re-registering these via
+                    // `glk_set_terminators_line_event`/`glk_set_echo_line_event`, so
+                    // they must survive the round-trip like the style colours below.
+                    w(&mut out, win.terminators.len() as u32);
+                    for &t in &win.terminators {
+                        w(&mut out, t);
+                    }
+                    w(&mut out, win.echo_line as u32);
                     // Per-window Normal-style colour snapshot (SQ-0334, v6): a HOST
                     // snapshot resumes the VM without the game re-establishing hints,
                     // so the window's own colours must survive the round-trip.
@@ -3860,6 +3969,21 @@ impl Model {
             let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
             let mouse_req = r.u32()? != 0;
             let hyperlink_req = r.u32()? != 0;
+            // Line-input terminators + echo-line setting (v7+). Older snapshots
+            // default (empty terminator list, echo on) — the pre-SQ-1616 behaviour,
+            // and the same "accepted break, no migration" shape as every other
+            // version bump in this file.
+            let (terminators, echo_line) = if version >= 7 {
+                let nterm = r.u32()?;
+                let mut terminators = Vec::new();
+                for _ in 0..nterm {
+                    terminators.push(r.u32()?);
+                }
+                let echo_line = r.u32()? != 0;
+                (terminators, echo_line)
+            } else {
+                (Vec::new(), true)
+            };
             // Per-window Normal-style colour snapshot (v6+). Older snapshots default
             // (the game repaints on its own @restore); a host snapshot carries them.
             let mut styles = [StyleColour::default(); NUMSTYLES as usize];
@@ -3870,7 +3994,7 @@ impl Model {
             }
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
-                hyperlink_req, terminators: Vec::new(), echo_line: true, echo: 0, child1, child2, key, method, size,
+                hyperlink_req, terminators, echo_line, echo: 0, child1, child2, key, method, size,
                 styles,
             }));
         }
@@ -3996,7 +4120,7 @@ impl Model {
             events: std::collections::VecDeque::new(),
             style_hints,
             style_attrs,
-            char_px: (1, 1),
+            screen: GlkScreen::cells((80, 24), (1, 1)),
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
@@ -4174,7 +4298,7 @@ fn read_blob(bytes: &[u8], p: &mut usize) -> Option<Vec<u8>> {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 6;
+const GLK_SNAPSHOT_VERSION: u32 = 7;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.
@@ -4594,12 +4718,12 @@ mod layout_snap_tests {
     }
 
     // ── format freeze (docs/release/save-format-policy.md) ──
-    // The Glk host-snapshot version is frozen at 6. Changing this constant must
+    // The Glk host-snapshot version is frozen at 7. Changing this constant must
     // be a deliberate format bump (update this pin + a migration/release note),
     // never accidental drift — the assert forces the decision to be conscious.
     #[test]
     fn snapshot_version_constant_is_frozen() {
-        assert_eq!(GLK_SNAPSHOT_VERSION, 6, "Glk snapshot version changed — see docs/release/save-format-policy.md");
+        assert_eq!(GLK_SNAPSHOT_VERSION, 7, "Glk snapshot version changed — see docs/release/save-format-policy.md");
     }
 
     #[test]
@@ -4706,6 +4830,116 @@ mod layout_snap_tests {
             Some(0xABCD),
             "the stream's current link value survived the round-trip",
         );
+    }
+
+    // A live line-terminator set + a non-default echo-line flag must survive a
+    // Glk-chunk save/restore (SQ-1616): before this fix, `deserialize`
+    // unconditionally rebuilt every window with `terminators: Vec::new(),
+    // echo_line: true`, discarding whatever the game had registered via
+    // `glk_set_terminators_line_event`/`glk_set_echo_line_event`. This is exactly
+    // the round trip `GlulxSession::silent_look` performs on every `look`-driven
+    // room-name probe (`crates/app/src/glulx_session.rs`).
+    #[test]
+    fn terminators_and_echo_line_round_trip_through_serialize() {
+        let mut m = Model::new();
+        let grid = m.window_open(0, 0, 0, 4, 0).unwrap(); // TextGrid root
+        assert!(m.set_line_terminators(grid, &[keycode::FUNC1]));
+        m.set_window_echo_line(grid, false);
+        assert!(m.is_line_terminator(grid, keycode::FUNC1), "armed before save");
+        assert!(!m.window_echo_line(grid), "armed before save");
+
+        let restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        assert!(
+            restored.is_line_terminator(grid, keycode::FUNC1),
+            "line terminator survived the round-trip"
+        );
+        assert!(!restored.window_echo_line(grid), "echo-line setting survived the round-trip");
+    }
+
+    // A pre-SQ-1616 (version 6) snapshot — no terminators/echo_line fields on a
+    // window record — must still deserialize, defaulting to the pre-fix
+    // behaviour (empty terminator list, echo on) rather than erroring. Pinned
+    // wire bytes, hand-built to the v6 layout, so this exercises the real
+    // `version >= 7` gate rather than whatever `serialize()` currently emits —
+    // and proves the gate works in both directions (this test plus the
+    // round-trip test above).
+    #[test]
+    fn deserializes_pinned_version_6_snapshot_without_terminators_or_echo_line() {
+        let mut b = Vec::new();
+        let w = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_be_bytes());
+        let zero_style_colour = |b: &mut Vec<u8>| {
+            for _ in 0..5 {
+                w(b, 0);
+            } // fg(opt) + bg(opt) + reverse
+        };
+        let zero_style_attrs = |b: &mut Vec<u8>| {
+            for _ in 0..10 {
+                w(b, 0);
+            } // weight/oblique/indent/para_indent/justify, each opt
+        };
+
+        w(&mut b, 6); // version 6 (pre SQ-1616 terminators/echo_line)
+        w(&mut b, 1); // root window id
+        w(&mut b, 1); // current stream
+        w(&mut b, 1); // window count
+        // One window slot: a TextGrid leaf, present.
+        w(&mut b, 1); // present
+        w(&mut b, 1); // id
+        w(&mut b, WinType::TextGrid.to_arg()); // wintype
+        w(&mut b, 0); // rock
+        w(&mut b, 0); // parent
+        w(&mut b, 1); // stream (owns stream id 1)
+        w(&mut b, 0); // child1
+        w(&mut b, 0); // child2
+        w(&mut b, 0); // key
+        w(&mut b, 0); // method
+        w(&mut b, 0); // size
+        w(&mut b, 0); w(&mut b, 0); w(&mut b, 80); w(&mut b, 24); // rect
+        w(&mut b, 80); w(&mut b, 24); w(&mut b, 0); w(&mut b, 0); // grid
+        w(&mut b, 0); // no line_req
+        w(&mut b, 0); // no char_req
+        w(&mut b, 0); // mouse_req
+        w(&mut b, 0); // hyperlink_req
+        // v6 ends the window record HERE — no terminators/echo_line follow
+        // before the per-window style colours.
+        for _ in 0..NUMSTYLES {
+            zero_style_colour(&mut b);
+        }
+        // One stream slot: the window's own output stream.
+        w(&mut b, 1); // stream count
+        w(&mut b, 1); // present
+        w(&mut b, 1); // id
+        w(&mut b, 0); // rock
+        w(&mut b, 0); // style Normal
+        w(&mut b, 0); // link
+        w(&mut b, 0); // read_count
+        w(&mut b, 0); // write_count
+        w(&mut b, 0); // kind = Window
+        w(&mut b, 1); // win id
+        w(&mut b, 0); // file count
+        w(&mut b, 0); // fileref count
+        w(&mut b, 0); // file_streams count
+        w(&mut b, 0); // resource_streams count (v5+)
+        // (e) global style state (v6+): 2 rows x NUMSTYLES colours, then 2 rows x
+        // NUMSTYLES attrs.
+        for _ in 0..(2 * NUMSTYLES) {
+            zero_style_colour(&mut b);
+        }
+        for _ in 0..(2 * NUMSTYLES) {
+            zero_style_attrs(&mut b);
+        }
+
+        let m = Model::deserialize(&b).expect("a v6 snapshot still restores");
+        assert!(
+            !m.is_line_terminator(1, keycode::FUNC1),
+            "a pre-SQ-1616 snapshot carries no terminators — defaults to empty"
+        );
+        assert!(m.window_echo_line(1), "a pre-SQ-1616 snapshot defaults echo-line to on");
+
+        // And the restored model re-serializes as v7, round-tripping cleanly.
+        let again = Model::deserialize(&m.serialize()).expect("v7 re-serialize round-trips");
+        assert!(!again.is_line_terminator(1, keycode::FUNC1));
+        assert!(again.window_echo_line(1));
     }
 
     // A pre-SQ-0308 (version 4) snapshot — no trailing resource_streams table,
@@ -6217,5 +6451,70 @@ mod fault_hardening_tests {
         assert_eq!(m.file_stream_read_char(rsid), Some(b'd' as u32));
         m.stream_set_position(rsid, -1, 2); // from end
         assert_eq!(m.file_stream_read_char(rsid), Some(b'f' as u32));
+    }
+
+    // ── design mode (SQ-1703): layout unit = one design pixel ───────────────
+
+    /// A 100% split leaves 0 px for the other side (borders off), the pixel
+    /// arithmetic a GUI Glk does, with no cell left over.
+    #[test]
+    fn design_mode_hundred_percent_split_leaves_zero_pixels() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let gfx = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_PROPORTIONAL, 100, 5, 0).unwrap();
+        m.relayout_screen(&GlkScreen::design((640, 480), (6.5, 13.0)), true);
+        assert_eq!(m.window_pixel_size_in_screen(gfx), Some((640, 480)));
+        assert_eq!(m.window_size(buf).unwrap().1, 0, "the old child keeps 0 rows");
+        assert_eq!(m.window_rect_px(buf), Some((640, 0)), "and 0 px of height");
+    }
+
+    /// Proportional splits divide exact pixels, each side floored from the same
+    /// boundary (at most 1 px of padding), and graphics report exact pixels.
+    #[test]
+    fn design_mode_proportional_split_divides_pixels_exactly() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 25, 5, 0).unwrap();
+        m.relayout_screen(&GlkScreen::design((641, 480), (6.5, 13.0)), true);
+        assert_eq!(m.window_pixel_size_in_screen(gfx), Some((160, 480)), "25% of 641 px, floored");
+        assert!(m.window_pixel_size_in_screen(buf).is_none());
+        let t = m.window_tree().unwrap();
+        let (a, b) = match &t {
+            WinTree::Pair { first, second, .. } => (first.rect(), second.rect()),
+            _ => panic!("pair"),
+        };
+        assert_eq!((a.left, a.width), (0, 160));
+        assert_eq!((b.left, b.width), (160, 481), "rects stay in layout units (pixels)");
+        assert_eq!(m.screen().unit_px, (1, 1));
+    }
+
+    /// A text window reports floor(px / cell) per axis with a non-square,
+    /// fractional cell; a fixed text split converts characters to pixels with
+    /// the same rule (rounded up), so the window reports back what was asked.
+    #[test]
+    fn design_mode_text_windows_report_floor_of_pixels_over_cell() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 3, 4, 0).unwrap();
+        m.relayout_screen(&GlkScreen::design((640, 480), (6.5, 13.3)), true);
+        // 3 rows * 13.3 = 39.9 -> 40 px; reports floor(40/13.3) = 3 rows.
+        assert_eq!(m.window_size(grid), Some((98, 3)), "floor(640/6.5) = 98 cols, 3 rows");
+        let (cw, ch) = (m.window_size(buf).unwrap().0, m.window_size(buf).unwrap().1);
+        assert_eq!(cw, 98);
+        assert_eq!(ch, ((480.0 - 40.0) / 13.3_f64).floor() as u32, "floor(440/13.3) = 33");
+        assert_eq!((m.screen().text_cell.0, m.screen().text_cell.1), (6.5, 13.3));
+    }
+
+    /// Changing only the text cell changes the reported character counts
+    /// without moving any window.
+    #[test]
+    fn design_mode_relayout_on_cell_change_keeps_rects() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        m.relayout_screen(&GlkScreen::design((640, 480), (8.0, 16.0)), true);
+        assert_eq!(m.window_size(buf), Some((80, 30)));
+        m.relayout_screen(&GlkScreen::design((640, 480), (6.4, 12.0)), true);
+        assert_eq!(m.window_size(buf), Some((100, 40)));
+        assert_eq!(m.window_rect_px(buf), Some((640, 480)));
     }
 }

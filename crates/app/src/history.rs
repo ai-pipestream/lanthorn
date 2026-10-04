@@ -17,7 +17,8 @@ use mapper::mapper::Mapper;
 
 /// One recorded turn. `save` is the Quetzal snapshot of the VM AFTER this turn;
 /// `map_snapshot` is the serialized `Mapper` ONLY on turns where the graph
-/// structurally changed (so storage ≈ #map-changes, not #turns).
+/// structurally changed, or on the very first record ever written (so storage
+/// ≈ #map-changes, not #turns — see [`record_turn`]).
 #[derive(Debug, Clone)]
 pub struct TurnRecord {
     pub turn: u32,
@@ -25,11 +26,25 @@ pub struct TurnRecord {
     pub save: Vec<u8>,
     pub map_snapshot: Option<String>,
     pub transcript: String,
+    /// The room the player stood in at the END of this turn (SQ-1621),
+    /// derived from `mapper` at record time — independent of whether this
+    /// turn's own `map_snapshot` was taken. A `map_snapshot`'s baked-in
+    /// `current` (`mapper::persist::PersistState::current`) is frozen at
+    /// WHICHEVER turn produced that snapshot, which for a non-structural
+    /// turn is an earlier one — this field is never confused with that.
+    pub location: Option<mapper::graph::RoomId>,
+    /// `location`'s display name, captured alongside it so a host can list
+    /// e.g. "Turn 6: east · Kitchen" via [`TurnSummary`] without reaching
+    /// into `TurnRecord` or the mapper directly.
+    pub location_name: Option<String>,
 }
 
 /// Append a record for a completed turn. The caller computes `map_changed`
 /// (cheap room/connection-count delta); the map snapshot is serialized and
-/// stored only when it changed.
+/// stored when it changed, OR when `history` is still empty (SQ-1622) — a
+/// history that starts recording mid-game (the mapper already holds rooms)
+/// has no structural change to trigger on its first turn, and without this a
+/// history could hold zero snapshots anywhere until the next one.
 ///
 /// Does not itself cap `history` — call [`cap_history`] after this (the
 /// per-turn capture site in `turn.rs` does) — so every other caller that
@@ -44,13 +59,20 @@ pub fn record_turn(
     map_changed: bool,
     transcript: &str,
 ) {
-    let map_snapshot = map_changed.then(|| mapper::persist::to_json(mapper));
+    let map_snapshot =
+        (map_changed || history.is_empty()).then(|| mapper::persist::to_json(mapper));
+    // SQ-1621: derived from `mapper` regardless of `map_changed`, so a later
+    // non-structural turn's own room is never read off an older snapshot.
+    let location = mapper.graph.current();
+    let location_name = location.and_then(|id| mapper.graph.room(id)).map(|r| r.name.clone());
     history.push(Arc::new(TurnRecord {
         turn,
         command: command.to_string(),
         save,
         map_snapshot,
         transcript: transcript.to_string(),
+        location,
+        location_name,
     }));
 }
 
@@ -64,7 +86,22 @@ pub fn record_turn(
 pub fn cap_history(history: &mut Vec<Arc<TurnRecord>>, cap: usize) {
     let cap = cap.max(1);
     if history.len() > cap {
-        history.drain(0..history.len() - cap);
+        let drain_end = history.len() - cap;
+        // SQ-1622: the doomed prefix may hold the only surviving `map_snapshot`
+        // (e.g. the baseline [`record_turn`] forces on history's first ever
+        // record) — carry the latest one forward onto the new oldest record,
+        // the same "last `Some` going backward" rule `map_at_turn` uses, so the
+        // retained history is never left with zero snapshots anywhere.
+        let baseline = history[0..drain_end].iter().rev().find_map(|r| r.map_snapshot.clone());
+        history.drain(0..drain_end);
+        if let Some(baseline) = baseline {
+            if history[0].map_snapshot.is_none() {
+                history[0] = Arc::new(TurnRecord {
+                    map_snapshot: Some(baseline),
+                    ..(*history[0]).clone()
+                });
+            }
+        }
     }
 }
 
@@ -76,6 +113,37 @@ pub fn map_at_turn(history: &[Arc<TurnRecord>], turn: u32) -> Option<&str> {
         .filter(|r| r.turn <= turn)
         .rev()
         .find_map(|r| r.map_snapshot.as_deref())
+}
+
+/// One recorded turn, read-only: enough for a host to list what's in
+/// `history` and know which entries changed the map, without reaching into
+/// `TurnRecord`'s own fields (its `save`/`map_snapshot` bytes included).
+#[derive(Debug, Clone)]
+pub struct TurnSummary {
+    pub turn: u32,
+    pub command: String,
+    /// Whether this turn's own `map_snapshot` is present — the same
+    /// only-stored-when-changed invariant [`record_turn`] and [`TurnRecord`]
+    /// document, so a `true` here is exactly a turn [`map_at_turn`] can serve.
+    pub map_changed: bool,
+    /// [`TurnRecord::location_name`] (SQ-1621): the room the player stood in
+    /// at the end of this turn, so a host can list e.g. "Turn 6: east ·
+    /// Kitchen" without touching `TurnRecord` directly.
+    pub location_name: Option<String>,
+}
+
+/// Summarize every recorded turn, in order, for a host that wants to list
+/// `history` (a rewind/replay picker) without touching `TurnRecord` directly.
+pub fn turn_summaries(history: &[Arc<TurnRecord>]) -> Vec<TurnSummary> {
+    history
+        .iter()
+        .map(|rec| TurnSummary {
+            turn: rec.turn,
+            command: rec.command.clone(),
+            map_changed: rec.map_snapshot.is_some(),
+            location_name: rec.location_name.clone(),
+        })
+        .collect()
 }
 
 /// What a linear resume from `history[idx]` needs: the VM save to restore, the
@@ -238,6 +306,100 @@ mod tests {
         assert_eq!(hist[0].turn, 2, "the newest turn survives");
     }
 
+    /// SQ-1621: `location`/`location_name` are derived from `mapper` at record
+    /// time — independent of `map_changed` — so a later non-structural turn's
+    /// own room is never confused with whichever room was current when an
+    /// OLDER `map_snapshot` was serialized.
+    #[test]
+    fn record_turn_captures_location_independent_of_map_changed() {
+        let mut hist = Vec::new();
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        record_turn(&mut hist, 1, "look", vec![1], &m, true, "");
+        assert_eq!(hist[0].location, Some(1));
+        assert_eq!(hist[0].location_name.as_deref(), Some("West of House"));
+
+        m.observe(2, "Forest", Some(Direction::N));
+        record_turn(&mut hist, 2, "north", vec![2], &m, true, "");
+        assert_eq!(hist[1].location, Some(2));
+        assert_eq!(hist[1].location_name.as_deref(), Some("Forest"));
+
+        // Move back to room 1 with NO structural change (no snapshot) —
+        // location still names the room actually stood in this turn, not
+        // room 2's, which is what turn 2's frozen snapshot would say.
+        m.observe_moved(1, "West of House", Some(Direction::S));
+        record_turn(&mut hist, 3, "south", vec![3], &m, false, "");
+        assert!(hist[2].map_snapshot.is_none(), "premise: no structural change this turn");
+        assert_eq!(hist[2].location, Some(1), "this turn's own room, not the frozen snapshot's");
+        assert_eq!(hist[2].location_name.as_deref(), Some("West of House"));
+    }
+
+    /// SQ-1622: evicting the sole record that carries a `map_snapshot` must
+    /// not leave the retained history with none anywhere — the latest
+    /// surviving snapshot in the doomed prefix carries forward onto the new
+    /// oldest record.
+    #[test]
+    fn cap_history_carries_forward_the_last_snapshot_when_evicted() {
+        let mut hist = Vec::new();
+        let m1 = mapper_with(1);
+        // Turn 1 carries the only snapshot; turns 2-3 have none (no structural change).
+        record_turn(&mut hist, 1, "look", vec![1], &m1, true, "");
+        record_turn(&mut hist, 2, "wait", vec![2], &m1, false, "");
+        record_turn(&mut hist, 3, "wait", vec![3], &m1, false, "");
+        let baseline = hist[0].map_snapshot.clone().expect("premise: turn 1 has the only snapshot");
+
+        cap_history(&mut hist, 2); // evicts turn 1, the only snapshot's home
+
+        assert_eq!(hist.len(), 2, "capped at 2");
+        assert_eq!(hist[0].turn, 2, "turn 2 is now the oldest surviving record");
+        assert_eq!(
+            hist[0].map_snapshot.as_deref(), Some(baseline.as_str()),
+            "the evicted baseline snapshot carries forward onto the new oldest record"
+        );
+        assert_eq!(hist[1].turn, 3);
+        assert!(hist[1].map_snapshot.is_none(), "only the new oldest record gets the carried-forward baseline");
+    }
+
+    /// When the drained prefix carries no snapshot at all, `cap_history` is a
+    /// no-op on the new oldest record's `map_snapshot` — nothing to carry
+    /// forward is not an error.
+    #[test]
+    fn cap_history_is_a_noop_when_the_drained_prefix_carries_no_snapshot() {
+        let mut hist: Vec<Arc<TurnRecord>> = (1..=4u32)
+            .map(|turn| {
+                Arc::new(TurnRecord {
+                    turn,
+                    command: "wait".into(),
+                    save: vec![turn as u8],
+                    map_snapshot: None,
+                    transcript: String::new(),
+                    location: None,
+                    location_name: None,
+                })
+            })
+            .collect();
+        cap_history(&mut hist, 2);
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0].turn, 3);
+        assert!(hist[0].map_snapshot.is_none(), "nothing to carry forward — left as-is, not an error");
+    }
+
+    /// SQ-1622: recording switched on mid-game — the mapper already holds
+    /// rooms from earlier (unrecorded) exploring — must not leave the brand
+    /// new history without a snapshot anywhere until the next structural
+    /// change. The very first record forces one even though this particular
+    /// turn made no structural change of its own.
+    #[test]
+    fn record_turn_forces_a_snapshot_on_historys_first_record_even_without_a_map_change() {
+        let mut hist = Vec::new();
+        let m = mapper_with(2); // mapper already has rooms from "earlier" exploring
+        record_turn(&mut hist, 5, "wait", vec![5], &m, false, "");
+        assert!(
+            hist[0].map_snapshot.is_some(),
+            "the very first record always carries a baseline, regardless of map_changed"
+        );
+        assert!(map_at_turn(&hist, 5).is_some(), "so a viewer of this turn has a map to show");
+    }
 
     /// Integration-flavored capture test: drive a real GameSession and prove the
     /// spec invariants (non-empty save + transcript; snapshot only on map-change).

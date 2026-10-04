@@ -1,5 +1,5 @@
 //! Group binary: The automap and its UI — matrix view and path highlighting, maze layers,
-//! the room dock, the command band, and room detection/corroboration.
+//! the Journal tabs, the command band, and room detection/corroboration.
 //!
 //! Each member below used to be its own test binary. The suites now live in
 //! `tests/suites/`, which cargo does not auto-build, and are pulled in here as
@@ -32,6 +32,12 @@ mod border_controls;
 mod return_probe;
 #[path = "suites/declared_exit.rs"]
 mod declared_exit;
+#[path = "suites/room_description.rs"]
+mod room_description;
+#[path = "suites/item_tracking.rs"]
+mod item_tracking;
+#[path = "suites/journal_inventory_tab.rs"]
+mod journal_inventory_tab;
 #[path = "suites/matrix_path_highlight.rs"]
 mod matrix_path_highlight;
 #[path = "suites/matrix_view.rs"]
@@ -42,14 +48,22 @@ mod maze_layer_commands;
 mod maze_layer_frozen;
 #[path = "suites/lostpig_room_and_inventory.rs"]
 mod lostpig_room_and_inventory;
+#[path = "suites/lostpig_restore_status_width.rs"]
+mod lostpig_restore_status_width;
 #[path = "suites/mysterious_room_detection.rs"]
 mod mysterious_room_detection;
 #[path = "suites/nameonly_room_corroboration.rs"]
 mod nameonly_room_corroboration;
 #[path = "suites/retired_exit_surfaces.rs"]
 mod retired_exit_surfaces;
-#[path = "suites/room_dock_render.rs"]
-mod room_dock_render;
+#[path = "suites/journal_tabs.rs"]
+mod journal_tabs;
+#[path = "suites/journal_hints_tab.rs"]
+mod journal_hints_tab;
+#[path = "suites/journal_room_tab.rs"]
+mod journal_room_tab;
+#[path = "suites/journal_map_card.rs"]
+mod journal_map_card;
 #[path = "suites/sq1264_forest_randomization.rs"]
 mod sq1264_forest_randomization;
 #[path = "suites/sq1287_advent_map_layout.rs"]
@@ -128,6 +142,8 @@ mod sq1342_quit_clears_resume;
 mod sq1345_zork1_forest_shadow;
 #[path = "suites/sq1351_nguhd_topics.rs"]
 mod sq1351_nguhd_topics;
+#[path = "suites/sq1653_superluminal_phantom_screens.rs"]
+mod sq1653_superluminal_phantom_screens;
 #[path = "suites/sq1551_host_map_editing.rs"]
 mod sq1551_host_map_editing;
 #[path = "suites/sq1562_folded_updown_layout.rs"]

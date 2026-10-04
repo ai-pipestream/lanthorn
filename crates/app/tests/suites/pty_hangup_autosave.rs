@@ -15,12 +15,15 @@
 //! the terminal, runs `lifecycle::exit_auto_save`, and exits `128 + SIGHUP`.
 //!
 //! THE MACHINERY WAS NEVER THE PROBLEM. `exit_auto_save` opens with
-//! `if !state.config.auto_save { return; }` — and `auto_save` **defaults to
-//! false**. The signal arrived, the terminal was restored, the exit code was
-//! right, and nothing was written, because nothing was ever meant to be. The
-//! resume half was already correct in the other direction: `auto_load` defaults
-//! to TRUE, so the next connection silently restores whatever archive it finds.
-//! One missing write was the whole defect.
+//! `if !state.config.auto_save { return; }` — and, at the time this defect was
+//! found, `auto_save` **defaulted to false** (SQ-1624 later flipped that
+//! default to true, precisely so an ordinary player's game is never lost this
+//! way without them having to know the flag exists). With the flag off, the
+//! signal arrived, the terminal was restored, the exit code was right, and
+//! nothing was written, because nothing was ever meant to be. The resume half
+//! was already correct in the other direction: `auto_load` defaults to TRUE,
+//! so the next connection silently restores whatever archive it finds. One
+//! missing write was the whole defect.
 //!
 //! WHAT THESE CASES PIN.
 //!
@@ -28,7 +31,9 @@
 //!    with `--auto-save on`, three turns played and then hung up the way ttyd
 //!    hangs up leave an archive that says three turns.
 //! 2. `without_auto_save_a_hangup_leaves_nothing_behind` — the FALSIFICATION.
-//!    The same run without the flag exits just as cleanly, code and all, and
+//!    The same run with `--auto-save off` (SQ-1624: the config default no
+//!    longer answers this on its own, so the case pins the OFF behaviour by
+//!    passing the flag explicitly) exits just as cleanly, code and all, and
 //!    writes no archive at all. This is the reported symptom, reproduced; if it
 //!    ever starts passing an archive back, case 1 has stopped proving anything.
 //! 3. `a_reconnect_resumes_the_turns_the_last_connection_saved` — the other half
@@ -92,8 +97,9 @@ mod unix {
     }
 
     /// A launch on Mini-Zork that plays `turns` commands and then ends the way
-    /// `end` says. `auto_save` is the flag under test; `None` runs the stock
-    /// default, which is off.
+    /// `end` says. `auto_save` is the flag under test; `None` runs with no
+    /// `--auto-save` flag at all, i.e. the stock config default (on, since
+    /// SQ-1624) — pass `Some("off")` to test the OFF behaviour explicitly.
     fn play(user: &Path, auto_save: Option<&str>, turns: usize, hangup: bool) -> driver::Capture {
         let mut spec = Spec::new(env!("CARGO_BIN_EXE_lanthorn"), story(), user);
         spec.cols = 100;
@@ -168,7 +174,10 @@ mod unix {
             return;
         }
         let user = scratch("hangup-autosave-off");
-        let cap = play(&user, None, 3, true);
+        // SQ-1624 flipped the config default to on, so "without auto-save" now
+        // has to say so explicitly — `None` here would exercise the (now-on)
+        // default instead of the OFF behaviour this case exists to falsify.
+        let cap = play(&user, Some("off"), 3, true);
         assert_the_scenario_ran(&cap);
 
         let status = cap.exit.expect("a hangup run reports how the child ended");
@@ -181,7 +190,7 @@ mod unix {
         let arc = archive_path(&user);
         assert!(
             !arc.exists(),
-            "the stock default writes NOTHING on a hangup, which is the whole of SQ-1323; \
+            "--auto-save off writes NOTHING on a hangup, which is the whole of SQ-1323; \
              an archive appearing at {} means the falsification has stopped falsifying and \
              the sibling case above no longer proves the flag did anything",
             arc.display()

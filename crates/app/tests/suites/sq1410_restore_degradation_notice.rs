@@ -74,6 +74,7 @@ fn meta_at(format_version: u32) -> Meta {
         location: None,
         score: None,
         trigger: SaveTrigger::HostState,
+        source: app::archive::SaveSource::default(),
     }
 }
 

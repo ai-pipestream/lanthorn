@@ -469,6 +469,40 @@ impl WorldModel {
             .collect()
     }
 
+    /// Whether `obj`'s REAL object-tree parent chain — `get_parent`, walked upward, never the
+    /// `local_globals`/`visible_room_objects` reading-order walk — genuinely bottoms out at
+    /// `room` within `MAX_NEST_DEPTH` hops (SQ-1632 Fix 5).
+    ///
+    /// This is the structural tell that separates a truly NESTED item (the leaflet in the
+    /// mailbox: `get_parent(leaflet) == mailbox`, `get_parent(mailbox) == room`) from a
+    /// local-global/shared-scenery object surfaced by [`Self::local_globals`] (the window, the
+    /// white house, the stairs): per that method's own filter, EVERY local-global's real parent
+    /// is the shared `holder` bucket object, never the room — see this module's own top-level doc,
+    /// "The local-globals property", for why: "Such an object is never a child of the room, so a
+    /// children-only walk misses [it] entirely." A caller that wants to know which container an
+    /// item is in, not merely whether the visibility walk reached it via recursion, needs this
+    /// instead of trusting "nested" alone — `visible_room_objects` cannot make the distinction on
+    /// its own, since both classes land in the same flat list.
+    ///
+    /// Returns `obj`'s immediate parent (the container) when the chain reaches `room`; `None`
+    /// when it does not (local-global scenery, or a stray link the walk never actually reached).
+    pub fn real_container_in_room(&self, mem: &Memory, room: u16, obj: u16) -> Option<u16> {
+        let immediate = get_parent(mem, obj);
+        if immediate == 0 {
+            return None;
+        }
+        let mut cur = immediate;
+        let mut hops = 0u8;
+        while cur != 0 && hops < MAX_NEST_DEPTH {
+            if cur == room {
+                return Some(immediate);
+            }
+            cur = get_parent(mem, cur);
+            hops += 1;
+        }
+        None
+    }
+
     /// Everything the player can see in `room`, as object numbers, in reading
     /// order: each direct child, followed immediately by the contents of any
     /// child whose contents are visible (recursively, to `MAX_NEST_DEPTH`),
@@ -1984,6 +2018,37 @@ mod tests {
         assert_eq!(names(&mem, &m.local_globals(&mem, BEHIND)), ["window", "forest"]);
         // …and none of them is a child of the room.
         assert!(m.local_globals(&mem, BEHIND).iter().all(|&g| get_parent(&mem, g) != BEHIND));
+    }
+
+    /// SQ-1632 Fix 5: `real_container_in_room` must tell a genuinely nested item (the sack on the
+    /// table, the table in the kitchen) apart from local-global shared scenery (the window) —
+    /// the exact structural distinction `visible_room_objects`'s flat output cannot make.
+    /// Falsify by making this always answer `Some(room)` (the naive "it showed up, so it's here"
+    /// guess): the window assertions below fail, since the window would then read as if it were
+    /// directly contained by the room it happens to be visible from.
+    #[test]
+    fn real_container_in_room_finds_the_immediate_container_for_a_genuinely_nested_item() {
+        let mem = build();
+        let m = WorldModel::discover(&mem);
+        assert_eq!(m.real_container_in_room(&mem, KITCHEN, SACK), Some(TABLE), "the sack sits on the table");
+        assert_eq!(
+            m.real_container_in_room(&mem, KITCHEN, LUNCH), Some(SACK),
+            "the lunch is inside the sack, however deep the visibility walk had to go to see it"
+        );
+    }
+
+    #[test]
+    fn real_container_in_room_is_none_for_local_global_scenery() {
+        let mem = build();
+        let m = WorldModel::discover(&mem);
+        assert_eq!(
+            m.real_container_in_room(&mem, KITCHEN, WINDOW), None,
+            "the window is shared scenery, never a real child of the kitchen"
+        );
+        assert_eq!(
+            m.real_container_in_room(&mem, BEHIND, WINDOW), None,
+            "nor of Behind House, the other room that can see the same window"
+        );
     }
 
     /// The whole point: the sack and bottle ON the table are visible, the lunch

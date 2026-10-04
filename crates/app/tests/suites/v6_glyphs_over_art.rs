@@ -471,7 +471,7 @@ fn raster_chrome_text() -> Option<Vec<app::render::v6_layout::V6TextRun>> {
                 awaiting: false,
                 floats: Vec::new(),
             },
-            app::render::screen::RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0 },
+            app::render::screen::RasterMetrics { total_rows: 0, viewport_rows: rows, max_scroll: 0, first_visible_row: 0, top_anchored_fits: false },
         )
     };
     let host_pair = (image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]));
@@ -489,6 +489,8 @@ fn raster_chrome_text() -> Option<Vec<app::render::v6_layout::V6TextRun>> {
         more_prompt_pair: host_pair,
         text: v6::V6TextMode::RasteriseAndRecord,
         bottom_anchor_menu: false,
+        hybrid_text_rows: std::collections::HashSet::new(),
+        extend_flanks_under_story_grid: false,
     };
     let f = app::render::screen::compose_v6_frame(&layout, v6::RasterFrame::native(native), &inputs);
     Some(f.text)

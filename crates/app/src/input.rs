@@ -182,8 +182,9 @@ pub enum Action {
     ToggleSound,
     /// Set the master audio volume 0..=100 (config.volume).
     SetVolume(u8),
-    /// Show the room dock's DIAGNOSTICS body: opens the dock there when it is
-    /// closed, and flips Info ↔ Diagnostics when it is already open (SQ-0692).
+    /// Show the Room tab's DIAGNOSTICS body: switches the Journal to the Room
+    /// tab there when it is elsewhere, and flips Info ↔ Diagnostics when the Room
+    /// tab is already up (SQ-0692, SQ-1684).
     /// Still spelled `/toggle-inspector` — the command kept its name when the
     /// floating inspector became the dock's second view.
     ToggleRoomDiagnostics,
@@ -242,6 +243,29 @@ pub enum Action {
     /// Close the palette without executing (Esc / [X] / outside click). Returns to
     /// the hotkey dialog when the palette was promoted from it.
     PaletteClose,
+    /// A key for the open documents chooser (SQ-1680), which owns its own state
+    /// machine; this only carries the key to it.
+    DocumentsKey(KeyCode),
+    /// Open the Documents tab's selected row (`None`) or the one given (SQ-1681):
+    /// a pager, an image, or the system viewer, behind a spoiler question when
+    /// the file's name flags it.
+    DocTabOpen(Option<usize>),
+    /// Close the Documents tab's open document and return to its list.
+    DocTabClose,
+    /// Move the Documents list's selection by this many rows.
+    DocTabSelect(i32),
+    /// Scroll the open document, or the list, by this many lines.
+    DocTabScroll(i32),
+    /// Scroll by a page (+1 / -1).
+    DocTabPage(i32),
+    /// A click on list row `idx`: select it, or open it on the second click.
+    DocTabClickRow(usize),
+    /// A click on the folder's `file://` link: hand it to the system opener.
+    DocTabOpenLink(String),
+    /// A left click at (column, row) while the documents chooser is open.
+    DocumentsClick(u16, u16),
+    /// A wheel notch (±1 row, already direction-resolved) over the chooser.
+    DocumentsWheel(isize),
     /// A mouse-wheel notch over whichever selection-list modal is open: scroll
     /// its viewport by `delta` rows and clamp the cursor into the visible
     /// window (SQ-0831). Deliberately ONE action for every list rather than a
@@ -275,8 +299,13 @@ pub enum Action {
     FilePickerPick,
     /// Close the VFS file-picker modal without picking.
     FilePickerClose,
-    /// Toggle the inventory panel.
-    ToggleInventory,
+    /// Show a Journal tab (SQ-1684), revealing the Journal if the layout had
+    /// hidden it. `journal-tab <name>`, the tab bar's click, and the legacy
+    /// inventory/room keys all resolve to this. Remembered per story.
+    SetJournalTab(crate::journal::JournalTab),
+    /// Step the Journal to the next (`true`) or previous (`false`) tab,
+    /// wrapping — `journal-next-tab` / `journal-prev-tab`.
+    JournalStepTab(bool),
     /// Open a confirmation prompt to reset the game to its opening state (keeps map).
     ResetGame,
     /// Open the bottom command band (its object columns fill from the engine's
@@ -339,6 +368,17 @@ pub enum Action {
     /// mutually exclusive, `SidePanel`), so there is no `CommandBandState` to
     /// pick FROM — a typed verb stays and the item is simply appended.
     InventoryClickRow(usize),
+    /// A mouse-wheel notch over the inventory dock (SQ-1630): scroll its
+    /// `AppState::inv_dock_scroll` by `delta` rows. The dock's own analogue
+    /// of `RoomDockScroll` — same reasoning: no keyboard focus, so the wheel
+    /// is the only way to move it, and it keeps its own viewport
+    /// (`AppState::inv_dock_body_viewport`) rather than sharing
+    /// `modal_list_viewport`.
+    InventoryDockScroll(i32),
+    /// Set (`Some`) or clear (`None`) the inventory dock's `filter-items`
+    /// query (SQ-1630). Resets the dock's scroll to the top — the content a
+    /// scrolled offset was into no longer exists once the filter changes.
+    SetInventoryFilter(Option<String>),
     /// Esc, one level per press: disarm the quick highlight → close the band
     /// (SQ-0676 — the filter rung retired with type-to-filter, and the phrase
     /// rung with it: the phrase is the prompt's text now, and Esc must never
@@ -404,8 +444,6 @@ pub enum Action {
     ClearRoomPath,
     /// Close the room dock (Esc's second rung; the toggle command's off state).
     CloseRoomDock,
-    /// Open the room dock in the Info view, or close it if already open.
-    ToggleRoomDock,
     /// Show a specific room-dock body — a click on one of its two view tabs.
     SetRoomDockView(crate::state::RoomDockView),
     /// A mouse-wheel notch over the room dock: scroll its ACTIVE body's
@@ -571,6 +609,12 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     // dispatch path; Esc closes. Placed at the top of the modal ladder because it
     // can be summoned over any other view (incl. the debug pane where no prompt
     // exists).
+    // The documents chooser (SQ-1680) is a modal with a state machine of its
+    // own: every key goes to it, above the palette (which can open it, and has
+    // closed by then).
+    if state.overlays.documents.is_some() {
+        return KeyResolve::Action(Action::DocumentsKey(key.code));
+    }
     if state.overlays.palette.is_some() {
         return palette_key_to_command(state, key);
     }
@@ -611,6 +655,17 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return hotkey_dialog_key_to_action(state, key);
     }
 
+    // 6.4. Documents tab (SQ-1681): Esc closes an open document and returns to the
+    // list. Only while a viewer is actually up on the visible tab — with the list
+    // showing, Esc keeps every meaning it had.
+    if state.documents_tab_visible()
+        && state.documents_tab.viewer_open()
+        && key.modifiers == KeyModifiers::NONE
+        && matches!(key.code, KeyCode::Esc)
+    {
+        return KeyResolve::Action(Action::DocTabClose);
+    }
+
     // 6.5. Room dock Esc ladder (SQ-0692, extended by SQ-0693): drop the route
     // first, then unpin, then close on the next press.
     // Comes after steps 2-6 (prompt/anim/saves/hotkey_dialog checks) so those
@@ -627,7 +682,9 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     // Enter is deliberately NOT a close key. The dock is not a modal — typing
     // reaches the story prompt with it open (a letter resolves to `InputChar`),
     // so stealing Enter would let you compose a command and never submit it.
-    if (state.room_dock.open || !state.room_path.is_empty())
+    if (state.journal_tab == crate::journal::JournalTab::Room
+        || state.selected_room.is_some()
+        || !state.room_path.is_empty())
         && key.modifiers == KeyModifiers::NONE
         && matches!(key.code, KeyCode::Esc) {
             return KeyResolve::Action(if !state.room_path.is_empty() {
@@ -770,7 +827,10 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
 
     // 10. Per-focus routing.
     match state.focus {
-        Focus::Game => {
+        // `Focus::Hints` is only ever live while the run loop's own intercept
+        // (`hints_tab::on_key`) is handing keys to the hint session; a key that
+        // reaches here with it set belongs to the story, as it would in `Game`.
+        Focus::Game | Focus::Hints => {
             // Text entry is hardwired (printable chars, Enter, Backspace, Shift+Arrows,
             // Home, PageUp/Down). Non-printable / unmatched keys fall through to a
             // Global KeyMap lookup so that non-ctrl global bindings reach Game focus.
@@ -863,15 +923,13 @@ fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
 /// anything else inside the dock is claimed and does nothing.
 ///
 /// Returns `None` when the event is not inside `dock`, which is the caller's cue to route it
-/// normally. `tabs` and `close` are the hit-rects `draw_room_dock` returned for the frame just
-/// drawn — a click on the close box (SQ-1265) closes the dock, the same effect
-/// `toggle-room-panel` has while it is open. A wheel notch anywhere inside the dock scrolls the
+/// normally. `tabs` are the hit-rects `draw_room_dock` returned for the frame just
+/// drawn (the Room tab's body switcher). A wheel notch anywhere inside the tab scrolls the
 /// active body (SQ-1280), honouring `invert` the way every other wheel handler resolves
 /// `mouse_wheel_invert` — via [`wheel_delta`].
 pub fn room_dock_mouse_action(
     dock: ratatui::layout::Rect,
     tabs: &[(crate::state::RoomDockView, ratatui::layout::Rect)],
-    close: Option<ratatui::layout::Rect>,
     m: &crossterm::event::MouseEvent,
     invert: bool,
 ) -> Option<Action> {
@@ -880,9 +938,6 @@ pub fn room_dock_mouse_action(
         return None;
     }
     if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-        if close.is_some_and(|r| hit(r, m.column, m.row)) {
-            return Some(Action::CloseRoomDock);
-        }
         if let Some(&(view, _)) = tabs.iter().find(|(_, r)| {
             r.width > 0 && r.height > 0 && hit(*r, m.column, m.row)
         }) {
@@ -1097,6 +1152,14 @@ pub fn mouse_to_action(
     // list with a cursor in a viewport.
     // `kind` already has the single mouse_wheel_invert applied (above), so map it
     // to a direction with the shared helper and invert=false (never twice).
+    // The documents chooser (SQ-1680) owns the mouse outright while open.
+    if state.overlays.documents.is_some() {
+        return match (wheel_delta(kind, false), m.kind) {
+            (Some(d), _) => Action::DocumentsWheel(d),
+            (None, MouseEventKind::Down(MouseButton::Left)) => Action::DocumentsClick(col, row),
+            _ => Action::None,
+        };
+    }
     let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
@@ -1197,7 +1260,7 @@ pub fn mouse_to_action(
         // Must precede the story arm below: the input line sits inside the story pane, so a click
         // on it would otherwise start a text selection instead of moving the caret (SQ-0354).
         MouseEventKind::Down(MouseButton::Left)
-            if state.focus == Focus::Game && state.input_click_index(col, row).is_some() =>
+            if matches!(state.focus, Focus::Game | Focus::Hints) && state.input_click_index(col, row).is_some() =>
         {
             Action::CursorToClick(col, row)
         }
@@ -1976,6 +2039,23 @@ fn config_screen_key_to_action(key: KeyEvent, focus: usize) -> Action {
 
 fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
     let shift = key.modifiers == KeyModifiers::SHIFT;
+    // The Documents tab (SQ-1681) is modeless like the map: Shift+Arrows and
+    // Shift+PageUp/PageDown are never typed text, and with the Documents tab up the
+    // map they would pan is not on screen. Up/Down move the list's selection (or
+    // scroll an open document), Right opens the selected row, Left closes the
+    // document. Plain arrows, letters and Esc stay the command line's.
+    if shift && state.documents_tab_visible() {
+        let viewer = state.documents_tab.viewer_open();
+        match key.code {
+            KeyCode::Up => return if viewer { Action::DocTabScroll(-1) } else { Action::DocTabSelect(-1) },
+            KeyCode::Down => return if viewer { Action::DocTabScroll(1) } else { Action::DocTabSelect(1) },
+            KeyCode::Right => return if viewer { Action::None } else { Action::DocTabOpen(None) },
+            KeyCode::Left => return Action::DocTabClose,
+            KeyCode::PageUp => return Action::DocTabPage(-1),
+            KeyCode::PageDown => return Action::DocTabPage(1),
+            _ => {}
+        }
+    }
     match key.code {
         // Map navigation is available WITHOUT leaving the story line: Shift+Arrows
         // pan and the non-typeable Home recenters; PageUp/PageDown page the
@@ -2112,45 +2192,115 @@ pub fn open_command_band(state: &mut AppState, mapper: &mut Mapper, open: bool) 
     state.band_dock.arm(&state.config.animation);
 }
 
-/// Open or close the inventory panel, without persisting anything (SQ-1237) —
-/// the state-only half `open_command_band` above is, for the same reason: boot
-/// and `cycle_panel` both need to change the panel without writing a per-game
-/// override on their own behalf, leaving that to the action arm that persists.
-pub fn open_inventory_panel(state: &mut AppState, open: bool) {
-    state.show_inventory = open;
-    state.inv_dock.toggle_to(open, false);
-    state.inv_dock.arm(&state.config.animation);
+/// What a left-click on a drawn tab-bar cell does (SQ-1684): a label shows that
+/// tab; the narrow form's ‹ › step to the neighbour.
+pub fn journal_tab_click_action(hit: crate::journal::TabBarHit) -> Action {
+    use crate::journal::TabBarHit;
+    match hit {
+        TabBarHit::Tab(t) => Action::SetJournalTab(t),
+        TabBarHit::Prev => Action::JournalStepTab(false),
+        TabBarHit::Next => Action::JournalStepTab(true),
+    }
 }
 
-/// Cycle the story pane's border control: command panel → inventory panel →
-/// none → command panel (SQ-1237). The two panels are mutually exclusive, so
-/// landing on one closes the other; landing on `None` closes both. Persists
-/// the new state per-game, exactly as a direct `/toggle-command-panel` or
-/// `/toggle-inventory-panel` does — a click on the border control runs this
-/// through the same `slash::COMMANDS` dispatch every other control uses, so
-/// what it remembers is this function's job, not a second one.
+/// Remember the Journal's active tab for this story (SQ-1684), the way the
+/// command panel's state is remembered: a per-game sidecar key, written only
+/// when there is a game directory (which keeps unit tests off the filesystem).
+fn persist_journal_tab(state: &AppState) {
+    if !state.game_dir.as_os_str().is_empty() {
+        let _ = crate::styles::write_per_game_journal_tab(&state.game_dir, Some(state.journal_tab));
+    }
+}
+
+/// Cycle the story pane's border control: command panel → none → command panel
+/// (SQ-1237; the inventory stop moved into the Journal with SQ-1684). Persists
+/// the new state per-game, exactly as a direct `/toggle-command-panel` does — a
+/// click on the border control runs this through the same `slash::COMMANDS`
+/// dispatch every other control uses, so what it remembers is this function's
+/// job, not a second one.
 pub fn cycle_panel(state: &mut AppState, mapper: &mut Mapper) {
     let next = state.current_side_panel().next();
-    match next {
-        crate::state::SidePanel::Command => {
-            open_inventory_panel(state, false);
-            open_command_band(state, mapper, true);
-        }
-        crate::state::SidePanel::Inventory => {
-            open_command_band(state, mapper, false);
-            open_inventory_panel(state, true);
-        }
-        crate::state::SidePanel::None => {
-            open_command_band(state, mapper, false);
-            open_inventory_panel(state, false);
-        }
-    }
+    open_command_band(state, mapper, next == crate::state::SidePanel::Command);
     if !state.game_dir.as_os_str().is_empty() {
         let _ = crate::styles::write_per_game_panel(&state.game_dir, Some(next));
     }
 }
 
-/// Pin the room dock on `id` in `view` (opening it if closed), the shared body
+/// How long after a ghost jump a further map click is swallowed (SQ-1692) — the same window as
+/// the band's double-click.
+const GHOST_JUMP_GUARD: std::time::Duration = BandClickTracker::WINDOW;
+
+/// Resolve a plain (no-motion) click on the map (SQ-1325): a click on a room pins it, a click on
+/// the pinned room unpins it, a click on empty space unpins. A click on a cross-layer ghost first
+/// jumps to the real room's layer (SQ-1692).
+fn end_map_click(
+    state: &mut AppState,
+    mapper: &Mapper,
+    click: Option<crate::state::MapClick>,
+    now: std::time::Instant,
+) {
+    use crate::state::MapClick;
+    // SQ-1692: a habitual double-click on a ghost must not undo the jump. The recentre moved the
+    // room from under the cursor, so inside the window the second click would unpin or select
+    // whatever is there now; it is swallowed instead.
+    if let Some(t) = state.last_ghost_jump.take() {
+        if click.is_some() && now.duration_since(t) < GHOST_JUMP_GUARD {
+            return;
+        }
+    }
+    match click {
+        Some(MapClick::Room(id)) => {
+            // SQ-1692: a cross-layer GHOST's rect carries the REAL room's id, so a room whose
+            // layer is not the one on screen can only be a ghost. Follow it: show its layer,
+            // pin the real room, centre on it. The pin below then runs as for any room.
+            let jumped = follow_to_room_layer(state, &mapper.graph, id);
+            if jumped {
+                state.last_ghost_jump = Some(now);
+                let view = state.room_dock_view;
+                pin_room_dock(state, mapper, id, view);
+            } else if state.selected_room == Some(id) {
+                state.selected_room = None;
+                state.room_path.clear();
+            } else {
+                let view = state.room_dock_view;
+                pin_room_dock(state, mapper, id, view);
+            }
+        }
+        Some(MapClick::Empty) => {
+            state.selected_room = None;
+            state.room_path.clear();
+        }
+        None => {}
+    }
+}
+
+/// SQ-1692: when `id` lives on a layer other than the one being drawn (so the click that
+/// reached it landed on a cross-layer ghost), switch the view to that layer and centre on the
+/// room, reusing the layer-switch recentre. Returns whether a jump happened.
+fn follow_to_room_layer(
+    state: &mut AppState,
+    graph: &mapper::graph::MapGraph,
+    id: mapper::graph::RoomId,
+) -> bool {
+    if graph.room(id).is_none() {
+        return false;
+    }
+    let layer = graph.layer_of(id);
+    if layer == state.active_layer(graph) {
+        return false;
+    }
+    state.set_viewed_layer(Some(layer));
+    recenter_for_active_layer(state, graph);
+    if graph.layer_view(layer) != mapper::layer::MapView::Matrix {
+        if let Some(pos) = graph.room(id).and_then(|r| r.pos) {
+            let (pw, ph) = state.map_pane_size.get().unwrap_or((80, 24));
+            state.recenter_on(pos, pw, ph);
+        }
+    }
+    true
+}
+
+/// Pin the Room tab on `id` in `view`, the shared body
 /// of both `Action::PinRoomDock` (left click) and `Action::OpenRoomMenu`
 /// (right click, SQ-1265) — the two gestures pin the same way, so the panel
 /// and whichever popup opened over it always agree on which room is meant.
@@ -2163,7 +2313,11 @@ fn pin_room_dock(
     // Pinning IS selecting (SQ-0692): one fact drives the map highlight, the
     // matrix cross-highlight and the dock header, so they cannot drift apart.
     state.selected_room = Some(id);
-    state.open_room_dock(view);
+    // The Journal does NOT switch to the Room tab (SQ-1684): this runs from a
+    // click on the MAP, and a click that replaced the map with a text panel
+    // would hide the thing being pointed at. The pin is there when the Room
+    // tab is next opened.
+    state.room_dock_view = view;
     // Focus deliberately STAYS on the story pane. Taking map focus made every
     // letter a map command (so typing reached nothing) and dimmed the story
     // pane on top of that. The selected-room highlight does not need focus —
@@ -2342,6 +2496,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         Action::CursorToClick(col, row) => {
             if let Some(idx) = state.input_click_index(col, row) {
                 state.input.cursor = idx;
+                // Clicking the story pane gives the keyboard back to the story.
+                if state.focus == Focus::Hints {
+                    state.focus = Focus::Game;
+                }
             }
         }
         Action::ZoomIn => state.zoom_in(),
@@ -2632,7 +2790,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // which is the reading you want most of the time and the one the old
             // `/toggle-inspector` could not give you at all.
             use crate::state::RoomDockView;
-            if state.room_dock.open {
+            if state.journal_tab == crate::journal::JournalTab::Room {
                 state.room_dock_view = state.room_dock_view.flipped();
             } else {
                 state.open_room_dock(RoomDockView::Diagnostics);
@@ -2709,6 +2867,29 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // left untouched, so closing restores it unchanged.
             state.overlays.hotkey_dialog = false;
             state.overlays.palette = Some(crate::state::PaletteState::new(from_hotkey));
+        }
+
+        Action::DocumentsKey(code) => {
+            let anim = state.config.animation.clone();
+            if let Some(ds) = state.overlays.documents.as_mut() {
+                if ds.on_key(code, &anim) == crate::documents_chooser::KeyOutcome::Close {
+                    state.overlays.documents = None;
+                }
+            }
+        }
+        Action::DocumentsClick(col, row) => {
+            if let Some(ds) = state.overlays.documents.as_mut() {
+                let pos = ratatui::layout::Position { x: col, y: row };
+                if ds.on_click_at(pos) == crate::documents_chooser::KeyOutcome::Close {
+                    state.overlays.documents = None;
+                }
+            }
+        }
+        Action::DocumentsWheel(delta) => {
+            let anim = state.config.animation.clone();
+            if let Some(ds) = state.overlays.documents.as_mut() {
+                ds.chooser.on_wheel(delta, &anim);
+            }
         }
 
         Action::PaletteNav(delta) => {
@@ -3007,15 +3188,6 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             scroll.scroll_by(delta as isize, vp, &anim);
         }
 
-        Action::ToggleRoomDock => {
-            use crate::state::RoomDockView;
-            if state.room_dock.open {
-                state.close_room_dock();
-            } else {
-                state.open_room_dock(RoomDockView::Info);
-            }
-        }
-
         // ── Room context menu (SQ-1265) ───────────────────────────────────────
 
         Action::OpenRoomMenu(id, col, row) => {
@@ -3075,23 +3247,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         // set, so this is a no-op for both.
         Action::EndDragPan => {
             let click = state.drag.take().filter(|d| !d.moved).and_then(|d| d.map_click);
-            match click {
-                Some(crate::state::MapClick::Room(id))
-                    if state.room_dock.open && state.selected_room == Some(id) =>
-                {
-                    state.selected_room = None;
-                    state.room_path.clear();
-                }
-                Some(crate::state::MapClick::Room(id)) => {
-                    let view = state.room_dock_view;
-                    pin_room_dock(state, mapper, id, view);
-                }
-                Some(crate::state::MapClick::Empty) => {
-                    state.selected_room = None;
-                    state.room_path.clear();
-                }
-                None => {}
-            }
+            end_map_click(state, mapper, click, std::time::Instant::now());
         }
 
         Action::StartSelection(col, row) => {
@@ -3144,25 +3300,30 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             state.scroll_transcript_to(target);
         }
 
-        Action::ToggleInventory => {
-            let opening = !state.show_inventory;
-            // Mutually exclusive with the command panel (SQ-1237): opening the
-            // inventory panel closes the command panel, exactly as `cycle_panel`
-            // does when it lands on `Inventory`.
-            if opening {
-                open_command_band(state, mapper, false);
+        // ── Documents tab (SQ-1681) ───────────────────────────────────────────
+        Action::DocTabOpen(idx) => {
+            state.set_journal_tab(crate::journal::JournalTab::Documents);
+            crate::documents_tab::open_selected(state, idx, false);
+        }
+        Action::DocTabClose => crate::documents_tab::close_viewer(state),
+        Action::DocTabSelect(n) => state.documents_tab.select(n as isize),
+        Action::DocTabScroll(n) => state.documents_tab.scroll(n as isize),
+        Action::DocTabPage(d) => state.documents_tab.scroll_page(d),
+        Action::DocTabClickRow(idx) => {
+            if state.documents_tab.click_row(idx, std::time::Instant::now()) {
+                crate::documents_tab::open_selected(state, Some(idx), false);
             }
-            open_inventory_panel(state, opening);
-            // Persist per-game, the same rule `Action::OpenCommandBand` follows
-            // below — a preference chosen for one story stays with that story.
-            if !state.game_dir.as_os_str().is_empty() {
-                let next = if opening {
-                    crate::state::SidePanel::Inventory
-                } else {
-                    crate::state::SidePanel::None
-                };
-                let _ = crate::styles::write_per_game_panel(&state.game_dir, Some(next));
-            }
+        }
+        Action::DocTabOpenLink(url) => crate::opener::open(&url),
+
+        Action::SetJournalTab(tab) => {
+            state.set_journal_tab(tab);            persist_journal_tab(state);
+        }
+
+        Action::JournalStepTab(forward) => {
+            let next = if forward { state.journal_tab.next() } else { state.journal_tab.prev() };
+            state.set_journal_tab(next);
+            persist_journal_tab(state);
         }
 
         Action::OpenCommandBand => {
@@ -3172,10 +3333,6 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // not the slide has settled), the SAME key/command closes it —
             // Esc's ladder must never be the only one-key way out.
             let open = !(state.overlays.command_band.is_some() && state.band_dock.open);
-            // Mutually exclusive with the inventory panel (SQ-1237).
-            if open {
-                open_inventory_panel(state, false);
-            }
             open_command_band(state, mapper, open);
             // Persist the panel's state per-game so it is restored the next
             // time this story opens (SQ-1123) — the same rule `Action::ToggleMap`
@@ -3304,6 +3461,21 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             }
         }
 
+        // SQ-1630: the wheel scrolls the dock's one body. `len()` re-records the
+        // viewport the last render measured (`inv_dock_body_viewport`, synced the
+        // same way `room_dock_body_viewport` is) before `scroll_by` clamps
+        // against it — the same two-step `RoomDockScroll` takes.
+        Action::InventoryDockScroll(delta) => {
+            let vp = state.inv_dock_body_viewport as usize;
+            let anim = state.config.animation.clone();
+            state.inv_dock_scroll.scroll_by(delta as isize, vp, &anim);
+        }
+
+        Action::SetInventoryFilter(query) => {
+            state.inv_dock_filter = query;
+            state.inv_dock_scroll = crate::list_scroll::ListScroll::new();
+        }
+
         Action::BandEscape => {
             // Two rungs (SQ-0677): clear an EXPLICIT row highlight, then
             // close. This ladder MUST terminate — a bug fixed alongside this
@@ -3364,10 +3536,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             const STEP: u16 = 3;
             // The limits are shared with the mouse drag (SQ-0669) so the two
             // ways of moving a boundary agree about its range.
-            use crate::layout::{
-                MAX_INV_DOCK_PCT, MAX_ROOM_DOCK_PCT, MAX_SPLIT_PCT, MIN_INV_DOCK_PCT,
-                MIN_ROOM_DOCK_PCT, MIN_SPLIT_PCT,
-            };
+            use crate::layout::{MAX_SPLIT_PCT, MIN_SPLIT_PCT};
             use ResizeNavKind::*;
             match state.resize_target {
                 crate::state::ResizeTarget::StoryMap => match dir {
@@ -3375,22 +3544,8 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                     Right => state.pane_sizes.split_ratio = (state.pane_sizes.split_ratio + STEP).min(MAX_SPLIT_PCT),
                     _ => {}
                 },
-                crate::state::ResizeTarget::InvDock => match dir {
-                    Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(MAX_INV_DOCK_PCT),
-                    Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(MIN_INV_DOCK_PCT),
-                    _ => {}
-                },
-                // The room dock grows upward out of the map pane, sized as a
-                // percentage of the frame exactly like the inventory dock — the
-                // map's own floor is enforced at layout time, where the pane's
-                // real height is known (SQ-0692).
-                crate::state::ResizeTarget::RoomDock => match dir {
-                    Up => state.pane_sizes.room_dock_pct = (state.pane_sizes.room_dock_pct + STEP).min(MAX_ROOM_DOCK_PCT),
-                    Down => state.pane_sizes.room_dock_pct = state.pane_sizes.room_dock_pct.saturating_sub(STEP).max(MIN_ROOM_DOCK_PCT),
-                    _ => {}
-                },
                 // The command band is a bottom band now (SQ-0664), so it resizes
-                // by ROWS like the inventory dock: Up grows, Down shrinks. The
+                // by ROWS: Up grows, Down shrinks. The
                 // value is rows, not a percentage — `band_target_height` still
                 // clamps it against the screen at layout time.
                 crate::state::ResizeTarget::CommandBand => {
@@ -3737,19 +3892,15 @@ pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engi
         let mut out: Vec<String> = Vec::new();
         let mut things: Vec<String> = Vec::new();
         for w in tokens.iter().rev() {
-            let w = w.to_lowercase();
-            if !w.chars().any(char::is_alphanumeric) {
-                continue;
-            }
+            let knows = |x: &str| engine.knows_word(x).unwrap_or_else(|| vocab.is_some_and(|v| v.knows(x)));
+            let Some(w) = crate::complete::story_word(w, &knows) else { continue };
             if out.contains(&w) {
                 continue;
             }
-            if engine.knows_word(&w).unwrap_or_else(|| vocab.is_some_and(|v| v.knows(&w))) {
-                if is_thing(&w) {
-                    things.push(w.clone());
-                }
-                out.push(w);
+            if is_thing(&w) {
+                things.push(w.clone());
             }
+            out.push(w);
         }
         (out, things)
     };
@@ -3958,10 +4109,13 @@ pub fn apply_paste(state: &mut AppState, text: &str) -> bool {
     {
         return false;
     }
-    // Hints panel: its own line buffer, ahead of the palette in the ladder.
-    if let Some(hs) = state.overlays.hints.as_mut() {
-        hs.input.push_str(&text);
-        return true;
+    // Hints tab: while it holds the keyboard, a paste lands in its input row
+    // (SQ-1685), ahead of the palette in the ladder.
+    if state.hints_have_keyboard() {
+        if let Some(hs) = state.overlays.hints.as_mut() {
+            hs.input.push_str(&text);
+            return true;
+        }
     }
     let vp = state.modal_list_viewport;
     let anim = state.config.animation.clone();
@@ -5296,7 +5450,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenCommandBand));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::TogglePortalLabels));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::SetJournalTab(crate::journal::JournalTab::Inventory)));
         // 'u' fires the map view-mode cycle (SQ-0666, inheriting SQ-0391's freed letter);
         // 'x' (reset-game's old letter) is still unbound.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ViewMap(None)));
@@ -5402,34 +5556,46 @@ mod tests {
     }
 
     /// SQ-0692: the old single-rung "Esc closes the room panel" became a LADDER,
-    /// because the dock has two states worth leaving. Esc unpins first (the dock
-    /// stays up, following the player again) and closes it on the next press; with
-    /// the dock down it is not Esc's business at all.
+    /// because the panel has two states worth leaving. Esc unpins first (the Room
+    /// tab stays up, following the player again) and leaves the tab on the next
+    /// press; with the Room tab down and nothing pinned it is not Esc's business
+    /// at all (SQ-1684 keeps the ladder, the dock having become a Journal tab).
     #[test]
-    fn esc_unpins_the_room_dock_then_closes_it() {
+    fn esc_unpins_the_room_tab_then_leaves_it() {
         let mut s = AppState::default();
-        s.room_dock.toggle_to(true, true);
+        s.set_journal_tab(crate::journal::JournalTab::Room);
         s.selected_room = Some(1);
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::UnpinRoomDock),
-            "Esc with a pinned dock unpins first");
+            "Esc with a pinned room unpins first");
         // q is not a close key (and never was, since the panels stopped being modals).
         assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))),
             Action::UnpinRoomDock | Action::CloseRoomDock),
-            "q must not touch the dock");
+            "q must not touch the panel");
 
         s.selected_room = None;
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomDock),
-            "Esc with an unpinned dock closes it");
+            "Esc with an unpinned Room tab goes back to the Map tab");
 
-        s.room_dock.toggle_to(false, true);
+        s.journal_tab = crate::journal::JournalTab::Map;
         assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)),
             Action::UnpinRoomDock | Action::CloseRoomDock),
-            "Esc with no dock open must not produce a dock action");
+            "Esc with nothing pinned on the Map tab must not produce a panel action");
+
+        // A pin made from the Map tab (a click on a room) still gets Esc's first rung.
+        s.selected_room = Some(2);
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::UnpinRoomDock));
+
+        // Esc never pulls you off the Inventory tab.
+        s.selected_room = None;
+        s.journal_tab = crate::journal::JournalTab::Inventory;
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)),
+            Action::UnpinRoomDock | Action::CloseRoomDock));
     }
 
     /// The ladder's rungs actually do what they say when applied.
     #[test]
-    fn the_esc_ladder_leaves_the_dock_up_until_the_second_press() {
+    fn the_esc_ladder_leaves_the_room_tab_up_until_the_second_press() {
+        use crate::journal::JournalTab;
         let mut s = AppState::default();
         let mut m = Mapper::default();
         s.open_room_dock(crate::state::RoomDockView::Info);
@@ -5437,10 +5603,10 @@ mod tests {
 
         apply_action(Action::UnpinRoomDock, &mut s, &mut m);
         assert_eq!(s.selected_room, None, "first Esc unpins");
-        assert!(s.room_dock.open, "…and leaves the dock up");
+        assert_eq!(s.journal_tab, JournalTab::Room, "…and leaves the Room tab up");
 
         apply_action(Action::CloseRoomDock, &mut s, &mut m);
-        assert!(!s.room_dock.open, "the second Esc closes it");
+        assert_eq!(s.journal_tab, JournalTab::Map, "the second Esc returns to the Map tab");
     }
 
     #[test]
@@ -6357,7 +6523,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
         // Returns the action when dialog is open.
         s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::SetJournalTab(crate::journal::JournalTab::Inventory)));
     }
 
     #[test]
@@ -6372,21 +6538,22 @@ mod tests {
     /// old command's worst property: the reading you usually want is of the room
     /// you are standing in, which it could never give you.
     #[test]
-    fn toggle_inspector_opens_the_dock_in_diagnostics_then_flips_views() {
+    fn toggle_inspector_opens_the_room_tab_in_diagnostics_then_flips_views() {
+        use crate::journal::JournalTab;
         use crate::state::RoomDockView;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(!s.room_dock.open, "the dock starts closed");
+        assert_eq!(s.journal_tab, JournalTab::Map, "the Journal starts on the Map tab");
 
         // No selection needed: it opens on the followed room.
         apply_action(Action::ToggleRoomDiagnostics, &mut s, &mut m);
-        assert!(s.room_dock.open, "a closed dock opens");
+        assert_eq!(s.journal_tab, JournalTab::Room, "another tab switches to the Room tab");
         assert_eq!(s.room_dock_view, RoomDockView::Diagnostics, "…onto the diagnostics body");
         assert_eq!(s.selected_room, None, "and does not pin anything");
 
         // Again with the dock open: flip to Info…
         apply_action(Action::ToggleRoomDiagnostics, &mut s, &mut m);
-        assert!(s.room_dock.open, "the dock stays up — this flips views, it does not close");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Room, "the tab stays up — this flips views, it does not leave");
         assert_eq!(s.room_dock_view, RoomDockView::Info);
 
         // …and back.
@@ -6394,20 +6561,49 @@ mod tests {
         assert_eq!(s.room_dock_view, RoomDockView::Diagnostics);
     }
 
-    /// `toggle-room-panel` is the primary open/close command, and it opens on Info.
+    /// `journal-tab room` selects the Room tab (the old `toggle-room-panel`'s
+    /// successor); it is idempotent, and `journal-tab map` returns to the map.
     #[test]
-    fn toggle_room_dock_opens_on_info_and_closes() {
-        use crate::state::RoomDockView;
+    fn journal_tab_room_shows_the_room_tab_and_map_returns() {
+        use crate::journal::JournalTab;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.room_dock_view = RoomDockView::Diagnostics; // a stale view from last time
 
-        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
-        assert!(s.room_dock.open);
-        assert_eq!(s.room_dock_view, RoomDockView::Info, "the primary toggle opens on Info");
+        apply_action(Action::SetJournalTab(JournalTab::Room), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Room);
+        apply_action(Action::SetJournalTab(JournalTab::Room), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Room, "selecting the tab you are on does not toggle it off");
 
-        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
-        assert!(!s.room_dock.open, "and the same command closes it");
+        apply_action(Action::SetJournalTab(JournalTab::Map), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Map);
+    }
+
+    /// The slash command parses a tab name, rejects anything else, and the step
+    /// commands wrap in both directions.
+    #[test]
+    fn journal_commands_parse_and_step_with_wraparound() {
+        use crate::journal::JournalTab;
+        use crate::slash::{parse_in_context, SlashOutcome};
+        let parse = |line: &str| parse_in_context(line, '/', Context::Global);
+        assert!(matches!(
+            parse("journal-tab inventory"),
+            SlashOutcome::Action(Action::SetJournalTab(JournalTab::Inventory))
+        ));
+        assert!(matches!(
+            parse("journal-tab documents"),
+            SlashOutcome::Action(Action::SetJournalTab(JournalTab::Documents))
+        ));
+        assert!(matches!(parse("journal-tab nope"), SlashOutcome::Error(_)));
+        assert!(matches!(parse("journal-tab"), SlashOutcome::Error(_)));
+
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::JournalStepTab(false), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Documents, "back from Map wraps to the last tab");
+        apply_action(Action::JournalStepTab(true), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Map, "forward from the last tab wraps to Map");
+        apply_action(Action::JournalStepTab(true), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Room);
     }
 
     /// The dock is NOT an overlay (SQ-0692). It reserves its own rows instead of
@@ -6415,11 +6611,11 @@ mod tests {
     /// anything else gated on `any_overlay_open` — which counting the old room
     /// panel there did.
     #[test]
-    fn the_open_room_dock_is_not_an_overlay() {
+    fn the_room_tab_is_not_an_overlay() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
-        assert!(s.room_dock.open);
+        apply_action(Action::SetJournalTab(crate::journal::JournalTab::Room), &mut s, &mut m);
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Room);
         assert!(!s.any_overlay_open(), "an open room panel is not an overlay");
         assert!(!s.any_modal_overlay_open(), "…and certainly not a modal one");
 
@@ -6435,7 +6631,11 @@ mod tests {
         let mut m = Mapper::default();
 
         apply_action(Action::PinRoomDock(5, RoomDockView::Info), &mut s, &mut m);
-        assert!(s.room_dock.open, "pinning opens a closed dock");
+        assert_eq!(
+            s.journal_tab,
+            crate::journal::JournalTab::Map,
+            "pinning (a click on the map) must not replace the map with the Room tab"
+        );
         assert_eq!(s.selected_room, Some(5), "pin state IS the selection");
         assert!(s.room_dock_pinned());
         assert_eq!(s.room_dock_view, RoomDockView::Info);
@@ -6447,7 +6647,7 @@ mod tests {
         apply_action(Action::UnpinRoomDock, &mut s, &mut m);
         assert_eq!(s.selected_room, None, "unpinned: the dock follows the player again");
         assert!(!s.room_dock_pinned());
-        assert!(s.room_dock.open, "…but stays up");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Map, "…and the tab is untouched");
     }
 
     // ── Equivalence guard for the KeyMap refactor ──────────────────────────────
@@ -6538,7 +6738,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::SetJournalTab(crate::journal::JournalTab::Inventory)));
         // 'q' is deliberately unassigned → it closes the dialog (quit convention).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
         s.overlays.hotkey_dialog = false;
@@ -6966,7 +7166,7 @@ mod tests {
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
         // toggle-inventory-panel fires too (SQ-0446 gave 'i' to inventory).
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::SetJournalTab(crate::journal::JournalTab::Inventory)));
     }
 
     #[test]
@@ -7485,6 +7685,79 @@ mod tests {
         assert_eq!(sc.selected, 2, "…under a cursor that stayed put");
     }
 
+    /// SQ-1692: clicking a cross-layer ghost (its rect carries the REAL room's id) switches the
+    /// map to that room's layer and pins the real room; Esc
+    /// unpins; a click on a room of the viewed layer is unchanged.
+    #[test]
+    fn clicking_a_ghost_jumps_to_the_real_rooms_layer() {
+        use crate::journal::JournalTab;
+        use crate::state::MapClick;
+        use std::time::Instant;
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let mut s = AppState::default();
+        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m); // Cellar -> L1
+        let cellar = m.graph.layer_of(2);
+        m.observe(1, "Hall", Some(Direction::Up));
+        assert_ne!(cellar, mapper::layer::MAIN_LAYER);
+        let t0 = Instant::now();
+
+        // Premise: Main draws a ghost for room 2 (the thing the click lands on).
+        let rm = mapper::render::render_layer(&m.graph, mapper::layer::MAIN_LAYER);
+        assert!(rm.rooms.iter().any(|r| r.id == 2 && r.ghost.as_ref().is_some_and(|g| g.layer == cellar)));
+        s.set_viewed_layer(None); // MoveRegion left the view on the new layer
+        assert_eq!(s.active_layer(&m.graph), mapper::layer::MAIN_LAYER);
+
+        // Single click on the ghost.
+        end_map_click(&mut s, &m, Some(MapClick::Room(2)), t0);
+        assert_eq!(s.active_layer(&m.graph), cellar, "the view followed the room's layer");
+        assert_eq!(s.selected_room, Some(2), "the REAL room is pinned");
+        assert_eq!(s.journal_tab, JournalTab::Map);
+
+        // Esc unpins as usual.
+        apply_action(Action::UnpinRoomDock, &mut s, &mut m);
+        assert_eq!(s.selected_room, None);
+
+        // A real room on the viewed layer: no layer change, pins as before.
+        let mut s = AppState::default();
+        end_map_click(&mut s, &m, Some(MapClick::Room(1)), t0);
+        assert_eq!(s.active_layer(&m.graph), mapper::layer::MAIN_LAYER);
+        assert_eq!(s.selected_room, Some(1));
+        assert_eq!(s.viewed_layer, None, "no override set by an ordinary click");
+    }
+
+    /// SQ-1692: after a ghost jump the room is no longer under the cursor, so a second click at
+    /// the same screen spot (now empty space) inside the window is swallowed; after the window it
+    /// behaves normally (empty space unpins).
+    #[test]
+    fn second_click_after_a_ghost_jump_is_swallowed() {
+        use crate::journal::JournalTab;
+        use crate::state::MapClick;
+        use std::time::{Duration, Instant};
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let mut s0 = AppState::default();
+        apply_action(Action::MoveRegion("new".into()), &mut s0, &mut m);
+        let cellar = m.graph.layer_of(2);
+        m.observe(1, "Hall", Some(Direction::Up));
+        let t0 = Instant::now();
+
+        let mut s = AppState::default();
+        end_map_click(&mut s, &m, Some(MapClick::Room(2)), t0);
+        end_map_click(&mut s, &m, Some(MapClick::Empty), t0 + Duration::from_millis(200));
+        assert_eq!(s.selected_room, Some(2), "the REAL room stays pinned");
+        assert_eq!(m.graph.layer_of(s.selected_room.unwrap()), s.active_layer(&m.graph));
+        assert_eq!(s.active_layer(&m.graph), cellar);
+        assert_eq!(s.journal_tab, JournalTab::Map, "no Room-tab switch for a ghost");
+
+        let mut s = AppState::default();
+        end_map_click(&mut s, &m, Some(MapClick::Room(2)), t0);
+        end_map_click(&mut s, &m, Some(MapClick::Empty), t0 + Duration::from_millis(900));
+        assert_eq!(s.selected_room, None, "after the window an empty click unpins");
+    }
+
     /// SQ-0692: a left-click on a room used to open a floating Room Info popup.
     /// It now PINS the room dock to that room — opening the dock if it was closed
     /// — which is the same gesture with a panel that does not cover the map.
@@ -7519,7 +7792,7 @@ mod tests {
         let mut s = AppState::default();
         s.zoom = Zoom::Compact; // step = (12, 5)
         s.scroll = (0, 0);
-        assert!(!s.room_dock.open, "the dock starts closed");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Map, "the Journal starts on the Map");
         assert_eq!(s.room_dock_view, RoomDockView::Info, "the default view");
 
         // Room 1 at cell (0,0). Build room_rects using render pipeline.
@@ -7536,7 +7809,7 @@ mod tests {
         // Click at (0,0) which is inside the Compact box (8x3) — Down then Up,
         // no motion, resolves to the same pin the old immediate click gave.
         press_release(&mut s, &rects, 0, 0);
-        assert!(s.room_dock.open, "a plain click opens the dock, pinned");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Map, "a plain click pins without leaving the map");
         assert_eq!(s.selected_room, Some(1));
 
         // SQ-1265: with Diagnostics showing (switched some other way — a tab
@@ -7578,7 +7851,7 @@ mod tests {
 
         assert_eq!(s.selected_room, Some(2), "the right-click pins the dock");
         assert_eq!(s.room_dock_view, RoomDockView::Info, "…keeping the current (default) view");
-        assert!(s.room_dock.open, "…opening it if it was closed");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Map, "…without leaving the map the menu is anchored on");
         let menu = s.overlays.room_menu.expect("the menu is open");
         assert_eq!(menu.room, 2);
         assert_eq!(menu.anchor, (0, 0));
@@ -7983,7 +8256,7 @@ mod tests {
         // ActivatePane(Game) sets game focus and leaves the dock exactly as it was.
         apply_action(Action::ActivatePane(Focus::Game), &mut s, &mut m);
         assert_eq!(s.focus, Focus::Game, "ActivatePane(Game) must set focus to Game");
-        assert!(s.room_dock.open, "ActivatePane must NOT close the room panel");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Room, "ActivatePane must NOT leave the Room tab");
         assert_eq!(s.selected_room, Some(1), "…nor unpin it");
         assert_eq!(s.room_dock_view, crate::state::RoomDockView::Diagnostics, "…nor change its view");
 
@@ -8233,7 +8506,7 @@ mod tests {
         let up = mouse_event(MouseEventKind::Up(MouseButton::Left), 6, 3, KeyModifiers::NONE);
         apply_action(mouse_to_action(&s, up, map_rect(), story_rect(), &rects, &None), &mut s, &mut m);
         assert_eq!(s.selected_room, None, "the room under the original press is never pinned once the pointer moved");
-        assert!(!s.room_dock.open, "…nor does the dock open");
+        assert_eq!(s.journal_tab, crate::journal::JournalTab::Map, "…nor does the Journal change tab");
     }
 
     /// The drag-to-pan gesture is zoom-agnostic (SQ-1325): `char_pan` is a raw
@@ -8542,7 +8815,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&game_dir);
     }
 
-    // ── SQ-1237: the three-state panel cycle ─────────────────────────────────
+    // ── SQ-1237: the panel cycle ─────────────────────────────────
 
     fn cycle_panel_game_dir(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -8554,13 +8827,12 @@ mod tests {
         dir
     }
 
-    /// Command → Inventory → None → Command, driven entirely by
-    /// `Action::CyclePanel` (what a click on the border control runs). Each
-    /// step is asserted, not just the round trip, so a cycle that skips a state
-    /// (e.g. Command → None directly) would fail here even though it returns to
-    /// Command eventually.
+    /// Command → None → Command, driven entirely by `Action::CyclePanel` (what a
+    /// click on the border control runs). The inventory stop SQ-1237 added left
+    /// the cycle when the inventory became a Journal tab (SQ-1684). Each step is
+    /// asserted, not just the round trip.
     #[test]
-    fn cycle_panel_visits_command_then_inventory_then_none_then_command() {
+    fn cycle_panel_visits_command_then_none_then_command() {
         use crate::state::{AppState, SidePanel};
         let mut s = AppState::default();
         let mut m = Mapper::default();
@@ -8570,68 +8842,34 @@ mod tests {
         assert_eq!(s.current_side_panel(), SidePanel::Command);
 
         apply_action(Action::CyclePanel, &mut s, &mut m);
-        assert_eq!(s.current_side_panel(), SidePanel::Inventory);
-
-        apply_action(Action::CyclePanel, &mut s, &mut m);
         assert_eq!(s.current_side_panel(), SidePanel::None);
 
         apply_action(Action::CyclePanel, &mut s, &mut m);
         assert_eq!(s.current_side_panel(), SidePanel::Command, "the cycle wraps");
     }
 
-    /// Falsifies the mutual-exclusion rule: reverting `cycle_panel` to a version
-    /// that does not close the panel it is leaving would show this test a
-    /// command band still open once the cycle reaches Inventory — which is
-    /// exactly what "the two are never open at once" means. Checked at every
-    /// step, not just the one transition, since a bug could plausibly appear on
-    /// either edge.
+    /// The command panel and the Journal's Inventory tab are independent: the
+    /// panel cycle neither shows nor hides a tab, and a tab switch leaves the
+    /// panel alone.
     #[test]
-    fn the_two_panels_are_never_open_at_once() {
-        use crate::state::AppState;
-        let mut s = AppState::default();
-        let mut m = Mapper::default();
-        for _ in 0..6 {
-            apply_action(Action::CyclePanel, &mut s, &mut m);
-            // The band's TARGET (`band_dock.open`), not `command_band_visible()`
-            // — the latter stays true through a close's slide-out by design
-            // (the drawer's content persists so it can animate away, trimmed
-            // only once `settle_command_band` runs on a later tick), which is
-            // right for "should this still be drawn this frame" and wrong for
-            // "did the cycle actually leave the command panel". The two panels
-            // occupy different regions on screen anyway (the command panel
-            // below the story pane, the inventory panel carved from the map
-            // pane), so this is about state exclusivity, not a visual overlap.
-            assert!(
-                !(s.band_dock.open && s.show_inventory),
-                "both panels open at once after a cycle step",
-            );
-        }
-    }
-
-    /// `Action::ToggleInventory` and `Action::OpenCommandBand` also close the
-    /// OTHER panel when they open theirs — not only `cycle_panel` — since a
-    /// player can reach either panel directly (leader key, slash command) as
-    /// well as through the border control's cycle.
-    #[test]
-    fn opening_either_panel_directly_closes_the_other() {
+    fn the_command_panel_and_the_journal_tab_do_not_interact() {
+        use crate::journal::JournalTab;
         use crate::state::AppState;
         let mut s = AppState::default();
         let mut m = Mapper::default();
 
         apply_action(Action::OpenCommandBand, &mut s, &mut m);
         assert!(s.band_dock.open);
-        apply_action(Action::ToggleInventory, &mut s, &mut m);
-        assert!(s.show_inventory, "inventory opened");
-        assert!(!s.band_dock.open, "…and closed the command panel");
+        apply_action(Action::SetJournalTab(JournalTab::Inventory), &mut s, &mut m);
+        assert_eq!(s.journal_tab, JournalTab::Inventory);
+        assert!(s.band_dock.open, "switching tab leaves the command panel open");
 
-        apply_action(Action::OpenCommandBand, &mut s, &mut m);
-        assert!(s.band_dock.open, "command panel opened");
-        assert!(!s.show_inventory, "…and closed the inventory panel");
+        apply_action(Action::CyclePanel, &mut s, &mut m);
+        assert!(!s.band_dock.open, "the cycle closes the command panel");
+        assert_eq!(s.journal_tab, JournalTab::Inventory, "…and leaves the tab alone");
     }
 
-    /// The three-state value round-trips through the SAME per-game sidecar
-    /// mechanism the command band's on/off state already used (SQ-1123) — no
-    /// second persistence path was added for the inventory panel.
+    /// The panel state round-trips through the per-game sidecar (SQ-1123).
     #[test]
     fn cycle_panel_persists_the_new_state_to_game_dir() {
         use crate::state::{AppState, SidePanel};
@@ -8644,19 +8882,38 @@ mod tests {
         assert_eq!(crate::styles::read_per_game_panel(&game_dir), Some(SidePanel::Command));
 
         apply_action(Action::CyclePanel, &mut s, &mut m);
-        assert_eq!(crate::styles::read_per_game_panel(&game_dir), Some(SidePanel::Inventory));
-
-        apply_action(Action::CyclePanel, &mut s, &mut m);
         assert_eq!(crate::styles::read_per_game_panel(&game_dir), Some(SidePanel::None));
 
         let _ = std::fs::remove_dir_all(&game_dir);
     }
 
-    /// Each of the three states draws its own glyph and its own tooltip line —
-    /// falsified by reverting the border control to a plain two-way toggle,
-    /// which would make the Inventory-state glyph equal the Command-state glyph
-    /// (both would read `band_hide`) and the hint text would still say
-    /// Command Panel for a panel that is actually the inventory one.
+    /// The Journal's active tab persists per story through the SAME sidecar
+    /// (SQ-1684), and stepping persists too — the sidecar tracks the tab, not
+    /// the action that chose it.
+    #[test]
+    fn the_journal_tab_persists_to_the_game_dir_and_survives_a_sibling_write() {
+        use crate::journal::JournalTab;
+        use crate::state::AppState;
+        let game_dir = cycle_panel_game_dir("journal-tab");
+        let mut s = AppState::default();
+        s.game_dir = game_dir.clone();
+        let mut m = Mapper::default();
+        assert_eq!(crate::styles::read_per_game_journal_tab(&game_dir), None, "no sidecar yet");
+
+        apply_action(Action::SetJournalTab(JournalTab::Inventory), &mut s, &mut m);
+        assert_eq!(crate::styles::read_per_game_journal_tab(&game_dir), Some(JournalTab::Inventory));
+
+        apply_action(Action::JournalStepTab(false), &mut s, &mut m);
+        assert_eq!(crate::styles::read_per_game_journal_tab(&game_dir), Some(JournalTab::Room));
+
+        // A panel write (same file) keeps it.
+        apply_action(Action::CyclePanel, &mut s, &mut m);
+        assert_eq!(crate::styles::read_per_game_journal_tab(&game_dir), Some(JournalTab::Room));
+
+        let _ = std::fs::remove_dir_all(&game_dir);
+    }
+
+    /// Each of the two panel states draws its own glyph and its own tooltip line.
     #[test]
     fn each_panel_state_draws_its_own_glyph_and_tooltip() {
         use crate::render::controls::{controls_for, BorderControl};
@@ -8678,15 +8935,7 @@ mod tests {
         let command = find(&s);
         assert!(command.hint[0].to_lowercase().contains("command panel"), "{:?}", command.hint);
 
-        apply_action(Action::CyclePanel, &mut s, &mut m);
-        let inventory = find(&s);
-        assert!(inventory.hint[0].to_lowercase().contains("inventory panel"), "{:?}", inventory.hint);
-
-        // Three states, three distinct glyphs — not merely three distinct hints
-        // over the same shape.
         assert_ne!(none.glyph, command.glyph);
-        assert_ne!(command.glyph, inventory.glyph);
-        assert_ne!(none.glyph, inventory.glyph);
     }
 
     // ── Leaf 2: ResetGame opens the dialog ───────────────────────────────────
@@ -8769,6 +9018,8 @@ mod tests {
                 transcript_elems: Vec::new(),
                 prose_retired: None,
                 declared_exit: None,
+            description: None,
+            items: Vec::new(),
             };
             apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));
@@ -8793,6 +9044,7 @@ mod tests {
         state.suggestion_idx = 0;
         state.transcript.clear();
         state.clear_anchor = None;
+        state.top_anchor = None;
         state.transcript_kinds.clear();
         state.transcript_runs.clear();
         state.transcript_scroll = 0;
@@ -8822,6 +9074,8 @@ mod tests {
                 transcript_elems: Vec::new(),
                 prose_retired: None,
                 declared_exit: None,
+            description: None,
+            items: Vec::new(),
             };
             apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));
@@ -9943,23 +10197,6 @@ mod tests {
     }
 
     #[test]
-    fn resize_nav_up_on_inv_dock_target_raises_inv_dock_pct_clamped_at_80() {
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        s.show_inventory = true;
-        s.resize_mode = true;
-        s.resize_target = crate::state::ResizeTarget::InvDock;
-        assert_eq!(s.pane_sizes.inv_dock_pct, 33);
-        apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.inv_dock_pct, 36);
-        assert_eq!(s.config.inv_dock_pct, 36);
-        for _ in 0..20 {
-            apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
-        }
-        assert_eq!(s.pane_sizes.inv_dock_pct, 80, "clamped at 80");
-    }
-
-    #[test]
     fn resize_reset_restores_defaults_and_mirrors_config() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
@@ -9970,10 +10207,8 @@ mod tests {
         apply_action(Action::ResizeReset, &mut s, &mut mapper);
         assert_eq!(s.pane_sizes.split_ratio, 50);
         assert_eq!(s.pane_sizes.band_height, crate::render::command_band::DEFAULT_BAND_ROWS);
-        assert_eq!(s.pane_sizes.inv_dock_pct, 33);
         assert_eq!(s.config.split_ratio, 50);
         assert_eq!(s.config.command_band.height, crate::render::command_band::DEFAULT_BAND_ROWS);
-        assert_eq!(s.config.inv_dock_pct, 33);
     }
 
     #[test]
@@ -10025,14 +10260,12 @@ mod tests {
         let mut s = AppState::default();
         assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
 
-        s.show_inventory = true;
-        assert_eq!(
-            s.resize_targets_visible(),
-            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::InvDock]
-        );
+        // The inventory is a Journal tab now (SQ-1684), not a resize target: no tab
+        // adds one.
+        s.journal_tab = crate::journal::JournalTab::Inventory;
+        assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
 
         s.layout = crate::state::Layout::TranscriptFull;
-        s.show_inventory = false;
         assert!(s.resize_targets_visible().is_empty());
     }
 
@@ -10040,90 +10273,13 @@ mod tests {
     fn resize_targets_visible_includes_the_band_when_open() {
         // SQ-0238: resize mode preempts the band's key intercept, so the two
         // coexist and the band becomes a resize target while it is open
-        // (appended after StoryMap/InvDock in the Tab-cycle order).
+        // (appended after StoryMap in the Tab-cycle order).
         let mut s = AppState::default();
         open_band(&mut s);
         assert_eq!(
             s.resize_targets_visible(),
             vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::CommandBand]
         );
-
-        s.show_inventory = true;
-        assert_eq!(
-            s.resize_targets_visible(),
-            vec![
-                crate::state::ResizeTarget::StoryMap,
-                crate::state::ResizeTarget::InvDock,
-                crate::state::ResizeTarget::CommandBand,
-            ]
-        );
-    }
-
-    /// SQ-0692: an open room dock joins the Tab cycle — but only where it can
-    /// actually be drawn. It is carved out of the map pane, so a layout with no
-    /// map has no dock edge to move.
-    #[test]
-    fn resize_targets_visible_includes_the_room_dock_only_with_a_map_pane() {
-        use crate::state::ResizeTarget;
-        let mut s = AppState::default();
-        s.room_dock.toggle_to(true, true);
-        assert_eq!(
-            s.resize_targets_visible(),
-            vec![ResizeTarget::StoryMap, ResizeTarget::RoomDock],
-            "an open dock is the last target in the cycle"
-        );
-
-        // Tab cycles into it and wraps back out.
-        s.resize_target = ResizeTarget::StoryMap;
-        s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, ResizeTarget::RoomDock);
-        s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, ResizeTarget::StoryMap, "…and wraps");
-
-        s.layout = crate::state::Layout::TranscriptFull;
-        assert!(
-            !s.resize_targets_visible().contains(&ResizeTarget::RoomDock),
-            "no map pane, no dock edge to drag"
-        );
-
-        s.layout = crate::state::Layout::Split;
-        s.room_dock.toggle_to(false, true);
-        assert!(
-            !s.resize_targets_visible().contains(&ResizeTarget::RoomDock),
-            "a closed dock is not a target"
-        );
-    }
-
-    /// The room dock resizes by percentage of the frame, like the inventory
-    /// dock, and clamps to the shared limits at both ends.
-    #[test]
-    fn resize_nav_adjusts_the_room_dock_pct_and_clamps() {
-        use crate::layout::{MAX_ROOM_DOCK_PCT, MIN_ROOM_DOCK_PCT};
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        s.room_dock.toggle_to(true, true);
-        s.resize_mode = true;
-        s.resize_target = crate::state::ResizeTarget::RoomDock;
-
-        assert_eq!(s.pane_sizes.room_dock_pct, crate::config::default_room_dock_pct());
-        apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.room_dock_pct, 36);
-        assert_eq!(s.config.room_dock_pct, 36, "config mirrors pane_sizes");
-        apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.room_dock_pct, 33);
-
-        for _ in 0..40 {
-            apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
-        }
-        assert_eq!(s.pane_sizes.room_dock_pct, MAX_ROOM_DOCK_PCT, "clamped at the top");
-        for _ in 0..40 {
-            apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
-        }
-        assert_eq!(s.pane_sizes.room_dock_pct, MIN_ROOM_DOCK_PCT, "clamped at the bottom");
-
-        // And `0` (reset) puts it back to the seeded default.
-        apply_action(Action::ResizeReset, &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.room_dock_pct, crate::config::default_room_dock_pct());
     }
 
     /// SQ-0664: the band resizes by ROWS (up grows, down shrinks), replacing
@@ -10157,20 +10313,21 @@ mod tests {
     #[test]
     fn cycle_resize_target_wraps_and_skips_non_visible() {
         let mut s = AppState::default();
-        s.show_inventory = true;
+        open_band(&mut s);
         s.resize_target = crate::state::ResizeTarget::StoryMap;
 
         s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock, "wraps forward");
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::CommandBand, "wraps forward");
         s.cycle_resize_target(true);
         assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap, "wraps forward again");
 
         s.cycle_resize_target(false);
-        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock, "wraps backward");
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::CommandBand, "wraps backward");
 
         // Current target not visible → snaps to the first visible one.
-        s.show_inventory = false;
-        s.resize_target = crate::state::ResizeTarget::InvDock;
+        s.overlays.command_band = None;
+        s.band_dock.toggle_to(false, true);
+        s.resize_target = crate::state::ResizeTarget::CommandBand;
         s.cycle_resize_target(true);
         assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap);
     }
@@ -10739,7 +10896,7 @@ mod tests {
         // Room dock: q → not a dock action
         {
             let mut s = AppState::default();
-            s.room_dock.toggle_to(true, true);
+            s.open_room_dock(crate::state::RoomDockView::Info);
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::CloseRoomDock | Action::UnpinRoomDock),
                 "q must not close or unpin the room panel");
@@ -10784,7 +10941,7 @@ mod tests {
         // Now open BOTH the room dock AND the config screen (centered modal).
         let mut state = AppState::default();
         state.zoom = Zoom::Compact;
-        state.room_dock.toggle_to(true, true);
+        state.open_room_dock(crate::state::RoomDockView::Info);
         let working = clone_config(&state.config);
         state.overlays.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
@@ -12399,7 +12556,7 @@ mod tests {
         use crate::state::RoomDockView;
         for view in [RoomDockView::Info, RoomDockView::Diagnostics] {
             let mut s = AppState::default();
-            s.room_dock.toggle_to(true, true);
+            s.open_room_dock(crate::state::RoomDockView::Info);
             s.room_dock_view = view;
             let a = key_to_action(&s, key(KeyCode::Enter));
             assert!(
@@ -12673,8 +12830,7 @@ mod tests {
     /// Seed the inventory panel open with a known, synthetic click-word list
     /// — the panel's counterpart of `open_band`'s synthetic object model.
     fn open_inventory_panel_for_test(state: &mut AppState, words: &[&str]) {
-        state.show_inventory = true;
-        state.inv_dock.toggle_to(true, true);
+        state.set_journal_tab(crate::journal::JournalTab::Inventory);
         state.inventory_click_words = words.iter().map(|w| w.to_string()).collect();
     }
 
@@ -12771,7 +12927,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let mut state = AppState::default();
-        state.room_dock.toggle_to(true, true);
+        state.open_room_dock(crate::state::RoomDockView::Info);
 
         let map = Rect::default();
         let story = Rect::default();
@@ -12908,5 +13064,110 @@ mod tests {
         s.overlays.quit_dialog = true;
         assert!(!apply_paste(&mut s, "north"));
         assert!(s.input.value.is_empty());
+    }
+
+    // ── SQ-1680: the documents chooser as a modal of the running game ──────────
+
+    /// A source that is never online, so opening the chooser here reaches no network.
+    struct Offline;
+
+    impl crate::ifdb_search::SearchSource for Offline {
+        fn search(&self, _q: &str) -> Result<Vec<crate::ifdb_search::SearchHit>, crate::ifdb_search::SearchError> {
+            Err(crate::ifdb_search::SearchError::Transport("offline".into()))
+        }
+        fn hot(&self) -> Result<Vec<crate::ifdb_search::SearchHit>, crate::ifdb_search::SearchError> {
+            Err(crate::ifdb_search::SearchError::Transport("offline".into()))
+        }
+        fn download_options(&self, _t: &str) -> Result<crate::ifdb_search::ResolvedGame, crate::ifdb_search::SearchError> {
+            Err(crate::ifdb_search::SearchError::Transport("offline".into()))
+        }
+        fn download(
+            &self,
+            _u: &str,
+            _d: &std::path::Path,
+        ) -> Result<std::path::PathBuf, crate::ifdb_search::SearchError> {
+            Err(crate::ifdb_search::SearchError::Transport("offline".into()))
+        }
+    }
+
+    fn state_with_documents(tag: &str) -> (AppState, std::path::PathBuf) {
+        let home = crate::scratch_dir(tag);
+        let roots = crate::data_roots::DataRoots::resolve(&home, None, None, &Default::default());
+        let mut s = AppState::default();
+        s.overlays.documents =
+            Some(crate::documents_chooser::DocumentsSession::open(crate::ifdb_search::IfdbGate::default(), Box::new(Offline), roots, "abc123", "Zork I"));
+        (s, home)
+    }
+
+    #[test]
+    fn the_documents_chooser_is_a_modal_that_owns_the_keys_and_closes_on_esc() {
+        let (mut s, home) = state_with_documents("docs-modal-keys");
+        assert!(s.any_modal_overlay_open(), "it is a modal");
+        // A letter that would otherwise type into the story prompt goes to the chooser.
+        let a = key_to_action(&s, key(KeyCode::Char('x')));
+        assert!(matches!(a, Action::DocumentsKey(KeyCode::Char('x'))), "{a:?}");
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.input.value.is_empty(), "nothing leaked into the prompt");
+        // Tab is the chooser's focus key, not the prompt's autocomplete / the pane toggle.
+        let a = key_to_action(&s, key(KeyCode::Tab));
+        assert!(matches!(a, Action::DocumentsKey(KeyCode::Tab)), "{a:?}");
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.overlays.documents.is_none(), "Esc closes it");
+        assert!(!s.any_modal_overlay_open());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_documents_chooser_owns_the_mouse_while_open() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let (s, home) = state_with_documents("docs-modal-mouse");
+        let ev = |kind| MouseEvent { kind, column: 5, row: 6, modifiers: KeyModifiers::NONE };
+        let none = None;
+        let r = ratatui::layout::Rect::default();
+        let act = |kind| mouse_to_action(&s, ev(kind), r, r, &[], &none);
+        assert_eq!(act(MouseEventKind::Down(crossterm::event::MouseButton::Left)), Action::DocumentsClick(5, 6));
+        assert_eq!(act(MouseEventKind::ScrollDown), Action::DocumentsWheel(1));
+        assert_eq!(act(MouseEventKind::ScrollUp), Action::DocumentsWheel(-1));
+        assert_eq!(act(MouseEventKind::Moved), Action::None, "motion is swallowed, not routed to the map");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// One command, two worlds: typed in the game it asks for the chooser; the
+    /// browser reads the same registry entry as its own action, and Shift-D and
+    /// nothing else is bound to it.
+    #[test]
+    fn download_documents_is_one_registry_command_in_the_game_and_the_browser() {
+        use crate::keymap::Context;
+        use crate::slash::{in_both_worlds, parse_in_context, SlashOutcome, COMMANDS};
+        assert!(matches!(parse_in_context("download-documents", '/', Context::Global), SlashOutcome::DownloadDocuments));
+        assert!(matches!(parse_in_context("download-documents", '/', Context::Browser), SlashOutcome::DownloadDocuments));
+        assert_eq!(
+            crate::browser::action_for_command("download-documents"),
+            Some(crate::browser::BrowserAction::DownloadDocuments)
+        );
+        // Only these cross: every other game command is still refused in the browser.
+        let both: Vec<&str> = COMMANDS.iter().filter(|c| in_both_worlds(c)).map(|c| c.name).collect();
+        assert_eq!(both, ["download-documents", "create-documents-folder", "download-hints"]);
+        assert!(matches!(parse_in_context("quit", '/', Context::Browser), SlashOutcome::Error(_)));
+        // The in-game palette and Tab completion offer it; /help lists it.
+        assert!(crate::slash::slash_names().iter().any(|n| n == "download-documents"));
+        assert!(crate::slash::help_text('/').iter().any(|l| l.contains("download-documents")));
+        // Shift-D in the browser; plain d is still reverse-sort.
+        let km = crate::keymap::KeyMap::default();
+        let shift_d = crossterm::event::KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert_eq!(crate::browser::action_for_key(&km, shift_d), Some(crate::browser::BrowserAction::DownloadDocuments));
+        assert_eq!(
+            crate::browser::action_for_key(&km, key(KeyCode::Char('d'))),
+            Some(crate::browser::BrowserAction::ReverseSort)
+        );
+        // It may be bound in either keymap — it is at home in both worlds.
+        let mut cfg = crate::config::KeymapConfig::default();
+        cfg.browser.insert("ctrl+w".into(), "download-documents".into());
+        cfg.global.insert("ctrl+e".into(), "download-documents".into());
+        let (km2, warnings) = crate::keymap::KeyMap::resolve(&cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(km2.lookup(&"ctrl+w".parse().unwrap(), Context::Browser), Some("download-documents"));
+        assert_eq!(km2.lookup(&"ctrl+e".parse().unwrap(), Context::Global), Some("download-documents"));
     }
 }

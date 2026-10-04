@@ -158,6 +158,37 @@ const IDENT_TABLE_DIRECTORY_BYTES: u32 = 32;
 /// `INDIV_PROP_START`): the directory's own count bounds the search to the
 /// common properties, which is where a library `Property short_name` is.
 pub fn short_name_property(mem: &Memory) -> Option<u16> {
+    short_name_property_in(mem, identifier_table_directory(mem)?)
+}
+
+/// [`short_name_property`]'s search, given the directory address `d` already
+/// found — see [`identifier_table_directory`]'s doc for why this is split out:
+/// [`ParseNames::detect`] wants this AND [`attribute_number_in`] from one scan.
+fn short_name_property_in(mem: &Memory, d: u32) -> Option<u16> {
+    let array = d + IDENT_TABLE_DIRECTORY_BYTES;
+    let count = mem.read32(d + 4)?;
+    let dt = mem.decode_table();
+    let name_at = |addr: u32| crate::disasm::string_text(mem, dt, addr, Some(32));
+    for prop in 2..count {
+        if mem.read32(array + prop * 4).and_then(name_at).as_deref() == Some("short_name") {
+            return u16::try_from(prop).ok();
+        }
+    }
+    None
+}
+
+/// Finds Inform's *Table of Identifier Names* directory (see
+/// [`short_name_property`]'s own doc for its shape) and validates it, returning the
+/// DIRECTORY's address — `d` in that doc's diagram — rather than any one pair's answer, so a
+/// caller wanting a different pair of the same eight (SQ-1640's [`attribute_number`] wants pair
+/// index 2, the attribute names array) does not repeat the RAM-wide search that finds `d`.
+///
+/// Validation is the same the module has always applied via the property-names array (pair index
+/// 0): every entry from index 2 up to `count` must decode to a compiler-symbol-shaped string
+/// ([`is_inform_identifier`]) or be absent, and entry 1 must read exactly `"name"` — the one
+/// property number the compiler fixes (SQ-1415 audit item 3: this runs on every Glulx load via
+/// [`ParseNames::detect`], so a malformed image must not abort it, only fail to match).
+fn identifier_table_directory(mem: &Memory) -> Option<u32> {
     let dt = mem.decode_table();
     let end = mem.extstart();
     let name_at = |addr: u32| crate::disasm::string_text(mem, dt, addr, Some(32));
@@ -172,10 +203,7 @@ pub fn short_name_property(mem: &Memory) -> Option<u16> {
         // computation is checked rather than trusted — a bogus count that
         // would overflow `count * 4` or `array + ...` is simply not a match,
         // the same "not this table after all" outcome as failing the
-        // in-range check (SQ-1415 audit item 3: this runs on EVERY Glulx
-        // load via `ParseNames::detect`, so a malformed image must not abort
-        // it). `prop * 4`/`array + prop * 4` below stay unchecked: `prop <
-        // count` and this multiplication already proved `count * 4` fits.
+        // in-range check.
         let in_range = count
             .checked_mul(4)
             .and_then(|bytes| array.checked_add(bytes))
@@ -189,7 +217,6 @@ pub fn short_name_property(mem: &Memory) -> Option<u16> {
         // Every entry is a compiler symbol or zero. Prose here means the
         // arithmetic matched something that is not this table after all — the
         // Z-machine side has met exactly that (`zvm::objects`'s own scan).
-        let mut found = None;
         let mut named = 0;
         for prop in 2..count {
             let Some(text) = mem.read32(array + prop * 4).and_then(name_at) else { continue };
@@ -197,17 +224,70 @@ pub fn short_name_property(mem: &Memory) -> Option<u16> {
                 continue 'table;
             }
             named += 1;
-            if text == "short_name" {
-                found = u16::try_from(prop).ok();
-            }
         }
         if named >= MIN_IDENTIFIERS {
-            if let Some(prop) = found {
-                return Some(prop);
-            }
+            return Some(d);
         }
     }
     None
+}
+
+/// Inform's attribute number for `name` in this image (SQ-1640), or `None` when this image
+/// carries no identifier-names table at all ($OMIT_SYMBOL_TABLE, or a non-Inform Glulx image) or
+/// names no attribute `name`.
+///
+/// Reads the directory's THIRD pair (`short_name_property`'s own doc: `+16` the address of the
+/// attribute names array, `+20` its length) rather than the property-names array the other two
+/// readers here use. Same shape as those: one string address per attribute number, indexed BY
+/// that number, so entry `n`'s text is attribute `n`'s name — or, per current inform6lib's
+/// `Attribute non_floating alias absent`, an ALIAS decoded as `"a/b"`, matched here by checking
+/// every `/`-separated component rather than the whole string.
+///
+/// There is no fixed bit number for `scenery` or `door` across compiler/library versions — only
+/// the `name` PROPERTY is hardcoded by the compiler ([`NAME_PROPERTY`]) — so a caller wanting to
+/// test a specific attribute must always resolve its number through this image's own table first,
+/// never assume one from another story.
+pub fn attribute_number(mem: &Memory, name: &str) -> Option<u16> {
+    attribute_number_in(mem, identifier_table_directory(mem)?, name)
+}
+
+/// [`attribute_number`]'s search, given the directory address `d` already found — split out for
+/// the same reason [`short_name_property_in`] is.
+fn attribute_number_in(mem: &Memory, d: u32, name: &str) -> Option<u16> {
+    let array = mem.read32(d + 16)?;
+    let count = mem.read32(d + 20)?;
+    let in_range = count
+        .checked_mul(4)
+        .and_then(|bytes| array.checked_add(bytes))
+        .is_some_and(|last| last <= mem.extstart());
+    if !in_range {
+        return None;
+    }
+    let dt = mem.decode_table();
+    let name_at = |addr: u32| crate::disasm::string_text(mem, dt, addr, Some(32));
+    for i in 0..count {
+        let Some(text) = mem.read32(array + i * 4).and_then(name_at) else { continue };
+        if text.split('/').any(|part| part == name) {
+            return u16::try_from(i).ok();
+        }
+    }
+    None
+}
+
+/// Whether attribute `bit` is set on the object at `obj_addr`, read live from `mem` (an attribute
+/// can change at runtime — `give`/`now … is` — so this must never be cached across turns).
+///
+/// Glulx's attribute bit layout (§2: `NUM_ATTR_BYTES` bytes immediately after the `$70` tag) is
+/// **least-significant-bit first** — the opposite of the Z-machine's `1 << (7 - n%8)` — so bit `n`
+/// lives at byte `obj_addr + 1 + n/8`, mask `1 << (n % 8)`. `false`, never a panic, for a `bit`
+/// this image's `attr_bytes` cannot hold — an out-of-range bit is simply not set for this image.
+pub fn test_attr(mem: &Memory, obj_addr: u32, attr_bytes: u32, bit: u16) -> bool {
+    let byte_offset = bit as u32 / 8;
+    if byte_offset >= attr_bytes {
+        return false;
+    }
+    let mask = 1u32 << (bit % 8);
+    mem.read8(obj_addr + 1 + byte_offset).is_some_and(|b| b & mask != 0)
 }
 
 /// How many named entries a candidate identifiers table must carry before it is
@@ -338,6 +418,14 @@ pub struct ParseNames {
     /// once, here, because [`short_name_property`] reads the whole of RAM and
     /// [`ParseNames::printed_name`] is asked per object.
     short_name_prop: Option<u16>,
+    /// Inform's `scenery` and `door` attribute numbers for this image (SQ-1640), or `None` where
+    /// this image's identifier-names table carries no such attribute (or no table at all).
+    /// Resolved once, here, alongside `short_name_prop` — from the SAME directory scan
+    /// ([`identifier_table_directory`]), so detecting this pair costs nothing beyond what
+    /// `short_name_prop` already paid. Attribute NUMBERING is not fixed by the compiler the way
+    /// [`NAME_PROPERTY`] is, so these must be read per-image, never assumed from another story.
+    scenery_attr: Option<u16>,
+    door_attr: Option<u16>,
 }
 
 impl ParseNames {
@@ -360,12 +448,26 @@ impl ParseNames {
                     continue;
                 }
                 saw_tree = true;
-                let candidate =
-                    ParseNames { head: addr, attr_bytes, stride, count, tables, short_name_prop: None };
+                let candidate = ParseNames {
+                    head: addr,
+                    attr_bytes,
+                    stride,
+                    count,
+                    tables,
+                    short_name_prop: None,
+                    scenery_attr: None,
+                    door_attr: None,
+                };
                 if candidate.readable_name_arrays(mem) >= MIN_OBJECTS {
                     // Only now: the symbol-table scan reads the whole of RAM,
-                    // and a rejected candidate would pay for it too.
-                    return Ok(ParseNames { short_name_prop: short_name_property(mem), ..candidate });
+                    // and a rejected candidate would pay for it too. One scan
+                    // for the directory, reused for all three pairs it holds
+                    // (SQ-1640) — see `identifier_table_directory`'s own doc.
+                    let dir = identifier_table_directory(mem);
+                    let short_name_prop = dir.and_then(|d| short_name_property_in(mem, d));
+                    let scenery_attr = dir.and_then(|d| attribute_number_in(mem, d, "scenery"));
+                    let door_attr = dir.and_then(|d| attribute_number_in(mem, d, "door"));
+                    return Ok(ParseNames { short_name_prop, scenery_attr, door_attr, ..candidate });
                 }
             }
         }
@@ -392,6 +494,27 @@ impl ParseNames {
     /// `NUM_ATTR_BYTES` for this image, which is what fixes the object stride.
     pub fn attr_bytes(&self) -> u32 {
         self.attr_bytes
+    }
+
+    /// Whether the object at `addr` carries Inform's `scenery` or `door` attribute, read LIVE
+    /// (SQ-1640) — a backdrop noun (a sky, a wall, a garbage can) or a door leaf, neither of which
+    /// is a real inventory-style item, though both are structural children of the room they stand
+    /// in exactly like a portable object is.
+    ///
+    /// **Fails open.** When this image's identifier-names table cannot name one of the two
+    /// attributes at all (`$OMIT_SYMBOL_TABLE`, or a library that spells neither `scenery` nor
+    /// `door` — nothing here assumes a fixed bit), that half of the test never fires rather than
+    /// refusing to answer, so a resolvable signal is never lost to an unrelated missing one. Both
+    /// unresolved answers `false` — never hide a real item because this check was inconclusive.
+    ///
+    /// Deliberately does NOT test `static`: a static-but-not-scenery object (a vending machine, a
+    /// patch of soil) is a genuine take-and-fail candidate for
+    /// `session::classify_take_attempt`'s fixed-in-place detector, which needs it present in
+    /// `result.items` to work at all — see that function's own doc and `glulx_item_observations`'s.
+    pub fn is_scenery_or_door(&self, mem: &Memory, addr: u32) -> bool {
+        let scenery = self.scenery_attr.is_some_and(|bit| test_attr(mem, addr, self.attr_bytes, bit));
+        let door = self.door_attr.is_some_and(|bit| test_attr(mem, addr, self.attr_bytes, bit));
+        scenery || door
     }
 
     /// Every object's address, in list order.
@@ -874,7 +997,9 @@ mod tests {
     // [`ParseNames::detect`] end to end rather than around it.
 
     const RAM: u32 = 0x100;
-    const EXT: u32 = 0xA00;
+    /// SQ-1640: widened from `0xA00` to leave headroom for the attribute-names array
+    /// ([`Story::attributes`]), written after everything [`Story::identifiers`] already places.
+    const EXT: u32 = 0xC00;
     /// Inform's `NUM_ATTR_BYTES` default, and the corpus's.
     const NAB: u32 = 7;
     /// `1 + NUM_ATTR_BYTES + 6 longs` (§2).
@@ -900,6 +1025,22 @@ mod tests {
     /// The property number this story gives `short_name` — not the 45
     /// `advent.blb` uses, because the point is that it is read, not assumed.
     const SHORT_NAME_PROP: u16 = 12;
+    /// SQ-1640: the attribute-names array (directory pair index 2 — see
+    /// [`short_name_property`]'s own doc) and the strings it points at, placed after everything
+    /// [`Story::identifiers`] already writes. Its own address/count are stored into
+    /// `IDENT_DIR + 16` / `IDENT_DIR + 20` by [`Story::attributes`] — no separate directory, the
+    /// SAME one `IDENT_DIR` already names.
+    const ATTR_STRINGS: u32 = IDENT_DIR + 0x80;
+    const ATTR_ARRAY: u32 = ATTR_STRINGS + 0x80;
+    /// How many attribute names this story's array claims. Deliberately NOT the same numbers
+    /// `short_name_property`'s own synthetic story uses for properties — attribute numbering is
+    /// independent, arbitrary, per-image (`attribute_number`'s own doc).
+    const ATTR_COUNT: u32 = 8;
+    /// This story's own arbitrary attribute numbers — deliberately NOT matching any real game's,
+    /// because the whole point is that they are read from the image, never assumed.
+    const DOOR_ATTR: u16 = 3;
+    const SCENERY_ATTR: u16 = 5;
+    const STATIC_ATTR: u16 = 6;
     const DICT: u32 = 0x118;
     /// `DICT_ENTRY_BYTE_LENGTH` for a byte-valued dictionary of nine
     /// characters: `7 + DICT_WORD_SIZE` (`Inform6/inform.c`).
@@ -948,6 +1089,7 @@ mod tests {
             s.tables();
             s.objects();
             s.identifiers();
+            s.attributes();
             s
         }
 
@@ -961,6 +1103,16 @@ mod tests {
 
         fn w32(&mut self, at: u32, v: u32) {
             self.buf[at as usize..at as usize + 4].copy_from_slice(&v.to_be_bytes());
+        }
+
+        /// Sets attribute `bit` on object `i`, least-significant-bit-first within
+        /// `obj_addr + 1 + bit/8` — [`test_attr`]'s own layout, written independently here rather
+        /// than by calling it, so a bug in one cannot hide behind the other.
+        fn set_attr(&mut self, i: usize, bit: u16) {
+            let at = self.obj(i);
+            let byte = at + 1 + bit as u32 / 8;
+            let mask = 1u8 << (bit % 8);
+            self.buf[byte as usize] |= mask;
         }
 
         /// An unencoded Glulx string: `$E0`, then Latin-1, then a zero byte.
@@ -1027,6 +1179,15 @@ mod tests {
                 let at = self.obj(i);
                 let base = at + 1 + NAB; // past the tag and the attribute bytes
                 self.b(at, 0x70);
+                // SQ-1640: LAMP carries `scenery`, SACK carries `door`, TABLE carries `static`
+                // ONLY (neither `scenery` nor `door`) — the exact shape `is_scenery_or_door` must
+                // tell apart. APPLE carries none, an ordinary plain portable object.
+                match i {
+                    LAMP => self.set_attr(i, SCENERY_ATTR),
+                    SACK => self.set_attr(i, DOOR_ATTR),
+                    TABLE => self.set_attr(i, STATIC_ATTR),
+                    _ => {}
+                }
                 // long 0: next object in the overall linked list, 0 on the last.
                 let next = if i + 1 < N_OBJ { self.obj(i + 1) } else { 0 };
                 self.w32(base, next);
@@ -1118,6 +1279,29 @@ mod tests {
             for (i, (prop, text)) in names.iter().enumerate() {
                 let at = self.string(IDENT_STRINGS + i as u32 * 16, text);
                 self.w32(array + prop * 4, at);
+            }
+        }
+
+        /// SQ-1640: the attribute-names array — one string address per attribute NUMBER, same
+        /// shape as the property-names array [`Story::identifiers`] just wrote, but a SEPARATE
+        /// array the SAME directory ([`IDENT_DIR`]) also points at (pair index 2, `+16`/`+20` —
+        /// see [`short_name_property`]'s own doc). Index [`STATIC_ATTR`] is written as an ALIAS
+        /// (`"static/fixed"`), matching current inform6lib's `Attribute non_floating alias absent`
+        /// shape, to prove [`attribute_number`] splits on `/` rather than only matching the whole
+        /// string. A couple of slots (0, 1, 4) are left at `0` — an unused attribute number, which
+        /// [`crate::disasm::string_text`] answers `None` for — exactly as a real image's gaps do.
+        fn attributes(&mut self) {
+            self.w32(IDENT_DIR + 16, ATTR_ARRAY);
+            self.w32(IDENT_DIR + 20, ATTR_COUNT);
+            let named: [(u16, &str); 4] = [
+                (2, "edible"),
+                (DOOR_ATTR, "door"),
+                (SCENERY_ATTR, "scenery"),
+                (STATIC_ATTR, "static/fixed"),
+            ];
+            for (i, (attr, text)) in named.iter().enumerate() {
+                let at = self.string(ATTR_STRINGS + i as u32 * 16, text);
+                self.w32(ATTR_ARRAY + *attr as u32 * 4, at);
             }
         }
 
@@ -1301,5 +1485,102 @@ mod tests {
         // A link read off something that is not an object is not followed.
         assert_eq!(pn.parent(&mem, OBJ + 3), None);
         assert!(pn.children(&mem, OBJ + 3).is_empty());
+    }
+
+    // ── SQ-1640: attribute-number resolution and the scenery/door filter ───────────────────────
+
+    #[test]
+    fn attribute_number_resolves_by_name_and_splits_alias_text_on_slash() {
+        let (_s, mem, _pn) = detected();
+        assert_eq!(attribute_number(&mem, "door"), Some(DOOR_ATTR));
+        assert_eq!(attribute_number(&mem, "scenery"), Some(SCENERY_ATTR));
+        // An alias entry ("static/fixed") matches EITHER component, not only the whole string.
+        assert_eq!(attribute_number(&mem, "static"), Some(STATIC_ATTR));
+        assert_eq!(attribute_number(&mem, "fixed"), Some(STATIC_ATTR));
+        assert_eq!(
+            attribute_number(&mem, "static/fixed"),
+            None,
+            "the whole alias string is not itself a name — only its `/`-separated components are"
+        );
+        assert_eq!(attribute_number(&mem, "nonexistent"), None);
+    }
+
+    #[test]
+    fn attribute_number_is_none_without_an_identifier_names_table() {
+        // A plain empty Glulx image carries no such table at all — `identifier_table_directory`
+        // must fail to find one rather than reading garbage, and `attribute_number` propagates
+        // that refusal exactly like `short_name_property` already does for the property array.
+        let mut buf = vec![0u8; EXT as usize];
+        buf[0..4].copy_from_slice(b"Glul");
+        buf[0x04..0x08].copy_from_slice(&0x0003_0102u32.to_be_bytes());
+        buf[0x08..0x0C].copy_from_slice(&RAM.to_be_bytes());
+        buf[0x0C..0x10].copy_from_slice(&EXT.to_be_bytes());
+        buf[0x10..0x14].copy_from_slice(&EXT.to_be_bytes());
+        let mem = Memory::new(buf).expect("a bare header is still a valid image");
+        assert_eq!(attribute_number(&mem, "scenery"), None);
+        assert_eq!(short_name_property(&mem), None, "the property-array reader refuses the same way");
+    }
+
+    #[test]
+    fn test_attr_reads_bits_least_significant_bit_first_and_live() {
+        let (s, mut mem, pn) = detected();
+        let lamp = s.obj(LAMP);
+        assert!(
+            test_attr(&mem, lamp, NAB, SCENERY_ATTR),
+            "LAMP was built carrying the scenery attribute"
+        );
+        assert!(!test_attr(&mem, lamp, NAB, DOOR_ATTR), "LAMP does not carry door");
+        // Least-significant-bit-first, the opposite of the Z-machine: bit 0 of the FIRST attribute
+        // byte, not bit 7.
+        assert!(!test_attr(&mem, lamp, NAB, 0), "premise: bit 0 was never set on LAMP");
+        mem.write8(lamp + 1, 0b0000_0001).expect("attribute byte 0 is writable RAM");
+        assert!(test_attr(&mem, lamp, NAB, 0), "bit 0, LSB of the first attribute byte, now set");
+        assert!(
+            !test_attr(&mem, lamp, NAB, 1),
+            "bit 1 is a DIFFERENT bit — setting bit 0 must not leak into it"
+        );
+        // Out of range for this image's NUM_ATTR_BYTES: simply not set, never a panic.
+        assert!(!test_attr(&mem, lamp, NAB, NAB as u16 * 8), "one bit past the end");
+        assert!(!test_attr(&mem, lamp, NAB, 9_999), "wildly out of range");
+        let _ = pn;
+    }
+
+    #[test]
+    fn is_scenery_or_door_tells_scenery_door_and_static_only_apart() {
+        let (s, mem, pn) = detected();
+        assert!(pn.is_scenery_or_door(&mem, s.obj(LAMP)), "LAMP carries scenery");
+        assert!(pn.is_scenery_or_door(&mem, s.obj(SACK)), "SACK carries door");
+        assert!(
+            !pn.is_scenery_or_door(&mem, s.obj(TABLE)),
+            "TABLE carries `static` ONLY — SQ-1640 deliberately does not filter on it, since a \
+             static-but-not-scenery object (a vending machine, a patch of soil) must stay \
+             trackable for the fixed-in-place detector"
+        );
+        assert!(!pn.is_scenery_or_door(&mem, s.obj(APPLE)), "APPLE carries neither — an ordinary item");
+    }
+
+    /// A resolvable `scenery`/`door` bit is read LIVE, not the snapshot [`ParseNames::detect`]
+    /// saw — attributes can change at runtime (`give`/`now ... is`).
+    #[test]
+    fn is_scenery_or_door_reads_the_current_memory_not_a_boot_time_snapshot() {
+        let (s, mut mem, pn) = detected();
+        let apple = s.obj(APPLE);
+        assert!(!pn.is_scenery_or_door(&mem, apple), "premise: APPLE starts plain");
+        let byte = apple + 1 + SCENERY_ATTR as u32 / 8;
+        let mask = 1u32 << (SCENERY_ATTR % 8);
+        let cur = mem.read8(byte).unwrap();
+        mem.write8(byte, cur | mask).expect("attribute byte is writable RAM");
+        assert!(pn.is_scenery_or_door(&mem, apple), "the SAME ParseNames now reads the live bit");
+    }
+
+    /// Resolved once at `detect`-time, from the SAME directory scan `short_name_prop` already
+    /// pays for — not re-scanned per object, per `ParseNames`'s own field doc.
+    #[test]
+    fn scenery_and_door_attribute_numbers_are_resolved_once_at_detect_time() {
+        let (_s, _mem, pn) = detected();
+        // `attribute_number` and `ParseNames::is_scenery_or_door` must agree — proving the
+        // cached numbers `detect` resolved really are the SAME ones a fresh lookup would find.
+        assert_eq!(pn.scenery_attr, Some(SCENERY_ATTR));
+        assert_eq!(pn.door_attr, Some(DOOR_ATTR));
     }
 }

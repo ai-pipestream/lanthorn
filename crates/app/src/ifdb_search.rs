@@ -150,17 +150,24 @@ use crate::ifiction::IFiction;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEARCH_XML: u64 = 4 * 1024 * 1024; // 4 MiB — a ~100-game reply is well under this.
 
-/// Cap on one downloaded story file.
+/// The ONE cap on any single file lanthorn downloads from IFDB or a host its
+/// record names: a story file, a manual, a map, a zip, and one inflated zip
+/// entry (`ifdb_documents` reads this too — there is no second constant).
+/// Judged by the declared `Content-Length` first and again while reading, so a
+/// host that lies, or answers chunked, is cut off at the same figure.
 ///
-/// 32 MiB: comfortably past the largest game anyone ships, still far short of
-/// anything a mislabelled link could usefully deliver. It was 16 MiB under a
+/// 100 MiB (maintainer's decision, SQ-1682): comfortably past the largest game
+/// anyone ships (see [`crate::corpus`]) and past a scanned manual, still far
+/// short of anything a mislabelled link could usefully deliver. The story cap
+/// was 16 MiB under a
 /// sentence about story files being small, which refused *Kerkerkruip* outright
 /// — see [`crate::corpus`] for what that sentence was worth and why the figures
-/// live there rather than here.
+/// live there rather than here, then 32 MiB, while documents had their own
+/// 50 MB.
 ///
 /// The assertion below is what keeps the two honest: raise the corpus floor and
 /// the build fails until this is raised with it.
-pub const MAX_DOWNLOAD: u64 = 32 * 1024 * 1024;
+pub const MAX_DOWNLOAD: u64 = 100 * 1024 * 1024;
 const _: () = assert!(
     MAX_DOWNLOAD > crate::corpus::LARGEST_GAME,
     "the download cap must admit the largest game we know of, or the feature refuses real games"
@@ -186,9 +193,10 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// nothing fails here rather than inside the body budget.
 pub const HEADERS_TIMEOUT: Duration = Duration::from_secs(20);
 /// Cap on reading the body. Sized from the numbers above, not from taste:
-/// [`MAX_DOWNLOAD`] at roughly 110 KB/s — a genuinely poor link — is about five
-/// minutes, and a transfer slower than that has stalled rather than started.
-pub const BODY_TIMEOUT: Duration = Duration::from_secs(300);
+/// [`MAX_DOWNLOAD`] at roughly 120 KB/s — a genuinely poor link — is about
+/// fifteen minutes, and a transfer slower than that has stalled rather than
+/// started.
+pub const BODY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// One game listing from an IFDB search.
 #[derive(Debug, Clone, PartialEq)]
@@ -238,16 +246,19 @@ impl DownloadOption {
     /// different halves of the answer ("Russian translation in Z8" +
     /// "translated by Vyacheslav Dobranov").
     pub fn subtitle(&self) -> Option<String> {
-        let title = self
-            .title
-            .as_deref()
-            .filter(|t| !t.eq_ignore_ascii_case(self.filename.as_str()));
-        match (title, self.desc.as_deref()) {
-            (Some(t), Some(d)) => Some(format!("{t} — {d}")),
-            (Some(t), None) => Some(t.to_string()),
-            (None, Some(d)) => Some(d.to_string()),
-            (None, None) => None,
-        }
+        subtitle_of(&self.filename, self.title.as_deref(), self.desc.as_deref())
+    }
+}
+
+/// [`DownloadOption::subtitle`]'s rule, shared with the documents chooser
+/// (SQ-1680) so a link's one-line description is worded the same in both.
+pub(crate) fn subtitle_of(filename: &str, title: Option<&str>, desc: Option<&str>) -> Option<String> {
+    let title = title.filter(|t| !t.eq_ignore_ascii_case(filename));
+    match (title, desc) {
+        (Some(t), Some(d)) => Some(format!("{t} — {d}")),
+        (Some(t), None) => Some(t.to_string()),
+        (None, Some(d)) => Some(d.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -261,6 +272,21 @@ pub struct ResolvedGame {
     /// Boxed: `IFiction` is large enough that an unboxed `Option` here blows
     /// up `SearchEvent`'s size (clippy's `large_enum_variant`).
     pub record: Option<Box<IFiction>>,
+    /// The non-game links of the same record (manuals, feelies, maps) for the
+    /// documents chooser (SQ-1680) — parsed from the same response, so offering
+    /// them costs no request of its own.
+    pub documents: Vec<crate::ifdb_documents::DocumentOption>,
+}
+
+/// What a `Range: bytes=0-0` probe learned about a URL (SQ-1680).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeProbe {
+    /// The server answered 206 with a `Content-Range`: byte ranges work, and the
+    /// whole resource is `total` bytes.
+    Supported { total: u64 },
+    /// No 206 + `Content-Range`: the server will not serve a slice. `length` is
+    /// the size it advertised for the whole thing, when it said.
+    Unsupported { length: Option<u64> },
 }
 
 #[derive(Debug)]
@@ -279,6 +305,9 @@ pub enum SearchError {
     NotAStory,
     /// A local filesystem error writing the download.
     Io(String),
+    /// A problem with a document or the zip it comes from (SQ-1680), already
+    /// worded for the player.
+    Archive(String),
 }
 
 impl std::fmt::Display for SearchError {
@@ -286,12 +315,11 @@ impl std::fmt::Display for SearchError {
         match self {
             SearchError::Transport(_) => write!(f, "IFDB unreachable"),
             SearchError::Remote(m) => write!(f, "IFDB: {m}"),
-            SearchError::TooLarge => {
-                write!(f, "file exceeds {} MiB cap", MAX_DOWNLOAD / (1024 * 1024))
-            }
+            SearchError::TooLarge => f.write_str(&too_large_message(MAX_DOWNLOAD)),
             SearchError::NoFilename => write!(f, "no downloadable story file"),
             SearchError::NotAStory => write!(f, "downloaded file is not a valid story file"),
             SearchError::Io(m) => write!(f, "could not save file: {m}"),
+            SearchError::Archive(m) => write!(f, "{m}"),
         }
     }
 }
@@ -309,6 +337,28 @@ pub trait SearchSource: Send + Sync {
     fn download_options(&self, tuid: &str) -> Result<ResolvedGame, SearchError>;
     /// Download `url` into `dest_dir`, returning the written path.
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError>;
+
+    // ── Documents (SQ-1680) ──────────────────────────────────────────────────
+    // Each is one user-driven request to a host named by the game's IFDB record.
+    // The defaults refuse, so a source that only searches stays a valid one.
+
+    /// Ask whether `url` serves byte ranges (a `Range: bytes=0-0` request) and
+    /// how big it is. Never reads the body.
+    fn probe_range(&self, _url: &str) -> Result<RangeProbe, SearchError> {
+        Err(SearchError::Transport("range requests are not available".into()))
+    }
+    /// `len` bytes of `url` from `start`. A server that ignores `Range` is
+    /// tolerated only for `start == 0`, where the first `len` bytes of its full
+    /// reply are the slice; anywhere else it is an error.
+    fn fetch_range(&self, _url: &str, _start: u64, _len: u64) -> Result<Vec<u8>, SearchError> {
+        Err(SearchError::Transport("range requests are not available".into()))
+    }
+    /// The whole of `url`, refusing (with [`SearchError::TooLarge`]) anything
+    /// over `cap` bytes — judged by the declared length first and again while
+    /// reading, so a host that lies about it is stopped at `cap` too.
+    fn fetch_capped(&self, _url: &str, _cap: u64) -> Result<Vec<u8>, SearchError> {
+        Err(SearchError::Transport("downloads are not available".into()))
+    }
 }
 
 /// ureq-backed [`SearchSource`] hitting the live IFDB + file-host endpoints.
@@ -364,10 +414,77 @@ impl SearchSource for IfdbSearchClient {
         // all) just means no auto-populated metadata later — the download
         // itself is unaffected.
         let record = crate::ifiction::parse(&bytes).ok().map(Box::new);
-        Ok(ResolvedGame { options, record })
+        let documents = crate::ifdb_documents::parse_document_options(&bytes);
+        Ok(ResolvedGame { options, record, documents })
     }
 
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError> {
+        self.download_capped(url, dest_dir, MAX_DOWNLOAD)
+    }
+
+    fn probe_range(&self, url: &str) -> Result<RangeProbe, SearchError> {
+        let resp = self
+            .file_request(url)
+            .header("Range", "bytes=0-0")
+            .call()
+            .map_err(|e| SearchError::Transport(e.to_string()))?;
+        let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+        if resp.status().as_u16() == 206 {
+            if let Some(total) = header("content-range").as_deref().and_then(content_range_total) {
+                return Ok(RangeProbe::Supported { total });
+            }
+        }
+        let length = header("content-length").and_then(|s| s.parse::<u64>().ok());
+        Ok(RangeProbe::Unsupported { length })
+    }
+
+    fn fetch_range(&self, url: &str, start: u64, len: u64) -> Result<Vec<u8>, SearchError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut resp = self
+            .file_request(url)
+            .header("Range", format!("bytes={start}-{}", start + len - 1))
+            .call()
+            .map_err(|e| SearchError::Transport(e.to_string()))?;
+        match resp.status().as_u16() {
+            // Never more than was asked for: a host that sends extra is stopped.
+            206 => read_capped(resp.body_mut().as_reader(), len),
+            200 if start == 0 => {
+                let mut buf = Vec::new();
+                resp.body_mut()
+                    .as_reader()
+                    .take(len)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| SearchError::Transport(e.to_string()))?;
+                Ok(buf)
+            }
+            _ => Err(SearchError::Transport("server ignored the Range request".into())),
+        }
+    }
+
+    fn fetch_capped(&self, url: &str, cap: u64) -> Result<Vec<u8>, SearchError> {
+        let mut resp = self.file_request(url).call().map_err(|e| SearchError::Transport(e.to_string()))?;
+        if let Some(len) = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if len > cap {
+                return Err(SearchError::TooLarge);
+            }
+        }
+        read_capped(resp.body_mut().as_reader(), cap)
+    }
+}
+
+impl IfdbSearchClient {
+    /// [`SearchSource::download`] with the cap as a parameter, so a test can
+    /// exercise the over-cap paths with a few bytes instead of a hundred MiB.
+    /// Nothing reaches `dest_dir` unless the whole body arrived under `cap`:
+    /// the file is buffered, checked, then written.
+    fn download_capped(&self, url: &str, dest_dir: &Path, cap: u64) -> Result<PathBuf, SearchError> {
         // Per-request, because this agent's own `timeout_global` is the XML
         // endpoints' 15 seconds and a story file is not an XML reply. Cleared
         // rather than raised: `timeout_global` covers all the others, so leaving
@@ -391,7 +508,7 @@ impl SearchSource for IfdbSearchClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
         {
-            if len > MAX_DOWNLOAD {
+            if len > cap {
                 return Err(SearchError::TooLarge);
             }
         }
@@ -404,7 +521,7 @@ impl SearchSource for IfdbSearchClient {
             .and_then(|v| v.to_str().ok());
         let name = download_filename(disposition, url).ok_or(SearchError::NoFilename)?;
 
-        let bytes = read_capped(resp.body_mut().as_reader(), MAX_DOWNLOAD)?;
+        let bytes = read_capped(resp.body_mut().as_reader(), cap)?;
 
         // SQ-0659: never write bytes that aren't plausibly a story of the type
         // the filename claims — a 200 HTML landing page must not land on disk
@@ -418,6 +535,26 @@ impl SearchSource for IfdbSearchClient {
         std::fs::write(&dest, &bytes).map_err(|e| SearchError::Io(e.to_string()))?;
         Ok(dest)
     }
+
+    /// A GET on a file host with the download phase budgets (see the timeouts
+    /// above) rather than the XML endpoints' whole-call 15 seconds.
+    fn file_request(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        self.agent
+            .get(url)
+            .config()
+            .timeout_global(None)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(HEADERS_TIMEOUT))
+            .timeout_recv_body(Some(BODY_TIMEOUT))
+            .build()
+    }
+}
+
+/// The total out of a `Content-Range: bytes 0-0/12345` value; `None` for an
+/// unknown total (`*`) or a shape that is not a byte range.
+fn content_range_total(value: &str) -> Option<u64> {
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    rest.rsplit('/').next()?.trim().parse::<u64>().ok()
 }
 
 /// lanthorn's descriptive User-Agent — identifies the client and its repo, and
@@ -533,7 +670,7 @@ pub fn parse_download_options(xml: &[u8]) -> Vec<DownloadOption> {
 /// these strings really do carry them (IFDB's Invisiclues entry ends in a blank
 /// line) — which a one-row list cell cannot show, so every whitespace run then
 /// collapses to a single space.
-fn one_line(s: &str) -> Option<String> {
+pub(crate) fn one_line(s: &str) -> Option<String> {
     let flat = crate::ifiction::html_to_text(s);
     let joined = flat.split_whitespace().collect::<Vec<_>>().join(" ");
     if joined.is_empty() {
@@ -583,6 +720,17 @@ fn is_named_story_file(name: &Path) -> bool {
     crate::picker::has_story_ext(name)
 }
 
+/// The plain-words refusal shown in both choosers when a download is over the
+/// cap: "Too large to download (over 100 MB)".
+pub fn too_large_message(cap: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if cap.is_multiple_of(MIB) {
+        format!("Too large to download (over {} MB)", cap / MIB)
+    } else {
+        format!("Too large to download (over {})", crate::ifdb_documents::format_size(cap))
+    }
+}
+
 /// Read at most `cap` bytes from `r`; error with [`SearchError::TooLarge`] if
 /// the source has more. Reads `cap + 1` so a source of exactly `cap` bytes is
 /// accepted while one byte more is rejected — never buffering the whole of an
@@ -598,7 +746,7 @@ pub fn read_capped<R: Read>(r: R, cap: u64) -> Result<Vec<u8>, SearchError> {
 
 /// The last path segment of a URL, percent-decoded, with any query/fragment
 /// stripped. `None` if empty. Not yet sanitized — pass through [`sanitize_filename`].
-fn basename_from_url(url: &str) -> Option<String> {
+pub(crate) fn basename_from_url(url: &str) -> Option<String> {
     let no_frag = url.split('#').next().unwrap_or(url);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
     let last = no_query.rsplit('/').next().unwrap_or(no_query);
@@ -665,6 +813,13 @@ pub fn looks_like_story_file(filename: &str, bytes: &[u8]) -> bool {
 /// control chars and anything path-significant, and require it to still end in
 /// an accepted story extension. `None` if nothing safe/openable remains.
 pub fn sanitize_filename(raw: &str) -> Option<String> {
+    sanitize_basename(raw).filter(|c| is_named_story_file(Path::new(c)))
+}
+
+/// [`sanitize_filename`] without the story-extension requirement: the safe final
+/// component of an untrusted name, for the documents downloader (SQ-1680), whose
+/// files are manuals and maps rather than stories.
+pub(crate) fn sanitize_basename(raw: &str) -> Option<String> {
     // Final component under BOTH separators — `a/../b`, `..\\evil`, `/etc/x`.
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
     // A lone/leading-dot name (".", "..", ".z5") is never a real story file.
@@ -679,7 +834,7 @@ pub fn sanitize_filename(raw: &str) -> Option<String> {
     if cleaned.is_empty() || cleaned == ".." {
         return None;
     }
-    is_named_story_file(Path::new(&cleaned)).then_some(cleaned)
+    Some(cleaned)
 }
 
 /// A non-colliding path in `dir` for `filename`: returns `dir/filename` if free,
@@ -756,7 +911,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Find a direct child element named `name` and return its trimmed text.
-fn child_text<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> Option<String> {
+pub(crate) fn child_text<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> Option<String> {
     parent
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == name)
@@ -805,48 +960,88 @@ pub enum SearchEvent {
     Failed(String),
 }
 
-/// One serial background worker for the search modal. Dropping it ends the
-/// thread (the request channel closes).
-pub struct SearchWorker {
-    req_tx: mpsc::Sender<SearchJob>,
-    res_rx: mpsc::Receiver<SearchEvent>,
-    busy: Arc<AtomicBool>,
-    _worker: thread::JoinHandle<()>,
+/// The one-request-in-flight guard for ONE user's IFDB traffic: every
+/// [`IfdbWorker`] built from clones of one gate holds it for the whole of each
+/// job, so the story search modal's worker and a documents chooser's — a closed
+/// chooser's job already started cannot be recalled — never overlap. It belongs
+/// to a session (the picker, or a game's `AppState`) and is passed into each
+/// worker it builds, never shared process-wide: a host serving several players
+/// from one process gives each its own gate, since IFDB's rule is per user
+/// action and one player's long download must not stall another's.
+#[derive(Clone, Default, Debug)]
+pub struct IfdbGate(Arc<std::sync::Mutex<()>>);
+
+impl IfdbGate {
+    fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
 }
 
-impl SearchWorker {
-    /// `covers` and `data_base` are SQ-0474's post-download metadata/cover
-    /// persistence: `covers` is only ever asked for a `fetch_cover` (never
-    /// `fetch`/`fetch_by_id`, which would be an extra metadata request —
-    /// see [`crate::ifdb::MetadataSource`]); `data_base` locates each
-    /// story's `info.json` sidecar the same way the picker/fetch worker do
-    /// (`crate::storage::game_dir`).
-    pub fn new(source: Box<dyn SearchSource>, covers: Box<dyn MetadataSource>, data_base: PathBuf) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<SearchJob>();
-        let (res_tx, res_rx) = mpsc::channel::<SearchEvent>();
+/// What a job handler writes to: the event channel, plus the busy flag so a
+/// handler's closing event can be sent with the flag already clear.
+pub struct Out<E> {
+    pub tx: mpsc::Sender<E>,
+    busy: Arc<AtomicBool>,
+}
+
+impl<E> Out<E> {
+    /// Send an event; `false` when the receiver is gone.
+    pub fn send(&self, e: E) -> bool {
+        self.tx.send(e).is_ok()
+    }
+
+    /// Send the job's last event with `busy()` already false, so a caller that
+    /// drains it never reads a stale busy flag.
+    pub fn send_last(&self, e: E) -> bool {
+        self.busy.store(false, Ordering::Relaxed);
+        self.send(e)
+    }
+}
+
+/// The one serial IFDB worker: a thread, a job channel, an event channel and a
+/// busy flag. [`SearchWorker`] and `ifdb_documents::DocumentWorker` are this
+/// with their own job and event types; what a job does lives in the handler
+/// each is built with. Dropping it ends the thread once the job in hand
+/// finishes (the request channel closes).
+pub struct IfdbWorker<J, E> {
+    jobs: mpsc::Sender<J>,
+    events: mpsc::Receiver<E>,
+    busy: Arc<AtomicBool>,
+    _thread: thread::JoinHandle<()>,
+}
+
+impl<J: Send + 'static, E: Send + 'static> IfdbWorker<J, E> {
+    /// Start the thread. `handle` runs one job, sending its events through
+    /// `Out`, and returns `false` when the receiver is gone.
+    pub fn spawn(gate: IfdbGate, mut handle: impl FnMut(J, &Out<E>) -> bool + Send + 'static) -> Self {
+        let (jobs, job_rx) = mpsc::channel::<J>();
+        let (tx, events) = mpsc::channel::<E>();
         let busy = Arc::new(AtomicBool::new(false));
-        let worker_busy = Arc::clone(&busy);
-        let worker = thread::spawn(move || {
-            while let Ok(job) = req_rx.recv() {
-                let event = run_job(source.as_ref(), covers.as_ref(), &data_base, job);
-                worker_busy.store(false, Ordering::Relaxed);
-                if res_tx.send(event).is_err() {
+        let out = Out { tx, busy: Arc::clone(&busy) };
+        let thread = thread::spawn(move || {
+            while let Ok(job) = job_rx.recv() {
+                let alive = {
+                    let _one_at_a_time = gate.hold();
+                    handle(job, &out)
+                };
+                out.busy.store(false, Ordering::Relaxed);
+                if !alive {
                     return;
                 }
             }
         });
-        Self { req_tx, res_rx, busy, _worker: worker }
+        Self { jobs, events, busy, _thread: thread }
     }
 
-    /// Queue a job. The modal only ever has one outstanding at a time.
-    pub fn request(&self, job: SearchJob) {
+    /// Queue a job. A chooser only ever has one outstanding at a time.
+    pub fn request(&self, job: J) {
         self.busy.store(true, Ordering::Relaxed);
-        let _ = self.req_tx.send(job);
+        let _ = self.jobs.send(job);
     }
 
     /// Non-blocking drain of all events ready so far.
-    pub fn drain(&self) -> Vec<SearchEvent> {
-        self.res_rx.try_iter().collect()
+    pub fn drain(&self) -> Vec<E> {
+        self.events.try_iter().collect()
     }
 
     pub fn busy(&self) -> bool {
@@ -854,8 +1049,30 @@ impl SearchWorker {
     }
 }
 
+/// The search modal's worker.
+pub type SearchWorker = IfdbWorker<SearchJob, SearchEvent>;
+
+impl SearchWorker {
+    /// `gate` is the session's [`IfdbGate`]. `covers` and `roots` are SQ-0474's post-download metadata/cover
+    /// persistence: `covers` is only ever asked for a `fetch_cover` (never
+    /// `fetch`/`fetch_by_id`, which would be an extra metadata request —
+    /// see [`crate::ifdb::MetadataSource`]); `roots` locates each
+    /// story's `info.json` sidecar the same way the picker/fetch worker do
+    /// (its catalogue folder).
+    pub fn new(
+        gate: IfdbGate,
+        source: Box<dyn SearchSource>,
+        covers: Box<dyn MetadataSource>,
+        roots: crate::data_roots::DataRoots,
+    ) -> Self {
+        Self::spawn(gate, move |job, out| {
+            out.send_last(run_job(source.as_ref(), covers.as_ref(), &roots, job))
+        })
+    }
+}
+
 /// Run one job to an event, mapping every error to a friendly display string.
-fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, data_base: &Path, job: SearchJob) -> SearchEvent {
+fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, roots: &crate::data_roots::DataRoots, job: SearchJob) -> SearchEvent {
     match job {
         SearchJob::Seed => match source.hot() {
             Ok(hits) => SearchEvent::Results(hits),
@@ -871,7 +1088,7 @@ fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, data_base: &P
         },
         SearchJob::Download { url, dest, record } => match source.download(&url, &dest) {
             Ok(path) => {
-                persist_metadata_and_cover(covers, data_base, &path, record.as_deref());
+                persist_metadata_and_cover(covers, roots, &path, record.as_deref());
                 SearchEvent::Downloaded(path)
             }
             Err(e) => SearchEvent::Failed(e.to_string()),
@@ -889,7 +1106,7 @@ fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, data_base: &P
 /// download into a failure.
 fn persist_metadata_and_cover(
     covers: &dyn MetadataSource,
-    data_base: &Path,
+    roots: &crate::data_roots::DataRoots,
     story_path: &Path,
     record: Option<&IFiction>,
 ) {
@@ -911,10 +1128,11 @@ fn persist_metadata_and_cover(
     // image carries no `UUID://` marker falls through to the Z-machine
     // derivation reading an IFF header as a story header. *City of Secrets* —
     // Inform 6, Glulx, served as a `.gblorb` — is both at once.
-    let Some(entry) = crate::picker::resolve_entry(story_path, data_base) else { return };
-    let game_dir = entry.game_dir(data_base);
+    let Some(entry) = crate::picker::resolve_entry(story_path, roots) else { return };
+    let game_dir = entry.catalogue_dir(roots);
     let cover = crate::fetch_worker::maybe_fetch_cover(covers, &game_dir, story_path, iff);
     crate::fetch_worker::write_fetched(
+        roots,
         &game_dir,
         &entry.meta.ifid,
         crate::fetch_worker::found_meta(iff, cover),
@@ -1171,6 +1389,122 @@ mod tests {
         }
     }
 
+    /// Serve one canned HTTP response on a loopback port, once; returns its URL.
+    /// The server hangs up as soon as the response is written, so a client that
+    /// stops reading early is not an error here.
+    fn serve_once(head: &'static str, body: Vec<u8>) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut req = [0u8; 4096];
+            let _ = sock.read(&mut req);
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(&body);
+        });
+        format!("http://127.0.0.1:{port}/game.z5")
+    }
+
+    fn zcode(len: usize) -> Vec<u8> {
+        let mut z = vec![0u8; len];
+        z[0] = 5;
+        z
+    }
+
+    /// SQ-1682: a story over the cap by its declared length is refused before a
+    /// byte is read, with the player-facing words, and nothing reaches `dest`.
+    #[test]
+    fn a_story_over_the_cap_by_content_length_leaves_no_file() {
+        let dest = crate::scratch_dir("ifdb-story-cap-declared");
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n", zcode(5000));
+        let err = IfdbSearchClient::new().download_capped(&url, &dest, 1000).unwrap_err();
+        assert!(matches!(err, SearchError::TooLarge), "{err:?}");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "no partial file");
+        assert_eq!(too_large_message(100 * 1024 * 1024), "Too large to download (over 100 MB)");
+        assert_eq!(SearchError::TooLarge.to_string(), "Too large to download (over 100 MB)");
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    /// …and one that declares nothing (chunked) is cut off while streaming.
+    #[test]
+    fn a_chunked_story_over_the_cap_is_cut_off_while_streaming() {
+        let dest = crate::scratch_dir("ifdb-story-cap-chunked");
+        let mut body = Vec::new();
+        for _ in 0..5 {
+            body.extend_from_slice(b"400\r\n");
+            body.extend_from_slice(&zcode(0x400));
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        let url = serve_once("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n", body);
+        let err = IfdbSearchClient::new().download_capped(&url, &dest, 2000).unwrap_err();
+        assert!(matches!(err, SearchError::TooLarge), "{err:?}");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "no partial file");
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    /// A story under the cap downloads as before.
+    #[test]
+    fn a_story_under_the_cap_downloads() {
+        let dest = crate::scratch_dir("ifdb-story-cap-under");
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n", zcode(500));
+        let path = IfdbSearchClient::new().download_capped(&url, &dest, 1000).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap().len(), 500);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    /// A worker whose job announces it has started, then parks until released.
+    fn parked_worker(gate: IfdbGate) -> (IfdbWorker<(), ()>, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let w = IfdbWorker::spawn(gate, move |_job, out| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            out.send_last(())
+        });
+        (w, entered, release)
+    }
+
+    /// SQ-1682: workers sharing ONE gate (one session) never overlap; workers on
+    /// two gates (two sessions of one process) do not wait for each other.
+    #[test]
+    fn a_gate_serialises_its_own_workers_and_not_another_sessions() {
+        // Shared gate: while A's job is in hand the gate is held, and B's job
+        // starts only after A's finishes.
+        let gate = IfdbGate::default();
+        let (a, a_in, a_release) = parked_worker(gate.clone());
+        let (b, b_in, b_release) = parked_worker(gate.clone());
+        a.request(());
+        a_in.recv().unwrap();
+        b.request(());
+        assert!(gate.0.try_lock().is_err(), "A holds the gate, so B cannot be running");
+        assert!(b_in.try_recv().is_err());
+        a_release.send(()).unwrap();
+        b_in.recv().unwrap(); // B starts once A is done
+        b_release.send(()).unwrap();
+        while a.busy() || b.busy() {
+            std::thread::yield_now();
+        }
+
+        // Two gates: B runs while A is still parked.
+        let (a, a_in, a_release) = parked_worker(IfdbGate::default());
+        let (b, b_in, b_release) = parked_worker(IfdbGate::default());
+        a.request(());
+        a_in.recv().unwrap();
+        b.request(());
+        b_in.recv().unwrap(); // would deadlock if the gate were shared
+        assert!(a.busy());
+        a_release.send(()).unwrap();
+        b_release.send(()).unwrap();
+    }
+
+    /// The one cap is 100 MiB and the story cap is that same constant.
+    #[test]
+    fn the_cap_is_one_hundred_mebibytes() {
+        assert_eq!(MAX_DOWNLOAD, 100 * 1024 * 1024);
+    }
+
     #[test]
     fn unique_dest_appends_a_suffix_on_collision() {
         let dir = std::env::temp_dir().join(format!("bm_ifdb_dl_{}", std::process::id()));
@@ -1236,7 +1570,7 @@ mod tests {
             Ok(self.hits.clone())
         }
         fn download_options(&self, _tuid: &str) -> Result<ResolvedGame, SearchError> {
-            Ok(ResolvedGame { options: self.options.clone(), record: self.record.clone().map(Box::new) })
+            Ok(ResolvedGame { options: self.options.clone(), record: self.record.clone().map(Box::new), ..Default::default() })
         }
         fn download(&self, _url: &str, dest: &Path) -> Result<PathBuf, SearchError> {
             let p = dest.join("downloaded.ulx");
@@ -1316,7 +1650,7 @@ mod tests {
         };
         let source = Fake { hits: vec![hit.clone()], options: vec![opt], record: None, fail: false };
         let data_base = std::env::temp_dir().join(format!("bm_ifdb_worker_data_{}", std::process::id()));
-        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(FakeCovers::new()), crate::data_roots::DataRoots::single(data_base.clone()));
 
         w.request(SearchJob::Search("test".into()));
         match drain_one(&w) {
@@ -1377,7 +1711,7 @@ mod tests {
     fn worker_maps_a_transport_error_to_a_friendly_failed_event() {
         let source = Fake { hits: vec![], options: vec![], record: None, fail: true };
         let data_base = std::env::temp_dir().join(format!("bm_ifdb_worker_fail_{}", std::process::id()));
-        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base);
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(FakeCovers::new()), crate::data_roots::DataRoots::single(data_base));
         w.request(SearchJob::Search("x".into()));
         match drain_one(&w) {
             SearchEvent::Failed(msg) => assert_eq!(msg, "IFDB unreachable"),
@@ -1448,7 +1782,7 @@ mod tests {
             Ok(Vec::new())
         }
         fn download_options(&self, _tuid: &str) -> Result<ResolvedGame, SearchError> {
-            Ok(ResolvedGame { options: Vec::new(), record: None })
+            Ok(ResolvedGame::default())
         }
         fn download(&self, _url: &str, dest: &Path) -> Result<PathBuf, SearchError> {
             std::fs::create_dir_all(dest).map_err(|e| SearchError::Io(e.to_string()))?;
@@ -1476,7 +1810,7 @@ mod tests {
         let dest = data_base.join("stories");
         let source =
             FakeStoryDownload { name: "CoS.gblorb".into(), bytes: glulx_blorb(&glulx_image()) };
-        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(FakeCovers::new()), crate::data_roots::DataRoots::single(data_base.clone()));
 
         let record = IFiction {
             title: Some("City of Secrets".into()),
@@ -1497,7 +1831,7 @@ mod tests {
         };
 
         // The row the browser builds for the file that just landed.
-        let entry = crate::picker::resolve_entry(&path, &data_base)
+        let entry = crate::picker::resolve_entry(&path, &crate::data_roots::DataRoots::single(&data_base))
             .expect("the downloaded blorb scans as a playable story");
         assert!(
             entry.meta.ifid.starts_with("GLULX-"),
@@ -1506,7 +1840,7 @@ mod tests {
             entry.meta.ifid
         );
 
-        let fetched = crate::story_info::load(&entry.game_dir(&data_base), &entry.meta.ifid)
+        let fetched = crate::story_info::load(&entry.game_dir(&crate::data_roots::DataRoots::single(&data_base)), &entry.meta.ifid)
             .and_then(|i| i.fetched)
             .expect("the row's own IFID finds the sidecar the download wrote");
         assert_eq!(fetched.title.as_deref(), Some("City of Secrets"));
@@ -1528,7 +1862,7 @@ mod tests {
         let covers = FakeCovers::new();
         let cover_calls = Arc::clone(&covers.calls);
         let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
-        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(covers), crate::data_roots::DataRoots::single(data_base.clone()));
 
         let record = IFiction {
             title: Some("Deep Space Drifter".into()),
@@ -1578,7 +1912,7 @@ mod tests {
         let covers = FakeCovers::new();
         let cover_calls = Arc::clone(&covers.calls);
         let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
-        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(covers), crate::data_roots::DataRoots::single(data_base.clone()));
 
         let record = IFiction { title: Some("No Cover Game".into()), ..Default::default() };
         w.request(SearchJob::Download {
@@ -1613,7 +1947,7 @@ mod tests {
         let data_base = std::env::temp_dir().join(format!("bm_ifdb_ifid_fallback_{}", std::process::id()));
         let dest = data_base.join("stories");
         let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
-        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(FakeCovers::new()), crate::data_roots::DataRoots::single(data_base.clone()));
 
         let record = IFiction {
             title: Some("Grouped Editions".into()),
@@ -1657,7 +1991,7 @@ mod tests {
         let data_base = std::env::temp_dir().join(format!("bm_ifdb_ifid_single_{}", std::process::id()));
         let dest = data_base.join("stories");
         let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
-        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(FakeCovers::new()), crate::data_roots::DataRoots::single(data_base.clone()));
 
         let record = IFiction {
             title: Some("Single Edition".into()),
@@ -1698,7 +2032,7 @@ mod tests {
         let covers = FakeCovers::new();
         let cover_calls = Arc::clone(&covers.calls);
         let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
-        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+        let w = SearchWorker::new(IfdbGate::default(), Box::new(source), Box::new(covers), crate::data_roots::DataRoots::single(data_base.clone()));
 
         w.request(SearchJob::Download { url: "https://x/game.z5".into(), dest: dest.clone(), record: None });
         let path = match drain_one(&w) {

@@ -1742,7 +1742,12 @@ fn main() {
     // six games on an ST compilation and the image's filename says nothing about
     // which. The rule is `cli_host`'s, shared with the TUI, so opening the same
     // game in either front-end reaches the same directory.
-    let disk_build = medium.and_then(|kind| cli_host::DiskBuild::of(&story_bytes, kind));
+    // `build_for_key` is `DiskBuild::of` for a real mount, unchanged — and for
+    // a LOOSE file (`medium: None`), also unifies its save directory with a
+    // disk-mounted copy's when the header names a KNOWN, CATALOGUED
+    // commercial release (SQ-1635), the same rule `app` applies so both
+    // front-ends keep reaching one directory.
+    let disk_build = cli_host::build_for_key(&story_bytes, medium);
     let game_dir = cli_host::game_dir_with_key(
         &story_path,
         args.data_dir.as_deref(),

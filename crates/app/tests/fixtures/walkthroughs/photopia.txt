@@ -1,0 +1,150 @@
+# SQ-1600 Phase 1: a verified command sequence for Photopia (photopia.z5),
+# reconstructed by booting the real game headlessly and driving it turn by
+# turn, checking every reply against the actual interpreter. This is NOT a
+# copy of any published walkthrough's prose -- it is this project's own
+# derived list of literal game commands, produced for automated regression
+# testing (crates/app/tests/suites/walkthroughs.rs).
+#
+# Derived with the aid of, as a guide only (never transcribed):
+#   photopia.sol, IF Archive, Graham Pearce, 02-Jul-2000
+#   https://ifarchive.org/if-archive/solutions/photopia.sol
+#
+# Format: one command per line; blank lines and `#`-comment lines are
+# ignored. A line submitted while the game is at a single-keypress (Char)
+# prompt is sent as a keypress (its first character); otherwise it is
+# submitted as an ordinary typed line.
+#
+# The walkthroughs.rs harness injects three persistence checks (an in-game
+# @save/@restore round trip, a host Save State/Restore State round trip, and
+# a restart-reboot probe) right after the last `south` below (back at the
+# Landing site, before launching back into orbit) -- see that file's
+# `CHECKPOINT_AFTER_COMMAND` for exactly where and why.
+
+no
+x
+wait
+wait
+wait
+wait
+wait
+north
+north
+north
+north
+north
+get undamaged container
+south
+south
+south
+south
+south
+up
+x
+exit
+exit
+get in pool
+tilt her head back
+breathe into her mouth
+press her chest
+x
+x
+press blue button
+north
+south
+south
+south
+get pickaxe
+get shovel
+north
+north
+north
+up
+x
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+look
+get seed pod
+get gold coin
+get shovel
+north
+dig
+get treasure chest
+north
+northwest
+x
+exit
+talk to alley
+3
+talk to alley
+1
+talk to alley
+1
+x
+x
+west
+north
+south
+north
+west
+west
+west
+west
+west
+take off spacesuit
+up
+up
+down
+down
+west
+x
+turn off switch
+talk to alley
+4
+x
+wait
+wait
+wait
+wait
+wait
+wait
+wait
+x
+x
+examine trees
+wait
+wait
+wait
+wait
+wait
+open treasure chest
+get dirt
+drop dirt
+plant seed pod
+talk to weather man
+2
+give coin to weather man
+x
+talk to alley
+3
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+x
+push white button
+push white button
+turn off light
+x
+x

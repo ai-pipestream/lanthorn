@@ -150,6 +150,15 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+/// Point `state.current_room_name` at the room the engine is in NOW (`None` when it
+/// reports no location, rather than leaving a stale name). Every path that swaps
+/// game state without a normal turn — restore, resume, rewind, restart — calls this
+/// so the status line, `save_summary` and the room-name highlight never name the
+/// pre-swap room (SQ-1710).
+pub fn sync_current_room(state: &mut AppState, session: &dyn Engine) {
+    state.current_room_name = session.current_location().map(|l| l.name);
+}
+
 /// Re-observe the VM's current location after a restore/resume: fold the room into the
 /// map, deselect the viewed layer, select the room, and recenter the map pane on it.
 /// Produces no transcript output. Shared by every host restore/resume arm.
@@ -176,6 +185,7 @@ pub fn reobserve_location(
     // change with no passage behind it. Cleared before the early return, so a restore into a game
     // that reports no location does not carry the old one's death either. (SQ-0671, SQ-0673)
     state.death_watch = Default::default();
+    sync_current_room(state, session);
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
     let restore_result = TurnResult::observation(snap);
@@ -381,6 +391,26 @@ pub fn finish_command_turn(
         crate::random_exit_probe::declared_exit_for_command(cmd, room_before, |o, d| session.declared_exit(o, d));
 
     apply_turn(mapper, cmd, &result, &mut state.death_watch);
+    // SQ-1625: this command's own room description, if the engine captured one — see
+    // `TurnResult::description`'s doc for what each engine will and won't fill in. `state.turns`
+    // was already advanced above, so it names THIS turn.
+    crate::session::apply_room_description(mapper, state.turns, &result);
+    // SQ-1627: this command's own item observations, if any — the item-keyed sibling of the
+    // description capture immediately above, wired at the same call site for the same reason.
+    crate::session::apply_item_observations(mapper, state.turns, &result);
+    // SQ-1627, Facet 3: a take-style command that visibly failed to move its (unambiguous) target
+    // into inventory is confirmed fixed-in-place — structural only (no death/quit this turn, no
+    // phrase match on the refusal text; see `classify_take_attempt`'s own doc), and deliberately
+    // silent (no candidate, or an ambiguous one) rather than guessed. AFTER `apply_item_observations`
+    // so it reads this turn's own freshly-updated locations, not stale ones from before the command.
+    if !result.quit && !crate::session::turn_reports_death(&result.transcript) {
+        // SQ-1631 Fix 4: the take-verb itself is resolved through the story's OWN grammar
+        // (`classify_take_attempt`'s own doc), the same cached read `command_band`'s verb column
+        // already pays for every render frame — never a cost this call site adds.
+        if let Some(key) = crate::session::classify_take_attempt(cmd, &result.items, state.vocab.get(&*session)) {
+            mapper.graph.note_item_fixed_in_place(key);
+        }
+    }
 
     // A move that killed the player proved nothing about the passage, so its `tried` record is
     // taken back and the direction stays untried (`·`, not `×`). Fires for the turn that
@@ -741,6 +771,12 @@ fn post_turn_bookkeeping(
         if cmd_norm == "i" || cmd_norm == "inv" || cmd_norm == "inventory" {
             state.inventory_fallback = parse_inventory_output(&result.transcript);
         }
+
+        // SQ-1631 Fix 3: publish this turn's (possibly just-locked) player id back into the
+        // engine — mirroring `set_mouse`/`set_screen_dims`/`set_default_colours`'s pattern of
+        // pushing a host-known fact into the session — so the NEXT turn's item observations
+        // prefer it over each engine's raw per-turn heuristic. See `Engine::set_player_hint`'s doc.
+        session.set_player_hint(state.player_obj);
     }
 
     // ── The story's own words in what it has just printed (SQ-1116) ───
@@ -783,6 +819,7 @@ fn post_turn_bookkeeping(
             location,
             score,
             trigger: crate::archive::SaveTrigger::HostState,
+            source: state.source.clone(),
         };
         // v6 graphics canvases ride along so a resumed v6 story's pictures redraw
         // (SQ-0516); empty for non-v6 sessions, leaving the archive layout unchanged.
@@ -880,6 +917,17 @@ pub fn finish_resumed_turn(
     let struct_gen_before = mapper.graph.struct_gen();
     let room_before = mapper.graph.current();
     apply_turn(mapper, "", &result, &mut state.death_watch);
+    // SQ-1625: the resumed half of a turn drains through the SAME `finish_turn`/`drain_turn`
+    // a submitted command does (this function "mirrors the post-turn block in the `submit`
+    // path" per its own doc above), so it can carry a real `description` too — e.g. a Glulx
+    // `@save`/`@restore` continuation that goes on to print more of the room. `state.turns` was
+    // already advanced for this command by `finish_command_turn`; a resume is the second half
+    // of that SAME turn, not a new one.
+    crate::session::apply_room_description(mapper, state.turns, &result);
+    // SQ-1627: same reasoning as the description capture immediately above — the resumed half of
+    // a turn can carry real item observations too, and this is the exact gap SQ-1625 missed on
+    // its first pass (a follow-up commit had to add the description call here after the fact).
+    crate::session::apply_item_observations(mapper, state.turns, &result);
     // The resumed half of a turn can be where the death lands; it names no direction of its own,
     // so only the move still held from the submit path can be rolled back. (SQ-0671)
     crate::session::rollback_tried_on_death(
@@ -986,6 +1034,7 @@ pub fn apply_launch_resume(
             }
             state.transcript = lines;
             state.clear_anchor = None;
+            state.top_anchor = None;
             state.transcript_kinds = kinds;
             // The launch-resume stash carries no style runs; keep the parallel
             // vecs length-synced (unstyled, left/no-indent rows).
@@ -1083,14 +1132,46 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
 }
 
+/// Whether `new_content` looks like the OLD lines (`old_lines`, the ones a
+/// game-driven screen clear is about to discard) redrawing themselves rather
+/// than an entirely different screen taking over. Used to decide whether a
+/// game-driven `erase_lower` should collapse the prior screen via
+/// `truncate_transcript` (a genuine same-screen reprint — Counterfeit
+/// Monkey's arrow-navigated help menu, which reprints the whole menu on every
+/// keypress with only the cursor line differing) or preserve it (a totally
+/// different screen — Anchorhead's intro/quote/game-start sequence, or a
+/// picture click's empty-content clear followed later by unrelated room
+/// text). (SQ-1654)
+///
+/// Compares non-blank, trimmed lines on both sides. If either side has none,
+/// this is never a reprint — there's nothing to compare against, so don't
+/// destroy scrollback on a hunch; this is what keeps a picture click's
+/// empty-content clear from ever being treated as reprint-worthy. Otherwise
+/// counts how many of the new non-blank lines exactly match some old
+/// non-blank line; >=50% overlap counts as a reprint. The threshold sits in
+/// the middle of a wide gap between the two real cases (~0% overlap for
+/// Anchorhead's transitions, ~90%+ for CM's cursor-only-changes menu redraw)
+/// and does not need precise tuning.
+fn is_screen_reprint(old_lines: &[String], new_content: &str) -> bool {
+    let old_nonblank: Vec<&str> = old_lines.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let new_nonblank: Vec<&str> = new_content.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if old_nonblank.is_empty() || new_nonblank.is_empty() {
+        return false;
+    }
+    let matches = new_nonblank.iter().filter(|l| old_nonblank.contains(l)).count();
+    (matches as f64 / new_nonblank.len() as f64) >= 0.5
+}
+
 /// Apply a `TurnResult` produced by game-driven input that is not a full player
 /// command submission — a char-mode (`read_char`) keypress or a timed-input
 /// interrupt tick. Pushes transcript output (with style runs), routes
 /// beep/location/diagnostic events, applies the mapper turn, opens a
 /// game-initiated save/restore dialog if requested, and recenters on a location
 /// change. Deliberately skips `post_turn_bookkeeping` (history/inventory/
-/// auto-save): this is not a completed player turn. Returns `true` if the game
-/// quit (the caller should break the event loop).
+/// auto-save) AND `apply_room_description` (SQ-1625) AND `apply_item_observations` (SQ-1627):
+/// this is not a completed player turn, and `state.turns` was never advanced for it, so there is
+/// no turn number a captured description or item observation could correctly be stamped with.
+/// Returns `true` if the game quit (the caller should break the event loop).
 pub fn apply_game_driven_result(
     state: &mut AppState,
     mapper: &mut Mapper,
@@ -1102,14 +1183,52 @@ pub fn apply_game_driven_result(
 ) -> TurnOutcome {
     state.begin_turn(); // see `finish_command_turn` (SQ-1124)
     if result.erase_lower {
-        // A game-driven screen clear is a menu redraw navigated by keystrokes —
+        // A game-driven screen clear can be a menu redraw navigated by keystrokes —
         // Counterfeit Monkey's help menu clears the primary buffer and reprints
-        // the whole menu on EVERY arrow press. Collapse the previous reprint by
-        // truncating back to the prior clear anchor, so the reprints replace each
-        // other instead of piling up invisibly in scrollback (hidden by the
-        // SQ-0403 view-pin, then revealed when you exit the menu). (SQ-0407)
+        // the whole menu on EVERY arrow press, same menu, only the cursor line
+        // differing — in which case the reprint should COLLAPSE, truncating back
+        // to the prior clear anchor so reprints replace each other instead of
+        // piling up invisibly in scrollback (hidden by the SQ-0403 view-pin, then
+        // revealed when you exit the menu). (SQ-0407) But it can also be a
+        // completely different screen taking over — Anchorhead's intro/quote/
+        // game-start sequence of "press any key" screens, or a picture click's
+        // empty-content clear later followed by unrelated room text — and
+        // `clear_anchor` is STICKY (it only ever moves forward on another
+        // clear), so an unconditional truncate here plants a landmine: the
+        // NEXT game-driven clear in the session, however much later, wipes
+        // everything back to it. Only collapse when the new content actually
+        // looks like the old screen redrawing itself (SQ-1654).
+        let new_content_text: String = if result.transcript_elems.is_empty() {
+            result.transcript.clone()
+        } else {
+            result
+                .transcript_elems
+                .iter()
+                .filter_map(|e| match e {
+                    crate::session::TranscriptElem::Text { text, .. } => Some(text.as_str()),
+                    crate::session::TranscriptElem::Image(_)
+                    | crate::session::TranscriptElem::ScreenClear => None,
+                })
+                .collect()
+        };
+        // Whether a reprint collapses the prior screen (truncating scrollback
+        // back to the clear anchor) is unaffected by SQ-1660 — that's SQ-1654's
+        // call and stays exactly as it was. What SQ-1656 added and SQ-1660
+        // reverts is the render-facing top-anchor PIN below: every game-driven
+        // clear, collapse or preserve alike, pins the fresh content to the top
+        // of the pane again (`mark_screen_clear`), instantly hiding whatever
+        // came before above a fold, reachable by scrolling up. SQ-1656's
+        // preserving variant left two unrelated screens (e.g. Anchorhead's
+        // intro card and its quote splash) stacked together in the same
+        // viewport with no visual sign a clear had happened between them —
+        // the user watched this in practice and asked for the pre-SQ-1656
+        // behavior back, with no scroll animation on the transition (both
+        // `mark_screen_clear` already guarantees by setting `scroll_anim =
+        // None` directly).
         if let Some(anchor) = state.clear_anchor {
-            state.truncate_transcript(anchor);
+            if is_screen_reprint(&state.transcript[anchor..], &new_content_text) {
+                state.truncate_transcript(anchor);
+            }
         }
         state.mark_screen_clear();
     }
@@ -1609,6 +1728,7 @@ mod tests {
             location: None,
             score: None,
             trigger: crate::archive::SaveTrigger::HostState,
+            source: crate::archive::SaveSource::default(),
         };
         crate::archive::save_archive_meta(
             &arc, &mapper::mapper::Mapper::default(), &save, None,
@@ -1678,6 +1798,7 @@ mod tests {
             location: None,
             score: None,
             trigger: crate::archive::SaveTrigger::HostState,
+            source: crate::archive::SaveSource::default(),
         };
         crate::archive::save_archive_meta_pics(
             &arc, &mapper::mapper::Mapper::default(), &save, Some(&src.machine.screen),
@@ -1730,6 +1851,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         }
     }
 
@@ -1752,6 +1875,8 @@ mod tests {
             transcript_elems: Vec::new(),
             prose_retired: None,
             declared_exit: None,
+            description: None,
+            items: Vec::new(),
         }
     }
 
@@ -1765,9 +1890,20 @@ mod tests {
     #[test]
     fn game_driven_screen_clear_collapses_menu_reprints() {
         // SQ-0407: a menu navigated by keystrokes (CM's help) clears + reprints the
-        // whole menu into the primary buffer every keypress. Consecutive game-driven
-        // clears must COLLAPSE — each reprint replaces the last instead of piling up
-        // in scrollback — while pre-menu content is preserved.
+        // whole menu into the primary buffer every keypress — same menu, only the
+        // cursor marker line differs. Consecutive game-driven clears of a REPRINT
+        // like this must COLLAPSE — each redraw replaces the last instead of
+        // piling up in scrollback — while pre-menu content is preserved.
+        //
+        // SQ-1654: this fixture used to be two placeholder strings ("MENU v1" /
+        // "MENU v2") with ZERO line overlap, which only ever exercised the OLD
+        // unconditional-truncate code — under the new similarity-gated
+        // `is_screen_reprint` check, two dissimilar strings are correctly NOT
+        // collapsed. Rewritten here with a realistic 5-line menu where only the
+        // cursor-marker line moves (v1 marks "Introduction", v2 marks "Chapter
+        // One"; the other 3 lines are identical) — 3 of 5 lines match (60%),
+        // clearing the >=50% reprint threshold with room to spare, the same shape
+        // the original SQ-0407 commit described.
         let tmp = std::env::temp_dir().join(format!("lanthorn-collapse-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut state = crate::state::AppState::default();
@@ -1778,17 +1914,51 @@ mod tests {
 
         state.push_transcript("room description"); // pre-menu content
 
-        // First menu draw (a clearing turn): appends MENU v1.
-        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
-        assert!(state.transcript.iter().any(|l| l.contains("MENU v1")));
+        let menu_v1 = "> Introduction\n  Chapter One\n  Chapter Two\n  Chapter Three\n  Epilogue";
+        let menu_v2 = "  Introduction\n> Chapter One\n  Chapter Two\n  Chapter Three\n  Epilogue";
+
+        // First menu draw (a clearing turn): appends menu_v1.
+        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result(menu_v1), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
+        assert!(state.transcript.iter().any(|l| l.contains("> Introduction")));
         let len_after_v1 = state.transcript.len();
 
-        // Second draw (an arrow keypress): collapses v1, appends MENU v2.
-        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
-        assert!(!state.transcript.iter().any(|l| l.contains("MENU v1")), "v1 must be collapsed, not stacked");
-        assert!(state.transcript.iter().any(|l| l.contains("MENU v2")), "v2 present");
+        // Second draw (an arrow keypress): collapses v1, appends menu_v2.
+        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result(menu_v2), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
+        assert!(!state.transcript.iter().any(|l| l.contains("> Introduction")), "v1's cursor line must be collapsed, not stacked");
+        assert!(state.transcript.iter().any(|l| l.contains("> Chapter One")), "v2 present");
         assert!(state.transcript.iter().any(|l| l.contains("room description")), "pre-menu content preserved");
         assert!(state.transcript.len() <= len_after_v1, "transcript did not grow across reprints");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn game_driven_screen_clear_preserves_dissimilar_screens() {
+        // SQ-1654: the bug this guards against. Two game-driven clears in a row
+        // whose content has ~zero line overlap — e.g. Anchorhead's intro card
+        // giving way to an entirely different quote splash — must NOT collapse:
+        // `clear_anchor` is sticky, so an unconditional truncate here would wipe
+        // the first screen the instant a second, unrelated one appears.
+        let tmp = std::env::temp_dir().join(format!("lanthorn-preserve-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = crate::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+        let mut m = mapper::mapper::Mapper::default();
+        let rect = Some((20u16, 20u16));
+        let eng = TraceOnlyEngine { line: None, v6: None, filename_req: None };
+
+        let intro = "Welcome to Anchorhead\nA Gothic Horror Story\nby Michael S. Gentry";
+        let quote = "\"There are more things in heaven and earth...\"\n  -- Shakespeare, Hamlet";
+
+        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result(intro), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
+        assert!(state.transcript.iter().any(|l| l.contains("Welcome to Anchorhead")));
+
+        let _ = super::apply_game_driven_result(&mut state, &mut m, &clearing_result(quote), &tmp, rect, &eng, crate::pager::Driver::PlayerInput);
+        assert!(
+            state.transcript.iter().any(|l| l.contains("Welcome to Anchorhead")),
+            "a dissimilar screen must not collapse the prior one"
+        );
+        assert!(state.transcript.iter().any(|l| l.contains("Shakespeare")), "new screen present");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1979,6 +2149,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SQ-1627: `finish_resumed_turn` must capture item observations too — the exact gap SQ-1625
+    /// missed on its first pass for `description` (a follow-up commit had to wire it in here
+    /// after the fact; see that commit's own message). Mirrors this file's own
+    /// `a_clean_quit_sets_game_ended…` harness shape: drive `finish_resumed_turn` directly with a
+    /// `TurnResult` carrying a real location and item observation, and read the answer straight
+    /// off the mapper it was handed.
+    #[test]
+    fn finish_resumed_turn_captures_item_observations_too_sq1627() {
+        use crate::session::{ItemObservation, ObservedItemLocation};
+
+        let dir = crate::scratch_dir("sq1627-resumed-turn-items");
+        let mut state = crate::state::AppState::default();
+        state.config.auto_save = false; // avoid touching TraceOnlyEngine's unreachable!() save_state
+        state.turns = 1; // as if `finish_command_turn` had already advanced it for this command
+        let mut mapper = mapper::mapper::Mapper::default();
+        mapper.observe(1, "West of House", None);
+        let mut eng = TraceOnlyEngine { line: None, v6: None, filename_req: None };
+        let rect = Some((20u16, 20u16));
+
+        let mut result = fault_test_result(false, None);
+        result.location = Some(crate::engine::LocationInfo { number: 1, parent: 0, name: "West of House".into() });
+        result.items = vec![ItemObservation {
+            key: 10,
+            name: "a small mailbox".into(),
+            location: ObservedItemLocation::RoomDirect,
+            words: grammar_model::ObjectWords::new(10, "a small mailbox".into(), vec!["mailbox".into()], None, None),
+        }];
+
+        let _ = super::finish_resumed_turn(result, &mut mapper, &mut state, &mut eng, &dir, "TEST-IFID", rect);
+
+        let rec = mapper.graph.item(10).expect("the resumed turn's own item observation reached the mapper");
+        assert_eq!(rec.last_seen, mapper::graph::ItemLocation::Room { room: 1, direct: true, container: None });
+        assert_eq!(rec.origin_turn, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The guard the fix must NOT widen: an ordinary game-driven turn that is
     /// NOT a clean quit must leave `state.game_ended` false and its per-turn
     /// auto-save running exactly as before — mirrors the SQ-0648
@@ -2081,6 +2288,7 @@ mod tests {
             format_version: crate::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 1, saved_at: String::new(), location: None, score: None,
             trigger: crate::archive::SaveTrigger::HostState,
+            source: crate::archive::SaveSource::default(),
         };
         crate::archive::save_archive_meta(
             &arc_file, &mapper::mapper::Mapper::default(), &seed_sess.save_state(), None,
@@ -2106,6 +2314,37 @@ mod tests {
         assert!(state.archive_worker.drain_failures().is_empty(), "the auto-save must succeed");
         let after = std::fs::read(&arc_file).unwrap();
         assert_ne!(after, before, "the auto-save actually wrote over the existing slot, silently");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1633: the per-turn auto-save builds its `Meta` inline here, its own
+    /// call site distinct from every other save path — it must carry the
+    /// booted session's `source` too.
+    #[test]
+    fn per_turn_auto_save_names_the_booted_sessions_source_sq1633() {
+        use crate::session::GameSession;
+
+        let dir = crate::scratch_dir("sq1633-per-turn-source");
+        let arc_file = dir.join("default.lanthorn");
+
+        let mut sess = GameSession::new(crate::engine_helpers::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
+        let mut state = crate::state::AppState::default();
+        state.config.auto_save = true;
+        state.source = crate::archive::SaveSource {
+            story_file: Some("zork1-r88-s840726.z3".to_string()),
+            disk_entry: None,
+            machine: None,
+        };
+        let mapper = mapper::mapper::Mapper::default();
+        let result = game_driven_result(None);
+
+        super::post_turn_bookkeeping(&mut state, &mapper, &mut sess, &result, "look", mapper.struct_gen(), "TEST-IFID", &arc_file, &mut crate::engine::TurnSave::default());
+        state.archive_worker.flush();
+        assert!(state.archive_worker.drain_failures().is_empty(), "the auto-save must succeed");
+
+        let meta = crate::archive::read_archive_meta(&arc_file).expect("archive readable");
+        assert_eq!(meta.source, state.source, "the per-turn auto-save must name the booted copy's own source");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

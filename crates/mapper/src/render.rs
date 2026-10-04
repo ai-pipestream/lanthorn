@@ -149,11 +149,11 @@ fn matches_bearing(dir: crate::direction::Direction, delta: (i32, i32)) -> bool 
 }
 
 /// Fixed tie-break order for [`collapse_stacked_exits`] when two compass directions to the same
-/// destination bearing-match equally (both or neither): N, S, E, W, NE, NW, SE, SW, lower wins.
-/// This is NOT a geometric claim that one tied direction is more "correct" than the other — a
-/// tie only happens when [`matches_bearing`] could not tell them apart either (see that
-/// function) — it exists so the choice is deterministic rather than dependent on
-/// `MapGraph::connections()`'s order.
+/// destination are the same class (both cardinal or both diagonal) and bearing-match equally
+/// (both or neither): N, S, E, W, NE, NW, SE, SW, lower wins. This is NOT a geometric claim that
+/// one tied direction is more "correct" than the other — a tie only happens when
+/// [`matches_bearing`] could not tell them apart either (see that function) — it exists so the
+/// choice is deterministic rather than dependent on `MapGraph::connections()`'s order.
 fn compass_tie_priority(d: crate::direction::Direction) -> u8 {
     use crate::direction::Direction::*;
     match d {
@@ -172,10 +172,11 @@ fn compass_tie_priority(d: crate::direction::Direction) -> u8 {
 /// — Up/Down/In/Out) is left alone entirely: there is nothing to prefer a portal direction
 /// over, so nothing changes.
 ///
-/// Primary is the compass member whose direction [`matches_bearing`] where the destination
-/// ACTUALLY sits, which is unique whenever it exists (only one compass bearing can agree with
-/// one real delta). When no candidate matches — or, a degenerate map, more than one does — ties
-/// break by [`compass_tie_priority`]. Either room lacking a placed position falls straight to
+/// **A CARDINAL exit always beats a DIAGONAL one** (SQ-1671): a room with both `E` and `NE` to
+/// the same destination draws the `E`, wherever the destination happens to sit. Within one class
+/// (two cardinals, or two diagonals) primary is the member whose direction [`matches_bearing`]
+/// where the destination ACTUALLY sits. When no candidate of that class matches — or, a
+/// degenerate map, more than one does — ties break by [`compass_tie_priority`]. Either room lacking a placed position falls straight to
 /// the tie-break (nothing to compare positions of).
 ///
 /// Returns a graph clone with every non-primary member of a stacked group removed, fed to the
@@ -213,7 +214,9 @@ fn collapse_stacked_exits(
         };
         let Some(&primary_idx) = compass.iter().min_by_key(|&&i| {
             let matches = delta.is_some_and(|d| matches_bearing(conns[i].dir, d));
-            (!matches, compass_tie_priority(conns[i].dir))
+            let (dx, dy) = crate::direction::grid_offset(conns[i].dir).unwrap_or((0, 0));
+            let diagonal = dx != 0 && dy != 0;
+            (diagonal, !matches, compass_tie_priority(conns[i].dir))
         }) else {
             continue; // portal-only stack: nothing to prefer a portal direction over
         };
@@ -434,6 +437,28 @@ pub fn render_layer_traced(
                 kind: spec.kind,
             },
         ));
+    }
+    // A later ghost may have opened a line and pushed an earlier ghost off its doorstep, leaving
+    // that cell empty (SQ-1693). Put any ghost whose doorstep is now free back on it, to a fixed
+    // point. Specs are walked in their fixed order and every move lands on a free cell, so it is
+    // deterministic; each move takes a ghost strictly nearer its anchor, so it terminates.
+    loop {
+        let mut moved = false;
+        for spec in &specs {
+            let Some(&a) = plane.get(&spec.anchor) else { continue };
+            let Some(&cur) = plane.get(&spec.id) else { continue };
+            if !ghosts.iter().any(|(id, _)| *id == spec.id) {
+                continue;
+            }
+            let want = (a.0 + spec.offset.0, a.1 + spec.offset.1);
+            if cur != want && !plane.values().any(|&q| q == want) {
+                plane.insert(spec.id, want);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
     }
     // Every crossing this layer touches, as an ordinary connection of the sub-graph: the routers
     // draw a two-way crossing with a head at each end and a one-way with one, exactly as they do
@@ -683,6 +708,25 @@ mod tests {
         );
     }
 
+    /// SQ-1671: a cardinal exit beats a diagonal one to the same destination even when the
+    /// destination sits where the diagonal points (South of House: E and NE to Behind House).
+    #[test]
+    fn cardinal_exit_beats_diagonal_to_the_same_destination() {
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "South of House".into());
+        g.upsert_room(2, "Behind House".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, -1)); // due north-east of 1: the diagonal's own bearing
+        g.add_edge(1, Direction::NE, 2);
+        g.add_edge(1, Direction::E, 2);
+        let rm = render(&g);
+        let r1 = rm.rooms.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(
+            r1.stacked_exits,
+            vec![StackedExit { primary: Direction::E, dest: 2, secondary: vec![Direction::NE] }],
+        );
+    }
+
     /// A destination reached ONLY by portals (no compass direction at all): nothing to prefer a
     /// portal over, so `collapse_stacked_exits` is a no-op — routing comes out identical to
     /// routing the graph directly (the pre-existing SQ-0689 same-pair collapse, unrelated to
@@ -928,5 +972,33 @@ mod tests {
             (ghost.0).abs() <= 1 && (ghost.1).abs() <= 1,
             "and it is still on the Hall's own doorstep: {ghost:?}"
         );
+    }
+
+    /// SQ-1693: a later ghost that opens a row pushes an earlier one off its doorstep; the pass
+    /// after seating puts it back where its anchor's direction wants it.
+    #[test]
+    fn a_ghost_pushed_off_its_doorstep_is_reseated_when_the_doorstep_empties() {
+        let mut g = crate::graph::MapGraph::new();
+        for (id, n) in [(1, "Hall"), (2, "Pantry"), (3, "Crate"), (4, "CellarA"), (5, "CellarB")] {
+            g.upsert_room(id, n.into());
+        }
+        g.set_pos(1, (0, -1));
+        g.set_pos(2, (1, -1));
+        g.set_pos(3, (1, 0)); // the second ghost's doorstep: opening its row moves the first ghost
+        g.set_pos(4, (0, 0));
+        g.set_pos(5, (0, 0));
+        let l = g.new_layer(Some(0), "Under".into());
+        g.set_room_layer(4, l);
+        g.set_room_layer(5, l);
+        g.add_edge(1, Direction::Down, 4);
+        g.add_edge(4, Direction::Up, 1);
+        g.add_edge(2, Direction::Down, 5);
+        g.add_edge(5, Direction::Up, 2);
+        let rm = render_layer(&g, 0);
+        let cell = |id| rm.rooms.iter().find(|r| r.id == id).unwrap().cell;
+        let hall = cell(1);
+        assert_eq!(cell(4), (hall.0, hall.1 + 1), "first ghost back on the Hall's doorstep");
+        let pantry = cell(2);
+        assert_eq!(cell(5), (pantry.0, pantry.1 + 1), "second ghost on the Pantry's doorstep");
     }
 }

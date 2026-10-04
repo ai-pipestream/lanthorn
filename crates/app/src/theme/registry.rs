@@ -487,6 +487,59 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("tidy_progress", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("meta_marker", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("inventory_panel", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    // ── The Journal's tab bar (SQ-1684): the row of tab names along the top of the
+    // story pane's right-hand panel. `journal.tabbar` fills the row, `journal.tab`
+    // is an inactive label, `journal.tab:active` the showing one — the same
+    // muted/accent-bold reading `panel.tab` / `panel.tab:active` use.
+    row("journal.tabbar", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.tab", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.tab:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    // ── The Map tab's room card (SQ-1688): the compact summary under the map while a
+    // room is pinned. `journal.map.card` is its ground; the rest style one element
+    // each, laid over it.
+    row("journal.map.card", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.map.card.border", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    row("journal.map.card.name", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("journal.map.card.layer", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.map.card.description", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.map.card.seen", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.map.card.button", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    // ── The Journal's Documents tab (SQ-1681). A list row and its selection, the
+    // kind/size column, the spoiler marker, the folder line and the buttons under
+    // it, the empty-folder hint; the pager's text, its title line and its
+    // truncation notice.
+    // ── The Hints tab (SQ-1685): the hint session's window. `input:unfocused` is the
+    // dim the unfocused input row wears (the hint input while the story has the
+    // keyboard, and the story's prompt row while the hint session has it);
+    // `tab:focused` marks the tab label while the session holds the keyboard.
+    row("journal.hints.transcript", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.hints.input", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.hints.input:unfocused", Section::Elements, Kind::Style, Some("muted"), Delta { dim: Some(true), ..Delta::EMPTY }),
+    row("journal.hints.builtin", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
+    row("journal.hints.nohint", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.hints.button", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    row("journal.hints.tab:focused", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    row("journal.docs.row", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.docs.row:selected", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    row("journal.docs.meta", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.docs.desc", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.docs.spoiler", Section::Elements, Kind::Style, Some("alert"), mods(true, false, false, false)),
+    row("journal.docs.header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("journal.docs.button", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    row("journal.docs.hint", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
+    row("journal.docs.pager", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("journal.docs.pager_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("journal.docs.pager_notice", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
+    // The inventory panel's "Carrying:"/"Elsewhere:" section headers (SQ-1630) —
+    // same heading role room_panel.header uses, so the two docks' headers read
+    // alike.
+    row("inventory_panel.header", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    // The per-row "found Room, turn N" / "last seen Room, turn N" metadata
+    // clause. Plain host-authored metadata, not quoted game prose, so it takes
+    // `room_panel.aliases`'s treatment (muted, no italic) rather than
+    // `room_panel.description`'s (muted + italic, reserved for the game's own
+    // text) — background information about an item, same reasoning as both.
+    row("inventory_panel.meta", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── The Room Panel (SQ-0692): the panel describing one room, docked at the
     // bottom of the map pane. `room_panel` is its body text; the header line
     // naming the room, its layer and the follow/pin regime gets its own
@@ -500,6 +553,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // `map.loc_indicator`: it is background information about the room, not something to draw
     // the eye to the way the header or the exit card does.
     row("room_panel.aliases", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // The room's captured description (SQ-1628): the game's own quoted text, not lanthorn UI
+    // chrome, so it gets the same "muted + italic" treatment `story_info_blurb` gives the
+    // story file's own blurb — a role already established for "this text came from the game".
+    row("room_panel.description", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
     row("story_info_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // ── `/dump-terminal` (SQ-0994). Its whole point is telling a MEASURED value
     // from an ASSUMED one, so the two get different looks: a heading to find the
@@ -524,7 +581,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // that is a statement of fact rather than an option.
     row("story_info_artwork", Section::Elements, Kind::Style, Some("story_info_value"), Delta::EMPTY),
     row("story_info_artwork:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    // SQ-1679: the info panel's documents-folder line (the path, "(not created)",
+    // or the hint to link to IFDB), and the button that creates the folder.
+    row("story_info_documents", Section::Elements, Kind::Style, Some("story_info_value"), Delta::EMPTY),
+    row("story_info_documents_button", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
     row("graphics", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // SQ-1703 P4: the cells a Windows Glk window mask hides in stretch mode.
+    row("glk_mask_outside", Section::Elements, Kind::Style, Some("graphics"), Delta::EMPTY),
     row("inline_image", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
     row("story_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("story_header_active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
@@ -570,6 +633,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // muted tint, so "I have this one" reads without displacing the filename.
     row("ifdb_download_present", Section::Elements, Kind::Style, Some("muted"), glyph("✓")),
     row("ifdb_attribution", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
+    // ── the documents chooser (SQ-1680) — it reuses the IFDB modal's row styles;
+    // these are what it adds: the mark on a ticked row, the spoiler tag, a file
+    // or zip entry named for the game, and the text preview. ──
+    row("documents_checked", Section::Elements, Kind::Style, Some("accent"), glyph("✓")),
+    row("documents_spoiler", Section::Elements, Kind::Style, Some("alert"), mods(false, true, false, false)),
+    row("documents_title_match", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    row("documents_preview", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── saves manager (SQ-0531) — the Type cell's portability tint. A "Game"
     // save carries standard save-instruction-PC bytes any interpreter reads and
     // gets the accent + the ↗ glyph; a host "State" snapshot stays here. ──
@@ -806,11 +876,42 @@ mod tests {
         "more_prompt",
         "tidy_progress",
         "meta_marker",
+        "journal.tabbar",
+        "journal.tab",
+        "journal.tab:active",
+        "journal.map.card",
+        "journal.map.card.border",
+        "journal.map.card.name",
+        "journal.map.card.layer",
+        "journal.map.card.description",
+        "journal.map.card.seen",
+        "journal.map.card.button",
+        "journal.hints.transcript",
+        "journal.hints.input",
+        "journal.hints.input:unfocused",
+        "journal.hints.builtin",
+        "journal.hints.nohint",
+        "journal.hints.button",
+        "journal.hints.tab:focused",
+        "journal.docs.row",
+        "journal.docs.row:selected",
+        "journal.docs.meta",
+        "journal.docs.desc",
+        "journal.docs.spoiler",
+        "journal.docs.header",
+        "journal.docs.button",
+        "journal.docs.hint",
+        "journal.docs.pager",
+        "journal.docs.pager_title",
+        "journal.docs.pager_notice",
         "inventory_panel",
+        "inventory_panel.header",
+        "inventory_panel.meta",
         "room_panel",
         "room_panel.header",
         "room_panel.header:pinned",
         "room_panel.aliases",
+        "room_panel.description",
         "story_info_title",
         "terminal_dump_heading",
         "terminal_dump_assumed",
@@ -823,7 +924,11 @@ mod tests {
         // SQ-0789: the info panel's detected-artwork block
         "story_info_artwork",
         "story_info_artwork:active",
+        // SQ-1679: the documents-folder line and its button
+        "story_info_documents",
+        "story_info_documents_button",
         "graphics",
+        "glk_mask_outside",
         "inline_image",
         "story_header",
         "story_header_active",
@@ -858,6 +963,11 @@ mod tests {
         "saves_portable",
         "saves_host_only",
         "ifdb_attribution",
+        // SQ-1680: the documents chooser
+        "documents_checked",
+        "documents_spoiler",
+        "documents_title_match",
+        "documents_preview",
         // SQ-0643: hard-coded modal/list styles → themed selectors
         "dialog.list_selected",
         "dialog.list_footer",

@@ -98,6 +98,7 @@ fn story_ink_survives_a_save_state_resume() {
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &pics,
@@ -206,6 +207,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
+            source: app::archive::SaveSource::default(),
         },
         &app::archive::SessionRecord::empty(),
         &[],

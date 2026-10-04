@@ -20,7 +20,7 @@
 //! plausible answer.
 
 pub use cli_host::storage::{
-    DiskBuild, StoryOrigin, story_key_at, story_key_at_from, story_key_for,
+    DiskBuild, StoryOrigin, build_for_key, story_key_at, story_key_at_from, story_key_for,
 };
 
 use std::io::{self, Write};
@@ -34,14 +34,27 @@ pub fn game_dir(base: &Path, key: &str) -> PathBuf {
     base.join(format!("{key}.save"))
 }
 
-/// The default (auto/singleton) Save-State slot inside a game dir.
+/// The default (auto/singleton) Save-State slot inside a game dir. Written by
+/// the per-turn and exit-time auto-save ONLY (SQ-1624) — a manual quick-save
+/// (Ctrl+S / bare `/save-state`) goes to [`quick_save_state_path`] instead, so
+/// the player's own checkpoint is never immediately overwritten by the next
+/// turn's auto-save landing on the same file.
 pub fn default_state_path(game_dir: &Path) -> PathBuf {
     game_dir.join("default.lanthorn")
 }
 
-/// `default` is reserved for the auto/singleton slot; a user save may not use it.
+/// The manual quick-save slot inside a game dir (SQ-1624): Ctrl+S, bare
+/// `/save-state`, and the quit dialog's "Save State & quit" all write here.
+/// Kept apart from [`default_state_path`] so a quick-save survives the next
+/// per-turn auto-save instead of being clobbered by it.
+pub fn quick_save_state_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("quick-save.lanthorn")
+}
+
+/// `default` is reserved for the auto/singleton slot and `quick-save` for the
+/// manual quick-save slot (SQ-1624); a user save may not use either.
 pub fn is_reserved_slug(slug: &str) -> bool {
-    slug == "default"
+    slug == "default" || slug == "quick-save"
 }
 
 /// Delete the game's AUTO persistent data so the next boot starts from scratch:
@@ -59,6 +72,23 @@ pub fn delete_auto_persistent(game_dir: &Path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => eprintln!("warning: could not delete {}: {e}", path.display()),
         }
+    }
+}
+
+/// Delete the player's quick-save slot (SQ-1665): `/reset-game`'s "Delete
+/// saved progress" option calls this alongside [`delete_auto_persistent`].
+/// [`quick_save_state_path`]'s own doc explains why the quick-save is kept
+/// apart from the per-turn auto-save in the ORDINARY case — so a routine
+/// auto-save overwrite can never clobber a player's deliberate checkpoint —
+/// but "Delete saved progress" is a different, explicit request to wipe
+/// everything the host could resume from, and that reason does not apply to
+/// it. A missing file is not an error.
+pub fn delete_quick_save(game_dir: &Path) {
+    let path = quick_save_state_path(game_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("warning: could not delete {}: {e}", path.display()),
     }
 }
 
@@ -243,9 +273,22 @@ mod tests {
     }
 
     #[test]
+    fn quick_save_state_path_is_in_game_dir() {
+        assert_eq!(
+            quick_save_state_path(Path::new("/base/Zork1.z5.save")),
+            PathBuf::from("/base/Zork1.z5.save/quick-save.lanthorn")
+        );
+    }
+
+    #[test]
     fn default_is_reserved() {
         assert!(is_reserved_slug("default"));
         assert!(!is_reserved_slug("quicksave"));
+    }
+
+    #[test]
+    fn quick_save_is_reserved() {
+        assert!(is_reserved_slug("quick-save"));
     }
 
     /// `delete_auto_persistent` removes exactly the three reserved `default.*`
@@ -340,6 +383,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         delete_auto_persistent(&tmp); // no default.* present -> no panic
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// SQ-1665: `delete_quick_save` removes exactly `quick-save.lanthorn` and
+    /// leaves the player's named Save States and in-game saves untouched —
+    /// the same scope `delete_auto_persistent` keeps for the `default.*`
+    /// files, applied to the one file that function deliberately excludes.
+    #[test]
+    fn delete_quick_save_removes_only_the_quick_save_slot() {
+        let tmp = crate::scratch_dir("delete-quick-save");
+
+        std::fs::write(tmp.join("quick-save.lanthorn"), b"x").unwrap();
+        for f in ["default.lanthorn", "myslot.lanthorn", "quick.qzl"] {
+            std::fs::write(tmp.join(f), b"x").unwrap();
+        }
+
+        delete_quick_save(&tmp);
+
+        assert!(!tmp.join("quick-save.lanthorn").exists(), "the quick-save slot should be deleted");
+        for f in ["default.lanthorn", "myslot.lanthorn", "quick.qzl"] {
+            assert!(tmp.join(f).exists(), "{f} should be kept");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A missing quick-save (no quick-save ever made) is not an error.
+    #[test]
+    fn delete_quick_save_ignores_missing() {
+        let tmp = crate::scratch_dir("delete-quick-save-missing");
+        delete_quick_save(&tmp); // no quick-save.lanthorn present -> no panic
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

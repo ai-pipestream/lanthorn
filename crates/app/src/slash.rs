@@ -119,6 +119,10 @@ pub enum SlashOutcome {
     /// in the per-game `config.toml` sidecar, never the global one. Handled in
     /// `slash_dispatch` (mutates `state.config.v6_render`).
     SetV6Render(V6RenderArg),
+    /// Switch how this game's design-size Glulx layout fills the pane (SQ-1707):
+    /// stretch or aspect. Applies live and is persisted in the per-game
+    /// `config.toml` sidecar, never the global one. Handled in `slash_dispatch`.
+    SetGlkFit(GlkFitArg),
     /// Set this game's v6 pixel-lock preference (SQ-0945). Applies live —
     /// `state.config.v6_pixel_lock` is read afresh every frame — and is persisted
     /// in the per-game `config.toml` sidecar, never the global one. Handled in
@@ -145,6 +149,21 @@ pub enum SlashOutcome {
     /// the modal; the answer writes preset names into `style.toml` and reloads
     /// the theme. Handled in `slash_dispatch`.
     RunFontCheck,
+    /// Open the "Download documents from IFDB" chooser (SQ-1680) for the game
+    /// the caller has in hand — the running game, or in the browser (which maps
+    /// it to [`crate::browser::BrowserAction::DownloadDocuments`]) the selected
+    /// story. The one outcome that both worlds apply, see [`in_both_worlds`].
+    DownloadDocuments,
+    /// Create the documents folder (SQ-1679) for the game the caller has in hand:
+    /// the running game, or in the browser (which maps it to
+    /// [`crate::browser::BrowserAction::CreateDocumentsFolder`]) the selected
+    /// story. The second outcome both worlds apply, see [`in_both_worlds`].
+    CreateDocumentsFolder,
+    /// Download a matching InvisiClues hint file for the game the caller has in
+    /// hand (SQ-1685): the running game — from the Hints tab's button — or in the
+    /// browser (which maps it to [`crate::browser::BrowserAction::DownloadHints`])
+    /// the selected story. The third outcome both worlds apply, see [`in_both_worlds`].
+    DownloadHints,
     /// Act on the pre-game story browser. The browser has no `AppState`, so it
     /// cannot take an [`Action`]; its verbs are their own type and are applied
     /// by the picker loop. See [`crate::browser`] (SQ-0796).
@@ -218,6 +237,20 @@ pub enum V6RenderArg {
     /// Step to the next mode (hybrid → raster → extended → hybrid).
     Cycle,
     /// Clear the per-game override: inherit the global `v6_render`.
+    Auto,
+}
+
+/// Argument for `set-glk-fit` (SQ-1707): an explicit mode, a bare TOGGLE
+/// between the two, and `Auto` — which clears this game's override so the
+/// global `glk_design_fit` decides again. The toggle never visits `auto`, for
+/// the reason [`V6RenderArg`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlkFitArg {
+    /// Use exactly this mode for this game.
+    Mode(crate::glk_cfg::GlkFitMode),
+    /// Flip stretch ↔ aspect.
+    Toggle,
+    /// Clear the per-game override: inherit the global `glk_design_fit`.
     Auto,
 }
 
@@ -323,8 +356,11 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "quit-to-library", category: Category::Game, context: Context::Global,
         usage: "quit-to-library", description: "exit the current story and return to the story library",
         dispatch: |_| SlashOutcome::QuitToLibrary },
+    CommandSpec { name: "download-documents", category: Category::Game, context: Context::Global,
+        usage: "download-documents", description: "choose manuals, feelies and maps listed on IFDB for this game and save them to its documents folder",
+        dispatch: |_| SlashOutcome::DownloadDocuments },
     CommandSpec { name: "open-hints", category: Category::Game, context: Context::Global,
-        usage: "open-hints", description: "open the hints panel",
+        usage: "open-hints", description: "show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the story)",
         dispatch: |_| SlashOutcome::OpenHints },
     CommandSpec { name: "open-history", category: Category::Game, context: Context::Global,
         usage: "open-history", description: "open the rewind/replay history",
@@ -333,7 +369,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "toggle-command-panel", description: "open or close the command panel; remembered per story",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenCommandBand) },
     CommandSpec { name: "cycle-panel", category: Category::Game, context: Context::Global,
-        usage: "cycle-panel", description: "cycle command panel → inventory panel → none; persisted per-game",
+        usage: "cycle-panel", description: "cycle command panel → none; persisted per-game",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::CyclePanel) },
     CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
         usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
@@ -444,11 +480,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         // the EMPTY remainder — bare `move-region` auto-picks the seam and the destination when
         // each has only one possibility, which only the graph can answer (SQ-0439).
         dispatch: |a| SlashOutcome::Action(crate::input::Action::MoveRegion(a.join(" "))) },
-    CommandSpec { name: "toggle-room-panel", category: Category::Map, context: Context::Map,
-        usage: "toggle-room-panel", description: "open or close the room panel under the map",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDock) },
     CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
-        usage: "toggle-inspector", description: "show the room panel's diagnostics view (flips back to info when open)",
+        usage: "toggle-inspector", description: "show the Journal's Room tab on its diagnostics view (flips back to info when already there)",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDiagnostics) },
     CommandSpec { name: "load-map", category: Category::Map, context: Context::Global,
         usage: "load-map <path>", description: "load a standalone map file into the current session",
@@ -482,14 +515,54 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |_| SlashOutcome::Action(crate::input::Action::TogglePortalLabels) },
     // ── View ──────────────────────────────────────────────────────────────
     CommandSpec { name: "toggle-map", category: Category::View, context: Context::Global,
-        usage: "toggle-map", description: "show or hide the map panel; persisted per-game",
+        usage: "toggle-map", description: "show or hide the Journal (the map's panel); persisted per-game",
         dispatch: |_a| SlashOutcome::Action(crate::input::Action::ToggleMap) },
     CommandSpec { name: "toggle-focus", category: Category::View, context: Context::Global,
         usage: "toggle-focus", description: "switch focus between panes",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleFocus) },
-    CommandSpec { name: "toggle-inventory-panel", category: Category::View, context: Context::Global,
-        usage: "toggle-inventory-panel", description: "open or close the inventory panel; remembered per story",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInventory) },
+    CommandSpec { name: "journal-tab", category: Category::View, context: Context::Global,
+        usage: "journal-tab <map|room|inventory|hints|documents>", description: "show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per story",
+        dispatch: |a| match a.first().copied() {
+            None => err("journal-tab: a tab name is required (map | room | inventory | hints | documents)".to_string()),
+            Some(name) => match crate::journal::JournalTab::from_name(name) {
+                Some(tab) => SlashOutcome::Action(crate::input::Action::SetJournalTab(tab)),
+                None => err(format!("journal-tab: '{name}' is not a tab (map | room | inventory | hints | documents)")),
+            },
+        } },
+    CommandSpec { name: "journal-next-tab", category: Category::View, context: Context::Global,
+        usage: "journal-next-tab", description: "show the Journal's next tab, wrapping",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::JournalStepTab(true)) },
+    CommandSpec { name: "journal-prev-tab", category: Category::View, context: Context::Global,
+        usage: "journal-prev-tab", description: "show the Journal's previous tab, wrapping",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::JournalStepTab(false)) },
+    CommandSpec { name: "filter-items", category: Category::View, context: Context::Global,
+        usage: "filter-items [query]", description: "filter the Journal's Inventory tab (both Carrying and Elsewhere) to items matching query; no query clears the filter",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::SetInventoryFilter(
+            if a.is_empty() { None } else { Some(a.join(" ")) }
+        )) },
+    CommandSpec { name: "open-document", category: Category::View, context: Context::Global,
+        usage: "open-document", description: "open the selected document in the Journal's Documents tab: text in a pager, images in place, PDFs in the system viewer",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::DocTabOpen(None)) },
+    CommandSpec { name: "close-document", category: Category::View, context: Context::Global,
+        usage: "close-document", description: "close the open document and return to the Documents tab's list",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::DocTabClose) },
+    CommandSpec { name: "select-document", category: Category::View, context: Context::Global,
+        usage: "select-document <n>", description: "move the Documents tab's selection by signed n rows",
+        dispatch: |a| match a.first().and_then(|s| s.parse::<i32>().ok()) {
+            Some(n) => SlashOutcome::Action(crate::input::Action::DocTabSelect(n)),
+            None => err("select-document requires a signed integer (e.g. select-document 1)"),
+        } },
+    CommandSpec { name: "scroll-document", category: Category::View, context: Context::Global,
+        usage: "scroll-document <n>|page-up|page-down", description: "scroll the open document (or the Documents list) by signed n lines or a page",
+        dispatch: |a| match a.first().copied() {
+            Some("page-up") => SlashOutcome::Action(crate::input::Action::DocTabPage(-1)),
+            Some("page-down") => SlashOutcome::Action(crate::input::Action::DocTabPage(1)),
+            Some(s) => match s.parse::<i32>() {
+                Ok(n) => SlashOutcome::Action(crate::input::Action::DocTabScroll(n)),
+                Err(_) => err(format!("scroll-document: expected a signed integer, page-up or page-down, got '{s}'")),
+            },
+            None => err("scroll-document requires a number of lines, page-up or page-down"),
+        } },
     CommandSpec { name: "toggle-status-bar", category: Category::View, context: Context::Global,
         usage: "toggle-status-bar", description: "toggle the status/score bar",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleStatusBar) },
@@ -548,6 +621,18 @@ pub static COMMANDS: &[CommandSpec] = &[
                 Some("extended")  => SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Extended)),
                 Some("auto")      => SlashOutcome::SetV6Render(V6RenderArg::Auto),
                 Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster | extended | auto, or bare to cycle)")),
+            }
+        } },
+    CommandSpec { name: "set-glk-fit", category: Category::Style, context: Context::Global,
+        usage: "set-glk-fit [stretch|aspect|auto]", description: "how a design-size Glulx game fills the pane — stretch fills it, aspect keeps the art's proportions with a letterbox; bare toggles, auto inherits the global setting; persisted per-game",
+        dispatch: |a| {
+            use crate::glk_cfg::GlkFitMode;
+            match a.first().copied() {
+                None => SlashOutcome::SetGlkFit(GlkFitArg::Toggle),
+                Some("stretch") => SlashOutcome::SetGlkFit(GlkFitArg::Mode(GlkFitMode::Stretch)),
+                Some("aspect")  => SlashOutcome::SetGlkFit(GlkFitArg::Mode(GlkFitMode::Aspect)),
+                Some("auto")    => SlashOutcome::SetGlkFit(GlkFitArg::Auto),
+                Some(s) => err(format!("set-glk-fit: unknown mode '{s}' (stretch | aspect | auto, or bare to toggle)")),
             }
         } },
     CommandSpec { name: "set-v6-pixel-lock", category: Category::Style, context: Context::Global,
@@ -726,15 +811,18 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "set-ifdb-url", category: Category::Library, context: Context::Browser,
         usage: "set-ifdb-url", description: "point the selected story at an IFDB page by hand",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SetIfdbUrl) },
+    CommandSpec { name: "create-documents-folder", category: Category::Library, context: Context::Global,
+        usage: "create-documents-folder", description: "create this story's documents folder (manuals, maps) beside its IFDB id",
+        dispatch: |_| SlashOutcome::CreateDocumentsFolder },
     CommandSpec { name: "open-url", category: Category::Library, context: Context::Browser,
         usage: "open-url", description: "download a story from a URL into this library and open it",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenUrl) },
     CommandSpec { name: "search-ifdb", category: Category::Library, context: Context::Browser,
         usage: "search-ifdb", description: "search IFDB by title or author and download a story into this directory",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SearchIfdb) },
-    CommandSpec { name: "download-hints", category: Category::Library, context: Context::Browser,
-        usage: "download-hints", description: "download a matching InvisiClues hint file for the selected story",
-        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::DownloadHints) },
+    CommandSpec { name: "download-hints", category: Category::Library, context: Context::Global,
+        usage: "download-hints", description: "download a matching InvisiClues hint file for this story (the selected one in the browser)",
+        dispatch: |_| SlashOutcome::DownloadHints },
     CommandSpec { name: "sort-library", category: Category::Library, context: Context::Browser,
         usage: "sort-library", description: "cycle the browser's sort column, keeping the direction",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SortLibrary) },
@@ -757,6 +845,17 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS.iter().find(|c| c.name == name)
+}
+
+/// Commands that belong to BOTH worlds — the running game and the story browser
+/// (SQ-1680). Everything else is one or the other (SQ-0796), and the gates below
+/// keep it so; these have a counterpart on each side because the thing they act
+/// on — "this game's IFDB record" — exists on each.
+const BOTH_WORLDS: &[&str] = &["download-documents", "create-documents-folder", "download-hints"];
+
+/// Is `spec` available in the story browser and in the game alike?
+pub fn in_both_worlds(spec: &CommandSpec) -> bool {
+    BOTH_WORLDS.contains(&spec.name)
 }
 
 // ── parse ─────────────────────────────────────────────────────────────────────
@@ -815,7 +914,7 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
     if spec.context == Context::Browser && ctx != Context::Browser {
         return SlashOutcome::Error(format!("{} is only available in the story browser", spec.name));
     }
-    if ctx == Context::Browser && spec.context != Context::Browser {
+    if ctx == Context::Browser && spec.context != Context::Browser && !in_both_worlds(spec) {
         return SlashOutcome::Error(format!("{} is not available in the story browser", spec.name));
     }
 
@@ -1123,7 +1222,7 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (Game 12, Map 21, View 6,
+        // Total count matches the spec table (Game 12, Map 21, View 7,
         // Transcript 3, Style 10, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
@@ -1138,7 +1237,9 @@ mod tests {
         // and `mark-maze-layer` arrived with the matrix view.
         // SQ-0692 added `toggle-room-panel` (as `toggle-room-dock`, renamed by
         // SQ-1237); `toggle-inspector` kept its name and now flips the SAME
-        // panel to its diagnostics body.
+        // panel to its diagnostics body. SQ-1684 folded the room and inventory
+        // docks into the Journal: `toggle-room-panel` and `toggle-inventory-panel`
+        // went, and `journal-tab`, `journal-next-tab` and `journal-prev-tab` came.
         // SQ-0761 added `dump-cells`, the cell-buffer half of `dump-windows`.
         // SQ-0994 added `dump-terminal`, the terminal-and-traffic half of the same
         // family: what was detected about the terminal, and which of those numbers
@@ -1170,7 +1271,18 @@ mod tests {
         // SQ-1420 added `set-transcript`: the STORY's own transcript (Z-machine
         // output stream 2, ZMSD §7.1.1), for the many games that ship no SCRIPT
         // verb to turn it on with.
-        assert_eq!(COMMANDS.len(), 92, "registry must match the spec's Full command table");
+        // SQ-1630 added `filter-items`: search the inventory panel's two
+        // sections (Carrying/Elsewhere) by name substring.
+        // SQ-1679 added `create-documents-folder`: the info panel's button, a key and
+        // a story-menu row for the selected game's documents folder.
+        // SQ-1680 added `download-documents`: the one command that lives in both the
+        // game and the story browser (`in_both_worlds`) — the chooser over a game's
+        // IFDB document links.
+        // SQ-1681 added `open-document`, `close-document`, `select-document` and
+        // `scroll-document` for the Journal's Documents tab, and made
+        // `create-documents-folder` a second command both worlds share.
+        // SQ-1707 added `set-glk-fit`: stretch/aspect fit for design-size Glulx games.
+        assert_eq!(COMMANDS.len(), 101, "registry must match the spec's Full command table");
     }
 
     /// SQ-1237 unified the panel vocabulary — `command band` became `command

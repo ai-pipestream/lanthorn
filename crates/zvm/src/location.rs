@@ -884,8 +884,26 @@ const PLAYER_NAMES: [&str; 9] =
 /// — `detect_location` and `find_player_object` — validate every candidate
 /// against the room before trusting it (see [`PLAYER_NAMES`]'s doc comment):
 /// a quip's word array never validates, because a quip is never IN a room.
+///
+/// `protag` (SQ-1649): *The Hitchhiker's Guide to the Galaxy* (ZIL, not
+/// Inform) is a second specimen of the same shape — its own avatar object
+/// prints "it" (nothing in [`PLAYER_NAMES`]) and its only parse word is
+/// "protag" (`PROTAGONIST`, truncated to the v3 dictionary's 6 characters).
+/// Without it, `find_player_object_with` never resolves an avatar for this
+/// story at all: the object still followed the player into every room turn
+/// after turn (its parent tracked `detect_location`'s own room exactly), so
+/// it leaked into the item tracker as a persistent fake "it" item in every
+/// room the player ever stood in, AND — the bigger half of the same gap —
+/// the missing avatar meant `zvm_item_observations`'s carried-inventory walk
+/// (`crate::inventory::list_inventory(mem, names, player_obj)`) had no
+/// `player_obj` to walk either, so HHGG never tracked a single carried item
+/// in a full 605-turn playthrough (3,319 item observations, 0 of them
+/// `Carried`). Safe by the same argument as `me`: every consumer here
+/// validates the candidate against the room before trusting it, so a false
+/// positive elsewhere is harmless unless it also happens to sit exactly
+/// where the player does.
 #[cfg(feature = "grammar")]
-const PLAYER_WORDS: [&str; 4] = ["me", "myself", "self", "yourself"];
+const PLAYER_WORDS: [&str; 5] = ["me", "myself", "self", "yourself", "protag"];
 
 /// The story's avatar-candidate pools — everything `detect_location` and
 /// `find_player_object` need that is STATIC per story (SQ-1259 perf
@@ -1877,6 +1895,89 @@ mod tests {
             find_player_object(&machine),
             Some(1),
             "the situated avatar — found only through its parse word — beats the parentless decoy"
+        );
+    }
+
+    #[test]
+    fn player_candidates_widen_to_hhggs_own_protag_parse_word() {
+        // SQ-1649: The Hitchhiker's Guide to the Galaxy's own avatar object shape, reproduced
+        // synthetically — its printed short name is the bare pronoun "it" (nothing in
+        // PLAYER_NAMES) and its ONLY parse word is "protag" ("PROTAGONIST" truncated to a v3
+        // dictionary's 6 characters). Mirrors `player_candidates_widen_to_parse_words_and_
+        // situated_wins`'s Lost-Pig shape exactly, swapping "grunk"/"me" for "it"/"protag" — real
+        // HHGG (`hitchhiker-r59-s851108.z3`) has object #31 printing "it" with parse words
+        // `["protag"]`, situated in whatever room the player currently stands in every turn of a
+        // full 605-turn walkthrough, and before `protag` was added to PLAYER_WORDS this object
+        // was NEVER recognised as the avatar: it leaked into the item tracker as a persistent
+        // fake "it" item in every room, and — the bigger half of the same gap — HHGG never
+        // tracked a single carried item in that whole walkthrough (3,319 item observations, 0 of
+        // them `Carried`), because `zvm_item_observations`'s inventory walk had no `player_obj`
+        // to walk either.
+        let mut buf = sample_story(5);
+        buf[0x12..0x18].copy_from_slice(b"080406"); // Inform-shaped serial
+
+        const DICT: usize = 0x200;
+        buf[DICT] = 0;
+        buf[DICT + 1] = 7;
+        put_word(&mut buf, DICT + 2, 2);
+        let protag = crate::text::encode::encode_word("protag", 5);
+        let filler_word = crate::text::encode::encode_word("filler", 5);
+        assert_eq!(protag.len(), 6);
+        assert_eq!(filler_word.len(), 6);
+        buf[DICT + 4..DICT + 10].copy_from_slice(&protag);
+        buf[DICT + 11..DICT + 17].copy_from_slice(&filler_word);
+        let protag_addr = (DICT + 4) as u16;
+        let filler_addr = (DICT + 11) as u16;
+
+        const AVATAR_TBL: usize = 0x220;
+        const YOU_TBL: usize = 0x240;
+        const ROOM_TBL: usize = 0x260;
+        const FILLER_TBL: [usize; 3] = [0x280, 0x2A0, 0x2C0];
+        write_v5_name_only(&mut buf, AVATAR_TBL, "it");
+        let after_name = AVATAR_TBL + 1 + 6;
+        buf[after_name] = 0x41; // property 1, one word: the dictionary address of "protag"
+        put_word(&mut buf, after_name + 1, protag_addr);
+        buf[after_name + 3] = 0x00;
+        write_v5_name_only(&mut buf, YOU_TBL, "you");
+        write_v5_name_only(&mut buf, ROOM_TBL, "room");
+        for (i, &tbl) in FILLER_TBL.iter().enumerate() {
+            write_v5_name_only(&mut buf, tbl, &format!("filler{i}"));
+            let after = tbl + 1 + 6;
+            buf[after] = 0x41;
+            put_word(&mut buf, after + 1, filler_addr);
+            buf[after + 3] = 0x00;
+        }
+
+        put_word(&mut buf, v5_entry(1) + 6, 3); // #1 avatar: situated, in the room
+        put_word(&mut buf, v5_entry(1) + 12, AVATAR_TBL as u16);
+        put_word(&mut buf, v5_entry(2) + 6, 0); // #2 "you": parentless decoy
+        put_word(&mut buf, v5_entry(2) + 12, YOU_TBL as u16);
+        put_word(&mut buf, v5_entry(3) + 6, 0); // #3 room: top-level
+        put_word(&mut buf, v5_entry(3) + 10, 1); // child #1
+        put_word(&mut buf, v5_entry(3) + 12, ROOM_TBL as u16);
+        for (i, &tbl) in FILLER_TBL.iter().enumerate() {
+            let obj = 4 + i as u16;
+            put_word(&mut buf, v5_entry(obj) + 12, tbl as u16);
+        }
+
+        let machine = make_machine(buf);
+        assert_eq!(normalize_name(&short_name(&machine.mem, 1)), "it");
+        assert_eq!(normalize_name(&short_name(&machine.mem, 2)), "you");
+
+        let parse_names =
+            ParseNames::detect(&machine.mem).expect("Inform-shaped, 4 objects agree on property 1");
+        let candidates = PlayerCandidates::build(&machine.mem, Some(&parse_names));
+        assert_eq!(
+            candidates.widened,
+            vec![1, 2],
+            "the avatar matches via the parse word \"protag\"; \"you\" matches via its short name"
+        );
+
+        assert_eq!(
+            find_player_object(&machine),
+            Some(1),
+            "the situated avatar — found only through its \"protag\" parse word — beats the \
+             parentless \"you\" decoy"
         );
     }
 
