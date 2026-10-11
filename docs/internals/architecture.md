@@ -815,7 +815,13 @@ as it was. A crossing recorded as In/Out (typed, or just placed this way) gets o
 search of the same shape over the eight compass words only, and a confirmed compass
 passage is recorded beside the portal, so the layout can draw the rooms flat. It shares the worker, the token routing in `host::probe::poll` and the
 staleness discipline of the return probe: the answer is a fact about the map, so
-a late one is applied unless the stub it upgrades is gone.
+a late one is applied unless the stub it upgrades is gone. A line that CHAINS commands
+(`north then east`; SQ-1772) is not one move in its first direction: `parse_direction`
+answers `None` for it, so it lands as a `?` stub, and `app::chain_probe` replays the
+pieces one at a time in the shadow from the same pre-turn snapshot, recording each room
+change (rooms passed through included; a directionless piece goes through this same search
+from the state just before it) only if the shadow ends in the room the live game did, with a
+first-piece-only retry for a game, like Scott's, that ignores the rest of the line.
 
 ### Declared exits: a room's own data, read before a move is judged (SQ-1257)
 

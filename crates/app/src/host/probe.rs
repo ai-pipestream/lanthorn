@@ -51,6 +51,13 @@ pub fn poll(state: &mut AppState, mapper: &mut Mapper, bg_tidy_counter: &mut u32
     if let Some(answer) = state.probe.poll() {
         if crate::vocab::owns(state, answer.token) {
             changed |= crate::vocab::deliver_answer(state, answer);
+        } else if crate::chain_probe::owns(state, answer.token) {
+            // SQ-1772: a chained line's `?` passage has just been replaced by the steps it
+            // walked -- new rooms and edges, so the same layout and redraw as any new edge.
+            if crate::chain_probe::deliver(state, mapper, &answer) {
+                super::turn::schedule_map_maintenance(state, mapper, false, true, bg_tidy_counter);
+                changed = true;
+            }
         } else if crate::relocation_probe::owns(state, answer.token) {
             // SQ-1771: a `?` passage has just been given its direction -- a geometry change
             // exactly like a new edge, so the same layout and redraw follow.
@@ -82,6 +89,7 @@ pub fn poll(state: &mut AppState, mapper: &mut Mapper, bg_tidy_counter: &mut u32
         // search, or a vocabulary offer the player typed past. Dropping it is the
         // silence discipline all three consumers already have.
     }
+    crate::chain_probe::pump_chain_replay(state);
     crate::relocation_probe::pump_relocation_search(state);
     crate::return_probe::pump_return_search(state);
     changed

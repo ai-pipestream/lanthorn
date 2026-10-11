@@ -1541,6 +1541,19 @@ impl MapGraph {
     /// For a real direction that is at most one edge; for `Unknown` — which may hold several
     /// stubs (see [`MapGraph::add_edge`]) — every `?` edge out of `origin` goes at once, as the
     /// key names no destination to tell them apart by.
+    /// Remove the `?` (unlabelled) passage `origin` -> `dest`, and only that one: a room can
+    /// hold several, and [`MapGraph::remove_connection`] would take them all (SQ-1772).
+    pub fn remove_unlabelled(&mut self, origin: RoomId, dest: RoomId) -> bool {
+        let before = self.conns.len();
+        self.conns
+            .retain(|c| !(c.origin == origin && c.dest == dest && c.dir == Direction::Unknown));
+        let removed = self.conns.len() < before;
+        if removed {
+            self.touch_layout();
+        }
+        removed
+    }
+
     pub fn remove_connection(&mut self, origin: RoomId, dir: Direction) -> bool {
         let before = self.conns.len();
         self.conns.retain(|c| !(c.origin == origin && c.dir == dir));

@@ -40,11 +40,74 @@ pub enum DirFamily {
 /// parse, the word a probe types back, and the family it belongs to can never disagree about what
 /// the player said (SQ-1314).
 fn command_token(cmd: &str) -> Option<String> {
+    if is_chained(cmd) {
+        return None; // several commands on one line are not ONE move under the first's direction
+    }
     let lower = cmd.trim().to_lowercase();
     let mut tokens = lower.split_whitespace();
     let first = tokens.next()?;
     let word = if first == "go" { tokens.next()? } else { first };
     Some(word.to_string())
+}
+
+/// The commands a line chains, in the order typed (SQ-1772).
+///
+/// `north then east`, `n. e`, `n, e` and `north and east` are all several commands on one line.
+/// Black-box findings (what each game really accepts) are in `app::chain_probe`'s module docs;
+/// the short version is that Zork I (ZIL) and Inform 6/7 accept `then`, `.` and `,`, ZIL also
+/// accepts `and`, and Inform refuses it. This function does NOT decide what the game accepts -- it
+/// only names the places a line COULD be cut, because a replay in the shadow settles the rest
+/// (a wrong cut cannot record anything: the replay must end in the room the live game ended in).
+///
+/// Empty pieces are dropped (`north then`, `and then`), and nothing inside double quotes is cut
+/// (`say "go north then east"`). A line with fewer than two pieces is not a chain.
+pub fn command_pieces(cmd: &str) -> Vec<String> {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    fn end_word(words: &mut Vec<String>, word: &mut String, pieces: &mut Vec<String>) {
+        if word.is_empty() {
+            return;
+        }
+        let w = std::mem::take(word);
+        if matches!(w.to_lowercase().as_str(), "then" | "and") {
+            end_piece(words, pieces);
+        } else {
+            words.push(w);
+        }
+    }
+    fn end_piece(words: &mut Vec<String>, pieces: &mut Vec<String>) {
+        if !words.is_empty() {
+            pieces.push(words.join(" "));
+            words.clear();
+        }
+    }
+    for ch in cmd.chars() {
+        if quoted {
+            word.push(ch);
+            quoted = ch != '"';
+        } else if ch == '"' {
+            word.push(ch);
+            quoted = true;
+        } else if ch.is_whitespace() {
+            end_word(&mut words, &mut word, &mut pieces);
+        } else if ch == '.' || ch == ',' {
+            end_word(&mut words, &mut word, &mut pieces);
+            end_piece(&mut words, &mut pieces);
+        } else {
+            word.push(ch);
+        }
+    }
+    end_word(&mut words, &mut word, &mut pieces);
+    end_piece(&mut words, &mut pieces);
+    pieces
+}
+
+/// True when the line chains two or more commands ([`command_pieces`]). Such a line is not a move
+/// in any one direction, so [`parse_direction`] and everything built on it answer `None` for it.
+pub fn is_chained(cmd: &str) -> bool {
+    command_pieces(cmd).len() > 1
 }
 
 /// The ONE table: every direction word this map understands, the slot it fills, and the family it
@@ -544,6 +607,30 @@ mod tests {
         assert_eq!(parse_direction("up"), Some(Direction::Up));
         assert_eq!(parse_direction("xyzzy"), None);
         assert_eq!(parse_direction("take lamp"), None);
+    }
+
+    /// SQ-1772: `north then east` is two commands, not a move north.
+    #[test]
+    fn a_chained_line_is_not_a_move_in_its_first_direction() {
+        for line in ["north then east", "go north then east", "n. e", "n, e", "north and east", "n.e"] {
+            assert!(is_chained(line), "{line}");
+            assert_eq!(parse_direction(line), None, "{line}");
+            assert_eq!(WalkedDir::parse(line), None, "{line}");
+            assert!(!is_compass_command(line), "{line}");
+        }
+        assert_eq!(command_pieces("Go North then  East."), ["Go North", "East"]);
+        assert_eq!(command_pieces("n. e, s and w"), ["n", "e", "s", "w"]);
+    }
+
+    /// Separators with nothing on one side, quoted text and plain moves are not chains.
+    #[test]
+    fn single_commands_are_not_chains() {
+        for line in ["north", "go north", "north.", "north then", "and then north", "say \"go north then east\"", "take lamp", ""] {
+            assert!(!is_chained(line), "{line}");
+        }
+        assert_eq!(parse_direction("north."), None); // unchanged: the period stays on the word
+        assert_eq!(parse_direction("north then"), Some(Direction::N));
+        assert_eq!(command_pieces("say \"a then b\" then n"), ["say \"a then b\"", "n"]);
     }
 
     #[test]

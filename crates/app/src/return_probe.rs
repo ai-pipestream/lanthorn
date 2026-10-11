@@ -372,8 +372,13 @@ pub fn pump_return_search(state: &mut AppState) -> bool {
     if search.attempt.is_some() {
         return false; // one out already
     }
-    if state.relocation_search.is_some() {
-        return false; // SQ-1771: a crossing still to be named goes first, and then re-aims this
+    if state.relocation_search.is_some()
+        || !state.relocation_queue.is_empty()
+        || state.chain_replay.is_some()
+    {
+        // SQ-1771: a crossing still to be named goes first, and then re-aims this. SQ-1772: so
+        // does a chained line still to be replayed, which decides what the crossing even was.
+        return false;
     }
     let Some(&(dir, word)) = search.queue.last() else {
         // Nothing left to try. Total failure records nothing about the map: a
@@ -710,6 +715,8 @@ mod tests {
                 quit: false,
                 escaped: false,
                 died,
+                room_name: None,
+                after: None,
             }],
         };
         let recorded =

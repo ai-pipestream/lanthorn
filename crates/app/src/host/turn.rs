@@ -449,6 +449,11 @@ pub fn finish_command_turn(
     // before that is replaced.
     crate::relocation_probe::arm_relocation_search(state, mapper, &*session, cmd, room_before);
 
+    // …and a line that CHAINS several commands (`north then east`) is not one crossing at all:
+    // it is replayed a piece at a time in the shadow, and what the replay saw goes on the map in
+    // place of the provisional `?` (SQ-1772). Same pre-turn snapshot, so same place in the order.
+    crate::chain_probe::arm_chain_replay(state, mapper, &*session, cmd, room_before);
+
     // SQ-1257 Phase 2: this move's own edge was minted (or not) already, by `apply_turn` above.
     // Which reseeded shadow this turn earns — a first walk, an upgrade, or a suspicion left
     // pending — is `random_exit_probe`'s own decision, and lives there in ONE place: five real-

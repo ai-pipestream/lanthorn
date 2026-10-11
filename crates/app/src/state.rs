@@ -2729,6 +2729,12 @@ pub struct AppState {
     /// one. Session state, never persisted -- what it learns is a passage in the graph. See
     /// [`crate::relocation_probe`].
     pub relocation_search: Option<crate::relocation_probe::RelocationSearch>,
+    /// Relocation searches waiting their turn behind [`Self::relocation_search`] (SQ-1772): a
+    /// replayed chained line can leave several unnamed crossings at once. Session state.
+    pub relocation_queue: Vec<crate::relocation_probe::RelocationSearch>,
+    /// A replay of a chained command line (`north then east`) in the shadow, running right now,
+    /// if any (SQ-1772). At most one. Session state. See [`crate::chain_probe`].
+    pub chain_replay: Option<crate::chain_probe::ChainReplay>,
     /// In/Out passages `(origin, portal, dest)` whose compass alias has already been searched
     /// for (SQ-1771): each is asked once, the first time the map sees it. Session state.
     pub alias_searched: Vec<(mapper::graph::RoomId, mapper::direction::Direction, mapper::graph::RoomId)>,
@@ -3967,6 +3973,8 @@ impl Default for AppState {
             probe: crate::probe::ShadowProbe::default(),
             return_search: None,
             relocation_search: None,
+            relocation_queue: Vec::new(),
+            chain_replay: None,
             alias_searched: Default::default(),
             random_exit_search: None,
             random_exit_pre_move_save: None,

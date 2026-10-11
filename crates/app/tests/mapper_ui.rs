@@ -32,6 +32,8 @@ mod border_controls;
 mod return_probe;
 #[path = "suites/relocation_probe.rs"]
 mod relocation_probe;
+#[path = "suites/chain_probe.rs"]
+mod chain_probe;
 #[path = "suites/declared_exit.rs"]
 mod declared_exit;
 #[path = "suites/room_description.rs"]

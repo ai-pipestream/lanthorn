@@ -132,7 +132,7 @@ fn wide_for(alias: bool) -> Vec<(&'static str, Direction)> {
 }
 
 /// Commands whose room change is the game's doing, not a passage.
-const NOT_A_PASSAGE: [&str; 3] = ["undo", "restart", "restore"];
+pub(crate) const NOT_A_PASSAGE: [&str; 3] = ["undo", "restart", "restore"];
 
 /// What the search is waiting to hear.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +228,9 @@ pub fn arm_relocation_search(
     let (Some(origin), Some(dest)) = (room_before, mapper.graph.current()) else {
         return;
     };
+    if mapper::direction::is_chained(cmd) {
+        return; // SQ-1772: a chained line is replayed piece by piece, see `crate::chain_probe`
+    }
     let typed = parse_direction(cmd);
     let portal = matches!(typed, Some(Direction::In | Direction::Out));
     if origin == dest || (typed.is_some() && !portal) {
@@ -298,12 +301,43 @@ pub fn arm_relocation_search(
     });
 }
 
+/// Queue a search for the direction behind one crossing of a replayed chained line (SQ-1772).
+///
+/// `from` is the shadow's state just BEFORE the piece that made the crossing, which is why it
+/// takes a snapshot rather than reading the pre-turn save. The ship words are not asked (the live
+/// engine that could say which the story knows is not on hand when an answer is read); the
+/// compass, up/down and in/out are. `alias` asks for the compass word beside an In/Out portal
+/// instead, exactly as for a typed `in`/`out`.
+pub(crate) fn queue_search(
+    state: &mut AppState,
+    origin: RoomId,
+    dest: RoomId,
+    from: crate::probe::ProbeSnapshot,
+    alias: bool,
+) {
+    state.relocation_queue.push(RelocationSearch {
+        origin,
+        dest,
+        from,
+        stage: Stage::Wide,
+        wide: wide_for(alias),
+        nautical: Vec::new(),
+        found: None,
+        token: None,
+        alias,
+    });
+}
+
 /// Hand the search's next question to the worker, if the shadow is free. Called every pass of the
 /// event loop, before the return search's pump. Returns true when something was asked.
 pub fn pump_relocation_search(state: &mut AppState) -> bool {
     if !state.probe.is_armed() {
         state.relocation_search = None;
+        state.relocation_queue.clear();
         return false;
+    }
+    if state.relocation_search.is_none() && !state.relocation_queue.is_empty() {
+        state.relocation_search = Some(state.relocation_queue.remove(0));
     }
     let Some(search) = &state.relocation_search else {
         return false;
@@ -422,7 +456,7 @@ pub fn deliver(state: &mut AppState, mapper: &mut Mapper, answer: &crate::probe:
 /// the event loop. Returns whether the map changed.
 pub fn settle_relocation_search(state: &mut AppState, mapper: &mut Mapper) -> bool {
     let mut changed = false;
-    while state.relocation_search.is_some() {
+    while state.relocation_search.is_some() || !state.relocation_queue.is_empty() {
         if !pump_relocation_search(state)
             && state
                 .relocation_search
@@ -453,6 +487,8 @@ mod tests {
             quit: false,
             escaped: false,
             died,
+            room_name: None,
+            after: None,
         }
     }
 

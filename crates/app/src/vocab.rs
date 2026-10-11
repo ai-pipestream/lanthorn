@@ -3318,6 +3318,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         };
         let run = crate::probe::ProbeRun {
             baseline: crate::probe::WorldPrint::from_parts(Some(7), Some(35), Some(99)),
