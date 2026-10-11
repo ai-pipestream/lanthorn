@@ -58,25 +58,42 @@ def read_available(proc, timeout: float) -> str:
     return "".join(chunks)
 
 
-def ask_model(endpoint: str, model: str, transcript: str, timeout: float) -> str:
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": transcript},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 32,
-        }
-    ).encode()
-    req = urllib.request.Request(
-        f"{endpoint.rstrip('/')}/chat/completions",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
+def ask_model(endpoint: str, model: str, transcript: str, timeout: float, api: str) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": transcript},
+    ]
+    if api == "ollama":
+        # Native API: think:false is honored here (the OpenAI-compat endpoint
+        # ignores it, and thinking models burn the whole budget on hidden
+        # reasoning and return empty content).
+        url = f"{endpoint.rstrip('/')}/api/chat"
+        payload = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.2, "num_predict": 32},
+            }
+        ).encode()
+        out_field = ("message", "content")
+    else:
+        url = f"{endpoint.rstrip('/')}/chat/completions"
+        payload = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": 32,
+            }
+        ).encode()
+        out_field = None
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = json.loads(resp.read())
+    if api == "ollama":
+        return body["message"]["content"]
     return body["choices"][0]["message"]["content"]
 
 
@@ -92,8 +109,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--engine-bin", required=True, type=Path)
     parser.add_argument("--story", required=True, type=Path)
-    parser.add_argument("--endpoint", default="http://localhost:11434/v1")
+    parser.add_argument("--endpoint", default="http://localhost:11434",
+                        help="Server base URL (no /v1 suffix needed for --api ollama)")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--api", choices=["openai", "ollama"], default="ollama",
+                        help="ollama uses the native /api/chat with think disabled (default); openai for vllm/llama.cpp servers")
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--window", type=int, default=8,
                         help="Transcript pairs shown to the model (match training)")
@@ -139,8 +159,9 @@ def main(argv=None) -> int:
                 context = "\n\n".join(segments[-2 * args.window :]).strip()
                 if MORE_PROMPT.search(context):
                     command = " "
+                    reply = None
                 else:
-                    reply = ask_model(args.endpoint, args.model, context, args.model_timeout)
+                    reply = ask_model(args.endpoint, args.model, context, args.model_timeout, args.api)
                     command = sanitize_command(reply) or "look"
                 proc.stdin.write((command + "\n").encode())
                 proc.stdin.flush()
@@ -151,6 +172,7 @@ def main(argv=None) -> int:
                         "event_index": turn,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
                         "command": command,
+                        "model_reply": reply,
                         "response": response,
                     }
                 )
