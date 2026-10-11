@@ -33,6 +33,7 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **Rewinding to an earlier turn now shows that turn's status line straight away.** On Z-machine games with a status bar, going back used to leave the bar blank until you typed your next command.
 - **Games on disk images open faster, and CD images much faster — especially from a network drive.** Starting a game used to read the whole image file several times over, once per step of the launch; now it is read once and shared. A CD image goes further and is read only where the game needs it: starting a game off the 354 MB *Classic Text Adventure Masterpieces of Infocom* disc used to read the full 354 MB several times over, and now reads about 27 MB in all.
 - **Details fetched from IFDB for a `.zblorb` game now show up on that game.** They used to be saved under the file's name instead of the game's, so the library row never found them.
 - **A game you have in two formats now shows its IFDB details on both straight after a fetch.** When the same game sits in your library twice (say as a `.z3` and as an Amiga disk image), only the first copy picked up the fetched title and author until you reopened the picker.

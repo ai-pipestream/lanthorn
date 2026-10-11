@@ -62,6 +62,15 @@ pub struct TurnRecord {
     /// The clear anchors at record time (indices into the first `transcript_len`
     /// lines), since the live ones only remember the LAST clear.
     pub transcript_anchors: Option<crate::archive::ClearAnchors>,
+    /// The Z-machine screen model AFTER this turn (SQ-1767), the same
+    /// `ScreenState` a `.lanthorn` save carries and `session::restore_screen`
+    /// installs. Quetzal keeps no screen, and a v4+ story parked at its read never
+    /// repaints its status line, so a rewind that restored only memory left the
+    /// upper window blank until the next command. In memory only: the archive
+    /// writes its own fields, so a record loaded from one has `None` and rewinds
+    /// as before. `None` too for Glulx, Scott Adams, and Version 6 (whose windows
+    /// carry prose buffers and are repainted from the display list instead).
+    pub screen: Option<zvm::screen::ScreenState>,
 }
 
 /// The live transcript's shape at one moment (SQ-1715): the facts a
@@ -136,7 +145,7 @@ pub fn record_turn(
         transcript_len: None,
         transcript_epoch: None,
         transcript_tail_chars: None,
-        transcript_anchors: None,
+        transcript_anchors: None, screen: None,
     }));
 }
 
@@ -507,7 +516,7 @@ mod tests {
                     transcript_len: None,
                     transcript_epoch: None,
                     transcript_tail_chars: None,
-                    transcript_anchors: None,
+                    transcript_anchors: None, screen: None,
                 })
             })
             .collect();

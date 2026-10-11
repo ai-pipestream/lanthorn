@@ -735,9 +735,15 @@ fn post_turn_bookkeeping(
         // Remember a game-driven clear so a rewind can re-pin it (SQ-1713). The
         // record was pushed a moment ago, so its `Arc` is still unique.
         let mark = crate::history::TranscriptMark::of(state);
+        // The Z-machine screen rides along (SQ-1767) so a rewind can put the
+        // status line back; not for v6, whose windows are repainted elsewhere.
+        let screen = zvm_session_opt(session)
+            .filter(|z| z.machine.screen.v6.is_none())
+            .map(|z| z.machine.screen.clone());
         if let Some(rec) = state.history.last_mut().and_then(std::sync::Arc::get_mut) {
             rec.cleared = crate::history::clear_noted(result.erase_lower, pending_clear);
             rec.note_transcript(mark);
+            rec.screen = screen;
         }
         crate::history::cap_history(&mut state.history, state.config.history_turns);
     }

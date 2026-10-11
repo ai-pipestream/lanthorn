@@ -197,7 +197,7 @@ fn a_record_without_a_mark_rebuilds_as_before() {
                     transcript_len: None,
                     transcript_epoch: None,
                     transcript_tail_chars: None,
-                    transcript_anchors: None,
+                    transcript_anchors: None, screen: None,
                     ..(**r).clone()
                 })
             })

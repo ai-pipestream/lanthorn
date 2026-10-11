@@ -413,6 +413,14 @@ pub fn resume_from_turn(
         state.push_notice(&format!("[Resume failed: {}]", restore_error_msg(e)));
         return Rewound { ok: false, redraw: true };
     }
+    // The restored memory brings no screen (SQ-1767): put back the one this turn
+    // ended on, as loading a save does, or a v4+ status line stays blank until the
+    // next command (the game is parked at its read and never repaints it).
+    if let Some(scr) = state.history[idx].screen.clone() {
+        if let Some(z) = crate::engine_helpers::zvm_session_opt_mut(session) {
+            crate::session::restore_screen(z, scr);
+        }
+    }
     if let Some(json) = &plan.map_json {
         if let Ok(m) = mapper::persist::from_json(json) {
             *mapper = m;
