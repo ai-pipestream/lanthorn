@@ -25,15 +25,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-LANE_SUFFIXES = ("-kimi", "-cursor", "-junie", "-antigravity")
+from prompting import SYSTEM_PROMPT
 
-SYSTEM_PROMPT = (
-    "You are playing a classic text adventure. Each turn you receive the "
-    "recent transcript: the game's narration and the commands entered so far. "
-    "Reply with exactly one short command a thoughtful human player would type "
-    "next, in the game's own verb-noun style (for example: 'take the lamp', "
-    "'go north', 'ask the wizard about the gem'). No commentary, no quotes."
-)
+LANE_SUFFIXES = ("-kimi", "-cursor", "-junie", "-antigravity")
 
 
 def base_game_id(run_id: str) -> str:

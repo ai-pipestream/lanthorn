@@ -35,6 +35,30 @@ provenance (game_id, run_id, session/branch, event_id) in `meta` so examples
 can be traced back to exact transcript spans. `stats.json` records per-split
 counts, drop reasons, and the config used.
 
+## eval.py
+
+Plays a game with a served model and records every turn — the baseline and
+post-training comparison harness.
+
+```sh
+python3 training/eval.py \
+  --engine-bin target.noindex/debug/zvm-cli \
+  --story /path/to/game.z5 \
+  --endpoint http://localhost:11434/v1 --model qwen3:8b \
+  --max-turns 40 --out runs/photopia-baseline
+```
+
+- Works against any OpenAI-compatible server (ollama, vllm, llama.cpp).
+- Uses the same system prompt as the dataset builder (`prompting.py`) — a
+  tuned model is always evaluated under its training instruction.
+- Commands pass the same hygiene rules as the collection broker (one short
+  line, no path characters); unparseable replies degrade to `look`.
+- `[MORE]` paging is answered with a keypress before the model is asked again.
+- Writes `events.jsonl`, `stdout.raw`, and `summary.json` (turns, outcome)
+  into `--out`, mirroring the fleet's evidence layout.
+
+Always evaluate on `heldout.jsonl` games only — never on training games.
+
 ## Suggested first run (QLoRA on a 16 GB card)
 
 - Base: Qwen3-8B or Llama-3.1-8B-Instruct, 4-bit, LoRA r=16–32
