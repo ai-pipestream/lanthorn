@@ -60,6 +60,17 @@ def load_splits(path: Path) -> dict:
     return registry["assignments"]
 
 
+V2_PROTOCOL_EPOCH = "2026-10-02T00:00:00"  # fullplay.md v2-human-playstyle marker date
+
+
+def load_lane_resolution(path: Path) -> dict:
+    """Canonical player lane per run id (assignment cli wins over name suffix)."""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    return {run_id: rec["lane"] for run_id, rec in raw.items()}
+
+
 def build_examples(run_dir: Path, window: int, dedup_consecutive: bool):
     """Build chat examples for one run directory.
 
@@ -172,6 +183,7 @@ def main(argv=None) -> int:
     play_dir = args.data_dir / "play"
     splits = load_splits(args.data_dir / "batches" / "splits.json")
     kept = load_keep_verdicts(args.data_dir / "reviewed")
+    lanes = load_lane_resolution(args.data_dir / "evaluation" / "lane-resolution.json")
     if not kept and not args.include_unkept:
         print("error: no keep verdicts found; pass --include-unkept to proceed anyway", file=sys.stderr)
         return 2
@@ -191,6 +203,13 @@ def main(argv=None) -> int:
             stats["runs"]["skipped_unregistered"] += 1
             stats["unregistered_runs"].append(run_id)
             continue
+        manifest_path = run_dir / "manifest.json"
+        started_at = None
+        if manifest_path.exists():
+            try:
+                started_at = json.loads(manifest_path.read_text()).get("started_at")
+            except ValueError:
+                pass
         examples, dropped = build_examples(
             run_dir,
             window=args.window,
@@ -202,6 +221,13 @@ def main(argv=None) -> int:
             continue
         for ex in examples:
             ex["meta"].update({"game_id": game_id, "run_id": run_id, "split": split})
+            lane = lanes.get(run_id)
+            if lane:
+                ex["meta"]["lane"] = lane
+            if started_at:
+                ex["meta"]["protocol"] = (
+                    "v2-human-playstyle" if started_at >= V2_PROTOCOL_EPOCH else "v1-prehuman"
+                )
         target = {"train": "train", "development": "valid", "test": "heldout"}[split]
         if args.max_per_game and split != "test":
             existing = stats["examples_by_game"][game_id]
