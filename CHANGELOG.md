@@ -29,7 +29,7 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Added
 
-- **Scott Adams games now complete your words as you type.** The game's own verbs and nouns are offered by autocomplete, as they already were for Z-machine and Glulx stories. (Adventure databases store only the first few letters of each word, so completions are spelled as the game stored them.)
+- **Scott Adams games now complete your words as you type.** The game's own verbs and nouns are offered by autocomplete, as they already were for Z-machine and Glulx stories. (Adventure databases store only the first few letters of each word, so where the game's own text names the whole word, `lam` is offered as `lamp`.)
 
 ### Fixed
 

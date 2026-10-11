@@ -1197,10 +1197,36 @@ impl Engine for ScottSession {
         ))
     }
 
-    /// Verbs then nouns as typed, de-duplicated, in database order: a Scott
-    /// Adams session has no `Introspect`, so this is its word list (SQ-1763).
-    /// Full stored spellings — `word_length` is the parser's business, not ours.
-    fn vocabulary_words(&self) -> Vec<String> {
+    /// Every word in the database's own text: room descriptions, messages and
+    /// item texts, lowercased and split on non-alphanumerics (the `/WORD/`
+    /// markers fall away as punctuation, their words stay). What spells a
+    /// three-letter `lam` out as `lamp` (SQ-1763).
+    fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
+        let db = self.vm.database();
+        let texts = db
+            .rooms
+            .iter()
+            .map(|r| r.desc.as_str())
+            .chain(db.messages.iter().map(String::as_str))
+            .chain(db.items.iter().map(|i| i.text.as_str()));
+        // The engine prints the six direction names itself ("Obvious exits:
+        // North. Down."), so they are part of the game's text though no
+        // database string holds them.
+        let directions = ["North", "South", "East", "West", "Up", "Down"];
+        Some(
+            texts
+                .chain(directions)
+                .flat_map(|t| t.split(|c: char| !c.is_alphanumeric()))
+                .filter(|w| !w.is_empty())
+                .map(str::to_lowercase)
+                .collect(),
+        )
+    }
+
+    /// Verbs then nouns as stored, de-duplicated, in database order: a Scott
+    /// Adams session has no `Introspect`, so this is its raw word list
+    /// ([`Engine::vocabulary_words`] spells it out) (SQ-1763).
+    fn dictionary_words(&self) -> Vec<String> {
         let db = self.vm.database();
         let mut seen = std::collections::HashSet::new();
         db.verbs
@@ -1329,21 +1355,30 @@ mod tests {
     /// SQ-1763: a session over a hand-built database whose vocabulary tables
     /// carry every shape the word list must handle.
     fn vocabulary_session() -> ScottSession {
+        vocabulary_session_with(
+            &[],
+            &["AUTO", "GO", "GET", "*TAKE", ".", "LOOK"],
+            &["ANY", "NORTH", "N", "*NORTH", "LAMP", ".", "get", "Keyboard"],
+            3,
+        )
+    }
+
+    fn vocabulary_session_with(text: &[&str], verbs: &[&str], nouns: &[&str], word_length: usize) -> ScottSession {
         use scott::{Database, Vm};
         let s = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
         let db = Database {
             max_carry: 6,
             start_room: 1,
             num_treasures: 0,
-            word_length: 3,
+            word_length,
             light_time: -1,
             treasure_room: 0,
             actions: vec![],
             // verb 0 is the AUTO slot; `*` marks a synonym; `.` is padding.
-            verbs: s(&["AUTO", "GO", "GET", "*TAKE", ".", "LOOK"]),
-            nouns: s(&["ANY", "NORTH", "N", "*NORTH", "LAMP", ".", "get", "Keyboard"]),
+            verbs: s(verbs),
+            nouns: s(nouns),
             rooms: vec![scott::database::Room { exits: [0; 6], desc: "limbo".into(), literal: true }; 2],
-            messages: vec![],
+            messages: s(text),
             items: vec![],
             adventure_number: 0,
             ti99: None,
@@ -1366,16 +1401,35 @@ mod tests {
         }
     }
 
-    /// SQ-1763: `vocabulary_words` is verbs then nouns, `*` stripped, padding
-    /// dropped, lowercased, full spellings (no truncation to `word_length`
-    /// 3), and a word in both lists appears once.
+    /// SQ-1763: `dictionary_words` is verbs then nouns, `*` stripped, padding
+    /// dropped, lowercased, as stored (no truncation to `word_length` 3), and
+    /// a word in both lists appears once. With no text to spell from,
+    /// `vocabulary_words` agrees.
     #[test]
-    fn vocabulary_words_lists_verbs_then_nouns_deduplicated() {
+    fn dictionary_words_lists_verbs_then_nouns_deduplicated() {
         let sess = vocabulary_session();
-        assert_eq!(
-            sess.vocabulary_words(),
-            ["auto", "go", "get", "take", "look", "any", "north", "n", "lamp", "keyboard"]
-        );
+        let expected =
+            ["auto", "go", "get", "take", "look", "any", "north", "n", "lamp", "keyboard"];
+        assert_eq!(sess.dictionary_words(), expected);
+        assert_eq!(sess.vocabulary_words(), expected);
+    }
+
+    /// SQ-1763: a stored `lam` is spelled out as `lamp` when the database's
+    /// own text says `lamp` (the `/LAMP/` marker is punctuation) and no other
+    /// word starting `lam`.
+    #[test]
+    fn vocabulary_words_spell_a_truncated_key_from_the_database_text() {
+        let sess = vocabulary_session_with(&["a brass lamp/LAMP/"], &["GO"], &["LAM"], 3);
+        assert_eq!(sess.dictionary_words(), ["go", "lam"]);
+        assert_eq!(sess.vocabulary_words(), ["go", "lamp"]);
+    }
+
+    /// SQ-1763: `lamp` and `lampshade` both start `lam`, so the key stays as
+    /// stored - the ambiguous rule of SQ-1553.
+    #[test]
+    fn vocabulary_words_keep_an_ambiguous_key_as_stored() {
+        let sess = vocabulary_session_with(&["a lamp", "a lampshade"], &["GO"], &["LAM"], 3);
+        assert_eq!(sess.vocabulary_words(), ["go", "lam"]);
     }
 
     /// SQ-1763: sharing the walk with `vocabulary_words` left `story_vocabulary`'s
@@ -1393,13 +1447,15 @@ mod tests {
     }
 
     /// SQ-1763: a real Scott game, off the gitignored Apple II press, offers
-    /// its lamp and directions, spelled as stored (three letters).
-    /// Skips vacuously without the fixture.
+    /// its lamp and directions in full (`lamp`, `north`), recovered from its
+    /// own text; the stored forms are three letters. Skips vacuously without
+    /// the fixture.
     #[test]
     fn adventureland_vocabulary_words_include_lamp_and_north() {
         let Some(s) = adventureland_apple_session() else { return };
+        let stored = s.dictionary_words();        assert!(stored.iter().any(|x| x == "lam"), "premise: stored three-letter");
         let words = s.vocabulary_words();
-        for w in ["lam", "nor"] {
+        for w in ["lamp", "north"] {
             assert!(words.iter().any(|x| x == w), "{w} missing from {words:?}");
         }
     }

@@ -283,8 +283,22 @@ impl StoryVocabulary {
     /// gets the lexicon.
     pub fn with_story_text(mut self, text: Option<BTreeSet<String>>) -> StoryVocabulary {
         self.text_words = text.unwrap_or_default();
-        self.spellings = full_spellings(self.words.keys(), self.key_len, &self.text_words);
+        // Below `MIN_SPELLED_KEY` only a NOUN-only entry is spelled: the text
+        // names objects, and a prefix shared with a verb (`dri` for drink,
+        // `rub`) would be spelled out as whatever noun the text happens to hold.
+        let short = self.key_len < MIN_SPELLED_KEY;
+        let keys = self
+            .words
+            .iter()
+            .filter(|(_, r)| !short || (r.noun && !r.verb))
+            .map(|(k, _)| k);
+        self.spellings = full_spellings(keys, self.key_len, &self.text_words);
         self
+    }
+
+    /// Every entry of `words` as the player should see it ([`Self::spell`]).
+    pub fn spell_all(&self, words: Vec<String>) -> Vec<String> {
+        words.iter().map(|w| self.spell(w).to_string()).collect()
     }
 
     /// Every word the story's own static text holds — empty where the engine
@@ -1593,12 +1607,19 @@ impl StoryVocabulary {
 
 // ── Spelling a truncated key out (SQ-1553) ─────────────────────────────────
 
-/// The shortest key worth spelling out. A Z-machine key is six or nine
-/// characters (ZMSD 1.1 §13.3/§13.4) and a Glulx one `DICT_WORD_SIZE`, nine by
-/// default; a Scott Adams database keeps three to five, and at that length a
-/// prefix names no word in particular — `lam` is `lamp`, `lamb` and `lament` —
-/// so those words are the game's own abbreviations and are shown as they are.
+/// The shortest key the shipped lexicon may help spell out. A Z-machine key is
+/// six or nine characters (ZMSD 1.1 §13.3/§13.4) and a Glulx one
+/// `DICT_WORD_SIZE`, nine by default; a Scott Adams database keeps three to
+/// five, and at that length a prefix names no word in particular — `lam` is
+/// `lamp`, `lamb` and `lament` — so the general lexicon says nothing about it.
 const MIN_SPELLED_KEY: usize = 6;
+
+/// The shortest key worth spelling out at all (SQ-1763). Below
+/// [`MIN_SPELLED_KEY`] only the STORY'S OWN text is evidence — a Scott
+/// database whose text says `lamp` and nothing else starting `lam` spells
+/// `lam` out; the same rule's ambiguity check keeps it as stored if the text
+/// also says `lamb`.
+const MIN_TEXT_SPELLED_KEY: usize = 3;
 
 /// Dictionary key → the whole word it was cut from, for every key that can be
 /// spelled out with confidence.
@@ -1633,7 +1654,7 @@ fn full_spellings<'a>(
     text: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    if key_len < MIN_SPELLED_KEY {
+    if key_len < MIN_TEXT_SPELLED_KEY {
         return out;
     }
     let plain = |w: &str| w.bytes().all(|b| b.is_ascii_lowercase());
@@ -1655,7 +1676,11 @@ fn full_spellings<'a>(
         }
         by_key
     };
-    let lexicon: std::collections::HashSet<&str> = verb_synonyms::words().collect();
+    let lexicon: std::collections::HashSet<&str> = if key_len >= MIN_SPELLED_KEY {
+        verb_synonyms::words().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let from_text = reach(&mut text.iter().map(String::as_str));
     let from_lexicon = reach(&mut lexicon.iter().copied());
 
@@ -3385,14 +3410,20 @@ mod tests {
     }
 
     /// A Scott Adams key of three to five letters is the game's own
-    /// abbreviation, not a fragment of one word — nothing is spelled out.
+    /// abbreviation, so it is spelled out only on the STORY'S text (SQ-1763):
+    /// never from the general lexicon, never for an entry that is also a verb,
+    /// and not at all where the text names two words it could be.
     #[test]
-    fn a_short_key_is_never_spelled_out() {
-        let words: BTreeMap<String, WordRoles> =
-            [("lam".to_string(), roles(false, true))].into_iter().collect();
-        let v = StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 3)
-            .with_story_text(text(&["lamp"]));
-        assert_eq!(v.spell("lam"), "lam");
+    fn a_short_key_is_spelled_from_the_story_text_only() {
+        let one = |verb, noun, t: &[&str]| {
+            let words: BTreeMap<String, WordRoles> =
+                [("lam".to_string(), roles(verb, noun))].into_iter().collect();
+            StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 3).with_story_text(text(t))
+        };
+        assert_eq!(one(false, true, &["lamp"]).spell("lam"), "lamp");
+        assert_eq!(one(false, true, &[]).spell("lam"), "lam", "no lexicon help");
+        assert_eq!(one(true, true, &["lamp"]).spell("lam"), "lam", "a verb entry");
+        assert_eq!(one(false, true, &["lamp", "lamb"]).spell("lam"), "lam", "ambiguous");
     }
 
     /// The offer spells a key the prose never carried out of the story's text,

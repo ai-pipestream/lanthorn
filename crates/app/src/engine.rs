@@ -1372,12 +1372,34 @@ pub trait Engine {
         None
     }
 
-    /// Every word this story's parser knows, as typed: THE engine-neutral door
-    /// for a host that wants the word list (speech-recognition word boosting,
-    /// autocomplete). The default is the engine's [`Introspect::vocabulary`];
-    /// an engine without introspection (Scott Adams) overrides it (SQ-1763).
-    fn vocabulary_words(&self) -> Vec<String> {
+    /// The story's dictionary words as it STORES them — a Z-machine `lanter`,
+    /// a Scott Adams `lam`. The raw material of [`Engine::vocabulary_words`].
+    /// The default is the engine's [`Introspect::vocabulary`]; an engine without
+    /// introspection (Scott Adams) overrides it (SQ-1763).
+    fn dictionary_words(&self) -> Vec<String> {
         self.introspect().map(|i| i.vocabulary()).unwrap_or_default()
+    }
+
+    /// Every word this story's parser knows — THE engine-neutral door for a
+    /// host that wants the word list (speech-recognition word boosting,
+    /// autocomplete).
+    ///
+    /// **A promise of full spellings where they can be recovered with
+    /// confidence:** an entry the dictionary cut short is spelled out when the
+    /// story's own text (and, for long keys, the shipped lexicon) names exactly
+    /// one whole word it could have been (`lanter` -> `lantern`, `lam` ->
+    /// `lamp`), and kept as stored otherwise. The one rule is
+    /// [`crate::vocab::StoryVocabulary::spell`]; nothing here spells anything.
+    ///
+    /// Reads the story's text on every call. The TUI does not call this at
+    /// boot: it spells [`Engine::dictionary_words`] through its cached
+    /// [`crate::vocab::VocabState`] so the read is paid once.
+    fn vocabulary_words(&self) -> Vec<String> {
+        let words = self.dictionary_words();
+        match self.story_vocabulary() {
+            Some(v) => v.with_story_text(self.story_text_words()).spell_all(words),
+            None => words,
+        }
     }
 
     /// Does the story's own dictionary hold this word — asked of the ENGINE, so
@@ -1403,10 +1425,10 @@ pub trait Engine {
     /// [`crate::vocab::VocabState::get`].
     ///
     /// `None` — the default — for an engine with no reader for its text. The
-    /// Z-machine answers ([`crate::story_text::zmachine_words`]); a Glulx image's
-    /// strings are compressed through a decoding table and a Scott Adams
-    /// database keeps words shorter than any key worth spelling out, so both
-    /// fall back to the lexicon alone.
+    /// Z-machine answers ([`crate::story_text::zmachine_words`]) and so does a
+    /// Scott Adams database (its room, message and item texts); a Glulx image's
+    /// strings are compressed through a decoding table, so it falls back to the
+    /// lexicon alone.
     fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
         None
     }

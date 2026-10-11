@@ -9000,14 +9000,20 @@ mod tests {
         }
     }
 
-    /// SQ-1763: the engine-neutral word list is the Z-code dictionary, unchanged.
+    /// SQ-1763: the engine-neutral word list is the Z-code dictionary with
+    /// each cut-short key spelled out (`lanter` -> `lantern`), same length
+    /// and order, and the raw door still hands back the stored keys.
     #[test]
-    fn vocabulary_words_is_the_introspected_dictionary() {
+    fn vocabulary_words_is_the_dictionary_spelled_out() {
         let story = zvm::fixtures::load("minizork.z3").expect("committed fixture");
         let sess = GameSession::new(story, true, false, None).expect("minizork boots");
+        let raw = sess.dictionary_words();
+        assert_eq!(raw, sess.introspect().unwrap().vocabulary());
         let words = sess.vocabulary_words();
-        assert!(!words.is_empty());
-        assert_eq!(words, sess.introspect().unwrap().vocabulary());
+        assert_eq!(words.len(), raw.len());
+        assert!(raw.iter().any(|w| w == "lanter"), "premise: stored cut short");
+        assert!(words.iter().any(|w| w == "lantern"), "spelled out");
+        assert!(!words.iter().any(|w| w == "lanter"));
     }
 
     #[test]
