@@ -59,6 +59,31 @@ python3 training/eval.py \
 
 Always evaluate on `heldout.jsonl` games only — never on training games.
 
+## train_qlora.py
+
+QLoRA fine-tune on the built dataset. Needs the training venv
+(`requirements-qlora.txt`; ~6 GB of wheels, CUDA build of torch).
+
+```sh
+cd training
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-qlora.txt
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  .venv/bin/python train_qlora.py \
+  --data /work/shared-docs/lanthorn-sft/v2-20261011-capped800 \
+  --base-model Qwen/Qwen3-8B --out runs/qlora-qwen3-8b-v2 \
+  --batch-size 2 --grad-accum 8 --max-seq-len 1280 --epochs 1
+```
+
+Notes from the first run on a 4080 SUPER (16 GB, shared with the desktop):
+
+- `device_map="auto"` splits to CPU when the desktop holds VRAM — the script
+  pins the whole model to GPU 0 instead.
+- Validation runs on a 500-example slice so an epoch-end eval costs minutes.
+- Measured pace is ~100 s per optimizer step at these settings: 35.6k examples
+  / 16 per step ≈ 2.2k steps ≈ ~2.5 days. Trim `--data` (per-game cap in
+  build_dataset.py) or `--max-seq-len` for a shorter run.
+
 ## Suggested first run (QLoRA on a 16 GB card)
 
 - Base: Qwen3-8B or Llama-3.1-8B-Instruct, 4-bit, LoRA r=16–32

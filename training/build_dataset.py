@@ -160,6 +160,13 @@ def main(argv=None) -> int:
         default=0.05,
         help="Fraction of development-game examples held for validation (default 0.05)",
     )
+    parser.add_argument(
+        "--max-per-game",
+        type=int,
+        default=0,
+        help="Cap train/valid examples per game (0 = no cap). Concentrates the "
+             "dataset away from the longest runs; heldout is never capped.",
+    )
     args = parser.parse_args(argv)
 
     play_dir = args.data_dir / "play"
@@ -196,6 +203,16 @@ def main(argv=None) -> int:
         for ex in examples:
             ex["meta"].update({"game_id": game_id, "run_id": run_id, "split": split})
         target = {"train": "train", "development": "valid", "test": "heldout"}[split]
+        if args.max_per_game and split != "test":
+            existing = stats["examples_by_game"][game_id]
+            budget = args.max_per_game - existing
+            if budget <= 0:
+                stats["runs"]["capped_skipped"] += 1
+                stats["dropped"]["per_game_cap"] += len(examples)
+                continue
+            if len(examples) > budget:
+                stats["dropped"]["per_game_cap"] += len(examples) - budget
+                examples = examples[:budget]
         outputs[target].extend(examples)
         stats["runs"][f"used_{split}"] += 1
         stats["examples_by_game"][game_id] += len(examples)
