@@ -103,6 +103,15 @@ fn body(line: &str) -> &str {
     line.trim_start_matches(|c: char| c.is_whitespace() || MARKERS.contains(&c))
 }
 
+/// One piece of a menu in screen order — see [`MenuBlock::parts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuPart<'a> {
+    /// A line that is not an item, as the game emitted it (possibly empty).
+    Text(&'a str),
+    /// An item, by 1-based ordinal; read its words with [`MenuBlock::item`].
+    Item(usize),
+}
+
 /// A block of emitted text that parsed as a menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuBlock {
@@ -234,30 +243,51 @@ impl MenuBlock {
     /// nothing. Repainted copies of the list are dropped.
     pub fn listing(&self) -> String {
         let mut out = String::new();
-        for (i, line) in self.lines.iter().enumerate() {
-            // Whatever came before the first item — a title, a legend, or in
-            // Counterfeit Monkey's case the echo of the command that opened the
-            // menu — is the game's own preamble and stays in front. The hint
-            // then introduces the numbers it is about, rather than the preamble.
-            if i == self.items[0] {
-                out.push_str(MENU_HINT);
-                out.push('\n');
-            }
-            match self.items.iter().position(|&x| x == i) {
-                Some(n) if n < self.period => {
+        let mut first = true;
+        for part in self.parts() {
+            match part {
+                MenuPart::Text(t) => {
+                    out.push_str(t);
+                    out.push('\n');
+                }
+                MenuPart::Item(n) => {
+                    // Whatever came before the first item — a title, a legend, or in
+                    // Counterfeit Monkey's case the echo of the command that opened the
+                    // menu — is the game's own preamble and stays in front. The hint
+                    // then introduces the numbers it is about, rather than the preamble.
+                    if first {
+                        out.push_str(MENU_HINT);
+                        out.push('\n');
+                        first = false;
+                    }
                     let _ = writeln!(
                         out,
                         "{}{}. {}",
-                        if n + 1 == self.current { '>' } else { ' ' },
-                        n + 1,
-                        body(line)
+                        if n == self.current { '>' } else { ' ' },
+                        n,
+                        self.item(n).unwrap_or("")
                     );
                 }
+            }
+        }
+        out
+    }
+
+    /// The menu in screen order, for a host that words it its own way.
+    ///
+    /// Every line that is not an item is a [`MenuPart::Text`], exactly as
+    /// [`listing`](Self::listing) passes it through: title, legend, headings, the
+    /// Counterfeit Monkey command echo, and blank lines (as `Text("")`, so
+    /// `listing()` can be rebuilt losslessly from the parts). Each item of the
+    /// first period is a [`MenuPart::Item`] carrying its 1-based ordinal; repainted
+    /// copies of the list are dropped.
+    pub fn parts(&self) -> Vec<MenuPart<'_>> {
+        let mut out = Vec::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            match self.items.iter().position(|&x| x == i) {
+                Some(n) if n < self.period => out.push(MenuPart::Item(n + 1)),
                 Some(_) => {} // a repaint of a list already numbered above
-                None => {
-                    out.push_str(line);
-                    out.push('\n');
-                }
+                None => out.push(MenuPart::Text(line)),
             }
         }
         out
@@ -657,6 +687,61 @@ mod tests {
         // Both copies must agree about where the marker is, or they are not
         // copies and the block is something this module has no business folding.
         assert!(MenuBlock::parse(" > Alpha\n   Beta\n   Alpha\n > Beta\n").is_none());
+    }
+
+    #[test]
+    fn parts_walk_the_menu_in_screen_order() {
+        let m = MenuBlock::parse(&planetfall(2)).unwrap();
+        let t = |s| MenuPart::Text(s);
+        assert_eq!(
+            m.parts(),
+            vec![
+                t("                               INVISICLUES (tm)"),
+                t(" N = Next                                              P = Previous"),
+                t(" RETURN = See hint                                 Q = Resume story"),
+                t(""),
+                MenuPart::Item(1),
+                MenuPart::Item(2),
+                MenuPart::Item(3),
+                MenuPart::Item(4),
+            ]
+        );
+        // A repainted list (period > 1) yields its items once; the title stays.
+        let once = " > Alpha\n   Beta\n";
+        let m = MenuBlock::parse(&format!("Title\n\n{once}\n{once}")).unwrap();
+        assert_eq!(m.parts().iter().filter(|p| matches!(p, MenuPart::Item(_))).count(), 2);
+        assert_eq!(m.parts().first(), Some(&t("Title")));
+    }
+
+    #[test]
+    fn listing_rebuilds_from_parts_for_every_fixture() {
+        let once = " > Alpha\n   Beta\n   Gamma\n";
+        let blocks = [
+            planetfall(1),
+            planetfall(3),
+            once.to_string(),
+            format!("{once}{once}"),
+            format!("look\nTitle\n\n{once}{once}"),
+        ];
+        for b in blocks {
+            let m = MenuBlock::parse(&b).unwrap();
+            let mut rebuilt = String::new();
+            let mut first = true;
+            for p in m.parts() {
+                match p {
+                    MenuPart::Text(t) => rebuilt.push_str(&format!("{t}\n")),
+                    MenuPart::Item(n) => {
+                        if first {
+                            rebuilt.push_str(&format!("{MENU_HINT}\n"));
+                            first = false;
+                        }
+                        let mark = if n == m.current() { '>' } else { ' ' };
+                        rebuilt.push_str(&format!("{mark}{n}. {}\n", m.item(n).unwrap()));
+                    }
+                }
+            }
+            assert_eq!(rebuilt, m.listing(), "{b:?}");
+        }
     }
 
     #[test]

@@ -600,6 +600,8 @@ scroll_bench` measures all of it.
 
 **A host asks `Engine::vocabulary_words()` for every word the story's parser knows** (SQ-1763) — speech-recognition word boosting, autocomplete. It is engine-neutral: Z-code (the whole dictionary) and Glulx answer through `Introspect::vocabulary` by default; a Scott Adams session, which has no `Introspect`, overrides it with its verb and noun tables (synonym `*` markers and `.` padding dropped, lowercased, de-duplicated, full stored spellings). The TUI seeds its autocomplete from the same call.
 
+**A host that words a menu its own way walks `cli_host::MenuBlock::parts()`** (SQ-1766). It returns the menu in screen order as `MenuPart::Text(line)` (title, legend, headings, blanks, exactly as `listing()` passes them) and `MenuPart::Item(n)` (1-based ordinal, first period only; read the words with `item(n)`), so a speech host never re-parses `listing()`'s formatted string. `listing()` is itself built on `parts()`.
+
 ### Composing a v6 frame without the TUI
 
 The raster composite reads no `AppState` of its own. `render::screen::compose_v6_frame`
