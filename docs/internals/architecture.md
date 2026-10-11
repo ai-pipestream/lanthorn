@@ -602,6 +602,8 @@ scroll_bench` measures all of it.
 
 **A host that words a menu its own way walks `cli_host::MenuBlock::parts()`** (SQ-1766). It returns the menu in screen order as `MenuPart::Text(line)` (title, legend, headings, blanks, exactly as `listing()` passes them) and `MenuPart::Item(n)` (1-based ordinal, first period only; read the words with `item(n)`), so a speech host never re-parses `listing()`'s formatted string. `listing()` is itself built on `parts()`.
 
+**A host that announces score changes asks `Engine::score() -> Option<i32>`** (SQ-1764) and feeds it to `ScoreWatch::update`. `None` is the default (Z-code and Glulx do not answer yet); a Scott Adams session answers the treasures stored in the treasure room, the number `scott-cli` announces.
+
 ### Composing a v6 frame without the TUI
 
 The raster composite reads no `AppState` of its own. `render::screen::compose_v6_frame`

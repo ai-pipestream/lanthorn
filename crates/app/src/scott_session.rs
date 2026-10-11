@@ -1197,6 +1197,11 @@ impl Engine for ScottSession {
         ))
     }
 
+    /// Treasures stored in the treasure room - the score `scott-cli` announces.
+    fn score(&self) -> Option<i32> {
+        Some(self.vm.treasures_stored().0)
+    }
+
     /// Every word in the database's own text: room descriptions, messages and
     /// item texts, lowercased and split on non-alphanumerics (the `/WORD/`
     /// markers fall away as punctuation, their words stay). What spells a
@@ -1364,6 +1369,28 @@ mod tests {
     }
 
     fn vocabulary_session_with(text: &[&str], verbs: &[&str], nouns: &[&str], word_length: usize) -> ScottSession {
+        session_with_items(text, verbs, nouns, word_length, vec![], 0)
+    }
+
+    /// SQ-1764: one treasure, `treasure_room` 1, starting in `start_loc`.
+    fn treasure_session(start_loc: i32) -> ScottSession {
+        let treasure = scott::database::Item {
+            text: "a gold coin".into(),
+            treasure: true,
+            auto_noun: None,
+            start_loc,
+        };
+        session_with_items(&[], &["GO"], &["COIN"], 3, vec![treasure], 1)
+    }
+
+    fn session_with_items(
+        text: &[&str],
+        verbs: &[&str],
+        nouns: &[&str],
+        word_length: usize,
+        items: Vec<scott::database::Item>,
+        treasure_room: usize,
+    ) -> ScottSession {
         use scott::{Database, Vm};
         let s = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
         let db = Database {
@@ -1372,14 +1399,14 @@ mod tests {
             num_treasures: 0,
             word_length,
             light_time: -1,
-            treasure_room: 0,
+            treasure_room,
             actions: vec![],
             // verb 0 is the AUTO slot; `*` marks a synonym; `.` is padding.
             verbs: s(verbs),
             nouns: s(nouns),
             rooms: vec![scott::database::Room { exits: [0; 6], desc: "limbo".into(), literal: true }; 2],
             messages: s(text),
-            items: vec![],
+            items,
             adventure_number: 0,
             ti99: None,
             mysterious: false,
@@ -1399,6 +1426,14 @@ mod tests {
             showing_title_card: false,
             deferred_save: false,
         }
+    }
+
+    /// SQ-1764: `score` is the treasures stored in the treasure room, the number
+    /// the scott CLI announces - 1 with the coin there, 0 with it elsewhere.
+    #[test]
+    fn score_counts_treasures_stored() {
+        assert_eq!(treasure_session(0).score(), Some(0));
+        assert_eq!(treasure_session(1).score(), Some(1));
     }
 
     /// SQ-1763: `dictionary_words` is verbs then nouns, `*` stripped, padding

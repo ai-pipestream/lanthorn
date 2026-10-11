@@ -9000,6 +9000,14 @@ mod tests {
         }
     }
 
+    /// SQ-1764: Z-code does not answer the engine-neutral score yet.
+    #[test]
+    fn score_is_none_for_zcode() {
+        let story = zvm::fixtures::load("minizork.z3").expect("committed fixture");
+        let sess = GameSession::new(story, true, false, None).expect("minizork boots");
+        assert_eq!(sess.score(), None);
+    }
+
     /// SQ-1763: the engine-neutral word list is the Z-code dictionary with
     /// each cut-short key spelled out (`lanter` -> `lantern`), same length
     /// and order, and the raw door still hands back the stored keys.

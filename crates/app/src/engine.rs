@@ -1433,6 +1433,14 @@ pub trait Engine {
         None
     }
 
+    /// The engine-neutral score, for a host that announces score changes (feed
+    /// it to `ScoreWatch::update` in the CLI host). `None` - the default - for an
+    /// engine with no score of its own to report. A Scott Adams session answers
+    /// the treasures stored (SQ-1764).
+    fn score(&self) -> Option<i32> {
+        None
+    }
+
     /// Does the story's own text carry only Infocom's stock InvisiClues booklet
     /// advert where a built-in `HINT` would be (SQ-1745)? Then a `hint`
     /// dictionary entry says nothing about built-in hints. `false` by default.
