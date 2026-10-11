@@ -141,6 +141,7 @@ pub mod query_sweep;
 pub mod reload;
 pub mod render;
 pub mod random_exit_probe;
+pub mod relocation_probe;
 pub mod return_probe;
 pub mod reveal;
 pub mod roomid;

@@ -444,6 +444,11 @@ pub fn finish_command_turn(
     // for a crossing the map has no return path for, and ends any search a move has outrun.
     crate::return_probe::arm_return_search(state, mapper, &*session, cmd, room_before, &mut turn_save);
 
+    // …and, for a crossing the player made without naming a direction (`climb tree`), ask the
+    // game which direction that was (SQ-1771). Reads the pre-turn snapshot below, so it must run
+    // before that is replaced.
+    crate::relocation_probe::arm_relocation_search(state, mapper, &*session, cmd, room_before);
+
     // SQ-1257 Phase 2: this move's own edge was minted (or not) already, by `apply_turn` above.
     // Which reseeded shadow this turn earns — a first walk, an upgrade, or a suspicion left
     // pending — is `random_exit_probe`'s own decision, and lives there in ONE place: five real-
@@ -507,9 +512,13 @@ pub fn finish_command_turn(
     // engine besides the Z-machine anyway, so a probe can never fire for one — paying for a
     // snapshot it will never use would be exactly the cost this seam's own laziness elsewhere
     // exists to avoid.
-    state.random_exit_pre_move_save = session
-        .rng_seed()
-        .map(|_| (mapper.graph.current().unwrap_or(0), turn_save.get(&*session)));
+    //
+    // SQ-1771: the relocation search starts from the same moment, for every engine -- a Scott
+    // Adventure has no seed but its snapshot is as cheap as the Z-machine's -- so the gate also
+    // opens when that feature is on.
+    let keeps_pre_move = session.rng_seed().is_some() || (state.config.return_probe && state.probe.is_armed());
+    state.random_exit_pre_move_save = keeps_pre_move
+        .then(|| (mapper.graph.current().unwrap_or(0), turn_save.get(&*session)));
 
     // Background map maintenance: a geometry change (new room/connection) is the
     // ONLY thing that can require re-layout, so all of it runs on a worker thread —

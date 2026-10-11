@@ -264,6 +264,28 @@ pub const PROBE_FALLBACK_DIRS: [Direction; 8] = [
     Direction::NW,
 ];
 
+/// The ship words a relocation search may ask, each with the slot it fills (SQ-1771) -- fuller
+/// spellings first, then the multi-letter abbreviations a story may carry instead (never the
+/// one-letter `f`/`a`/`p`, which are also an article and a preposition). A caller keeps the first
+/// word per slot that the STORY's own dictionary holds. Every entry is a nautical word in
+/// [`word_direction`] filling the same slot; a test holds the table to that, so it cannot drift
+/// from the one it is drawn from.
+pub const NAUTICAL_PROBE_WORDS: [(&str, Direction); 13] = [
+    ("fore", Direction::N),
+    ("aft", Direction::S),
+    ("port", Direction::W),
+    ("starboard", Direction::E),
+    ("fore-port", Direction::NW),
+    ("fore-starboard", Direction::NE),
+    ("aft-port", Direction::SW),
+    ("aft-starboard", Direction::SE),
+    ("sb", Direction::E),
+    ("fp", Direction::NW),
+    ("fs", Direction::NE),
+    ("ap", Direction::SW),
+    ("as", Direction::SE),
+];
+
 /// The reciprocal WORD for a direction command from a non-compass vocabulary family (SQ-1290):
 /// the nautical fore/aft/port/starboard set and its bow/stern synonyms.
 ///
@@ -477,6 +499,15 @@ pub fn opposite(d: Direction) -> Direction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nautical_probe_words_are_the_nautical_words_of_their_slots() {
+        for (word, dir) in NAUTICAL_PROBE_WORDS {
+            let w = WalkedDir::parse(word).unwrap_or_else(|| panic!("{word} parses"));
+            assert_eq!((w.dir(), w.family()), (dir, DirFamily::Nautical), "{word}");
+        }
+    }
+
 
     /// SQ-1555: `portal_kind` must agree with `grid_offset` for every direction — `Some` exactly
     /// where `grid_offset` is `None` — since `planar_region` cuts a layer walk on `grid_offset`

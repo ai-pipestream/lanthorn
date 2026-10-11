@@ -351,6 +351,48 @@ impl Mapper {
         true
     }
 
+    /// Give a passage the player walked WITHOUT naming a direction the direction the game itself
+    /// accepted for it (SQ-1771): `climb tree` filed `Forest Path --?--> Up a Tree`, and a shadow
+    /// has since found that `up` reaches the same room. See `app::relocation_probe`.
+    ///
+    /// The `?` stub the unlabelled crossing left is replaced, not joined: minting the directional
+    /// edge makes it redundant (`collapse_unknown_edges`). When the stub was the ONLY thing that
+    /// placed `to` -- the room was first seen this turn -- its cell is cleared first, so the room
+    /// is laid out where `dir` says rather than wherever a `?` stub happened to drop it. A room
+    /// that other passages already pin keeps its cell.
+    ///
+    /// Everything about the PLAYER is recorded as a walked `dir` would have recorded it
+    /// ([`Mapper::arrived_via`], when they are still standing in `to`), except the one thing they
+    /// did not do: `dir` is not marked tried. Returns false, changing nothing, when no `?`
+    /// passage `from` -> `to` exists to upgrade (a stale answer: the map moved on, or was
+    /// rewound), or when a passage already leaves `from` that way.
+    pub fn upgrade_unlabelled_passage(&mut self, passage: ProbedPassage) -> bool {
+        let ProbedPassage { from, dir, to } = passage;
+        let is_stub = |c: &crate::graph::Connection| {
+            c.origin == from && c.dest == to && c.dir == Direction::Unknown
+        };
+        if !self.graph.connections().iter().any(is_stub)
+            || dir == Direction::Unknown
+            || from == to
+            || self.graph.connections().iter().any(|c| c.origin == from && c.dir == dir)
+        {
+            return false;
+        }
+        let pinned_elsewhere = self
+            .graph
+            .connections()
+            .iter()
+            .any(|c| (c.origin == to || c.dest == to) && !is_stub(c));
+        if !pinned_elsewhere {
+            self.graph.clear_pos(to);
+        }
+        let done = self.record_probed_passage(passage);
+        if done && self.graph.current() == Some(to) {
+            self.arrived_via = Some((from, dir));
+        }
+        done
+    }
+
     /// The passage the player last walked to reach the current room — `(room left,
     /// direction taken)` — if it was reached by a walked passage at all. See
     /// [`Mapper::arrived_via`].
@@ -956,6 +998,39 @@ mod probed_passage_tests {
         assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 404 }));
         assert!(!m.record_probed_passage(ProbedPassage { from: 404, dir: Direction::S, to: 1 }));
         assert_eq!(m.graph.connections().len(), 1, "still only the walked edge");
+    }
+
+    /// SQ-1771: `climb tree` mints a `?` stub and drops the new room on the nearest free cell;
+    /// once a shadow has found that `up` is the game's word for it, the stub becomes `Up`, the
+    /// room moves to the cell above, and the player's arrival is recorded as if they had typed it.
+    #[test]
+    fn an_unlabelled_passage_takes_the_direction_the_game_accepted() {
+        let mut m = Mapper::default();
+        m.observe(1, "Path", None);
+        m.observe(2, "Tree", None); // climb tree: no direction named
+        assert!(m.graph.connections().iter().any(|c| c.dir == Direction::Unknown));
+        let first_cell = m.graph.room(2).unwrap().pos;
+        assert!(m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }));
+        let conns = m.graph.connections();
+        assert_eq!(conns.len(), 1, "the stub was replaced, not joined: {conns:?}");
+        assert_eq!((conns[0].origin, conns[0].dir, conns[0].dest), (1, Direction::Up, 2));
+        let (a, b) = (m.graph.room(1).unwrap().pos.unwrap(), m.graph.room(2).unwrap().pos.unwrap());
+        assert_eq!(b, (a.0, a.1 - 1), "Up lays out one cell above (was {first_cell:?})");
+        assert_eq!(m.arrived_via(), Some((1, Direction::Up)));
+        assert!(!m.graph.room(1).unwrap().tried.contains(&Direction::Up), "the player never typed it");
+    }
+
+    /// The answer may arrive after the map has moved on: with no stub left to upgrade it is a
+    /// no-op, and a direction already leaving the room is not overwritten.
+    #[test]
+    fn an_unlabelled_upgrade_stands_down_when_the_map_moved_on() {
+        let mut m = Mapper::default();
+        m.observe(1, "Path", None);
+        m.observe(2, "Tree", None);
+        m.observe(1, "Path", Some(Direction::Down));
+        assert!(!m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 3 }));
+        assert!(m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }));
+        assert!(!m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }), "stub is gone");
     }
 
     /// After the fact there is no such thing as a probed passage, only a passage — so it must

@@ -794,6 +794,29 @@ stops at the first success — Zork I's North of House takes three commands
 (2.7 ms), Counterfeit Monkey's Back Alley one (407 ms). `cargo run -p app
 --example return_probe_cost` is the instrument.
 
+### The same search, pointed forward: the relocation probe (SQ-1771)
+
+The mapper files only direction words, so `climb tree` or `jump in river` leave a
+`?` stub and a room dropped on the nearest free cell. `app::relocation_probe`
+asks the game which direction that was: when a turn changes room, names no
+direction and has minted such a stub, the shadow is restored to the snapshot from
+the END of the previous turn (`AppState::random_exit_pre_move_save`, now kept for
+every engine while the probe seam is on) and asked, in one question, `look` and
+the twelve compass words, each from a freshly restored state. A `look` that lands
+in the destination means a timed event moved the player whatever they typed:
+nothing is recorded. Otherwise the first word that lands there (a death is not a
+landing) is replayed alone and must land in the same room again, which guards a
+random relocation firing in one shadow attempt only. Ship words are asked in a
+second question, and only when the story's own dictionary holds them. A confirmed
+word replaces the stub through `Mapper::upgrade_unlabelled_passage` (the room is
+re-laid out where the direction puts it), and the return search armed for the same
+crossing is re-aimed as if the player had typed the word. No match leaves the map
+as it was. A crossing recorded as In/Out (typed, or just placed this way) gets one more
+search of the same shape over the eight compass words only, and a confirmed compass
+passage is recorded beside the portal, so the layout can draw the rooms flat. It shares the worker, the token routing in `host::probe::poll` and the
+staleness discipline of the return probe: the answer is a fact about the map, so
+a late one is applied unless the stub it upgrades is gone.
+
 ### Declared exits: a room's own data, read before a move is judged (SQ-1257)
 
 Some Inform games move the player somewhere their own exit table never named —

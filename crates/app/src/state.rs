@@ -2724,6 +2724,14 @@ pub struct AppState {
     /// a new move ends whatever was in flight, because the move may itself be the
     /// walk back. See [`crate::return_probe`].
     pub return_search: Option<crate::return_probe::ReturnSearch>,
+    /// A search for the direction word behind a crossing the player made without naming one,
+    /// running right now, if any (SQ-1771): `climb tree` changed the room and filed a `?`. At most
+    /// one. Session state, never persisted -- what it learns is a passage in the graph. See
+    /// [`crate::relocation_probe`].
+    pub relocation_search: Option<crate::relocation_probe::RelocationSearch>,
+    /// In/Out passages `(origin, portal, dest)` whose compass alias has already been searched
+    /// for (SQ-1771): each is asked once, the first time the map sees it. Session state.
+    pub alias_searched: Vec<(mapper::graph::RoomId, mapper::direction::Direction, mapper::graph::RoomId)>,
     /// A Phase-2 randomness search running right now, if any (SQ-1257): after a move Phase 1
     /// could not classify statically (`DeclaredExit::Absent`/`Code`), a reseeded shadow walk
     /// asked whether the story is deciding this direction at random. Session state, never
@@ -3958,6 +3966,8 @@ impl Default for AppState {
             reveal: None,
             probe: crate::probe::ShadowProbe::default(),
             return_search: None,
+            relocation_search: None,
+            alias_searched: Default::default(),
             random_exit_search: None,
             random_exit_pre_move_save: None,
             random_exit_agreements: None,
