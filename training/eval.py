@@ -58,6 +58,51 @@ def read_available(proc, timeout: float) -> str:
     return "".join(chunks)
 
 
+class LocalModel:
+    """Direct in-process generation (transformers + optional LoRA adapter).
+
+    Loaded lazily so the server paths stay stdlib-only. Use this for the
+    post-training comparison: the adapter directory from train_qlora.py drops
+    straight in, no GGUF conversion needed.
+    """
+
+    def __init__(self, base: str, adapter: str | None):
+        import torch  # noqa: F401
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(adapter or base)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            base, torch_dtype=torch.bfloat16, device_map={"": 0}
+        )
+        if adapter:
+            from peft import PeftModel
+
+            self.model = PeftModel.from_pretrained(self.model, adapter)
+        self.model.eval()
+
+    def chat(self, transcript: str, max_new: int = 32) -> str:
+        import torch
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ]
+        # Qwen3-style templates deliberate by default; command picking
+        # doesn't want it (mirrors think:false on the ollama path).
+        enc = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+            return_dict=True, enable_thinking=False,
+        ).to(self.model.device)
+        with torch.no_grad():
+            out = self.model.generate(
+                **enc,
+                max_new_tokens=max_new,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        return self.tokenizer.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
+
+
 def ask_model(endpoint: str, model: str, transcript: str, timeout: float, api: str) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -97,8 +142,14 @@ def ask_model(endpoint: str, model: str, transcript: str, timeout: float, api: s
     return body["choices"][0]["message"]["content"]
 
 
+THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
 def sanitize_command(text: str) -> str:
     """Reduce a model reply to one plausible game command (broker rules)."""
+    text = THINK_BLOCK.sub("", text)  # safety net if a template thinks anyway
+    if text.strip().startswith("<think>"):
+        return ""  # truncated think block; no usable command
     line = text.strip().splitlines()[0].strip() if text.strip() else ""
     line = line.strip('"\'')
     line = re.sub(r"^[>\s]+", "", line)
@@ -112,8 +163,11 @@ def main(argv=None) -> int:
     parser.add_argument("--endpoint", default="http://localhost:11434",
                         help="Server base URL (no /v1 suffix needed for --api ollama)")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--api", choices=["openai", "ollama"], default="ollama",
-                        help="ollama uses the native /api/chat with think disabled (default); openai for vllm/llama.cpp servers")
+    parser.add_argument("--api", choices=["openai", "ollama", "local"], default="ollama",
+                        help="ollama uses the native /api/chat with think disabled (default); "
+                             "openai for vllm/llama.cpp servers; local loads a HF model in-process")
+    parser.add_argument("--local-base", help="HF base model for --api local (e.g. Qwen/Qwen3-8B)")
+    parser.add_argument("--local-adapter", help="Optional LoRA adapter directory for --api local")
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--window", type=int, default=8,
                         help="Transcript pairs shown to the model (match training)")
@@ -124,6 +178,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     engine_bin = args.engine_bin.resolve()
     story = args.story.resolve()
+
+    local = None
+    if args.api == "local":
+        if not args.local_base:
+            parser.error("--api local requires --local-base")
+        local = LocalModel(args.local_base, args.local_adapter)
 
     args.out.mkdir(parents=True, exist_ok=True)
     raw_path = args.out / "stdout.raw"
@@ -161,7 +221,10 @@ def main(argv=None) -> int:
                     command = " "
                     reply = None
                 else:
-                    reply = ask_model(args.endpoint, args.model, context, args.model_timeout, args.api)
+                    if args.api == "local":
+                        reply = local.chat(context)
+                    else:
+                        reply = ask_model(args.endpoint, args.model, context, args.model_timeout, args.api)
                     command = sanitize_command(reply) or "look"
                 proc.stdin.write((command + "\n").encode())
                 proc.stdin.flush()
