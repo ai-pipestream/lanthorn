@@ -34,3 +34,6 @@ mod v6_win0_backdrop;
 
 #[path = "suites/v6_mysterious01_boot.rs"]
 mod v6_mysterious01_boot;
+
+#[path = "suites/screen_reader_regions.rs"]
+mod screen_reader_regions;

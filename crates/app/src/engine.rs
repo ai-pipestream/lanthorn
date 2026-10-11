@@ -405,6 +405,11 @@ pub struct GraphicsWindow {
 /// (`Grid`, `Buffer`, or `Graphics`).
 #[derive(Debug, Clone)]
 pub struct PositionedWindow {
+    /// The v6 window number (0..8) this entry was built from, `None` outside v6.
+    /// A window with a picture and text yields two entries sharing one number.
+    /// Hosts reading the screen ([`crate::screen_reader`]) key per-release
+    /// classification on it.
+    pub window: Option<u8>,
     pub x: u16,
     pub y: u16,
     pub w: u16,

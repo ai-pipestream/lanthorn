@@ -35,6 +35,7 @@ use ratatui::layout::Rect;
 fn v6_model() -> ScreenModel {
     let chrome_img = image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 30, 20, 255]));
     let chrome = PositionedWindow {
+        window: None,
         x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
         left_margin: 0, right_margin: 0,
         node: WinNode::Graphics(GraphicsWindow {
@@ -45,6 +46,7 @@ fn v6_model() -> ScreenModel {
         }),
     };
     let story = PositionedWindow {
+        window: None,
         x: 5, y: 4, w: 29, h: 20, x_px: 43, y_px: 39, w_px: 234, h_px: 160,
         left_margin: 0, right_margin: 0,
         node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),

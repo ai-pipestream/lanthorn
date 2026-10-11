@@ -201,6 +201,7 @@ fn the_score_screen_does_not_bridge_the_gap_between_two_runs() {
         PxText::derived(y, x, s.into(), 0, ink, panel, zvm::screen::V6Cell::DEFAULT)
     };
     let board = PositionedWindow {
+        window: None,
         x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
         left_margin: 0, right_margin: 0,
         node: WinNode::Grid(GridWindow {

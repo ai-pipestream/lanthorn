@@ -14203,6 +14203,7 @@ mod tests {
     /// session builds them with.
     fn v6_composite(art_px: (u16, u16, u16, u16), story_px: (u16, u16, u16, u16)) -> WinNode {
         let pw = |px: (u16, u16, u16, u16), node| crate::engine::PositionedWindow {
+            window: None,
             x: px.0 / 8,
             y: px.1 / 16,
             w: px.2 / 8,
@@ -14761,6 +14762,7 @@ mod tests {
         // directly below.
         let pane = Rect::new(0, 0, 40, 20);
         let pw = |win: u32, x: u16, y: u16| PositionedWindow {
+            window: None,
             x,
             y,
             w: 6,
@@ -14810,6 +14812,7 @@ mod tests {
         // Background: a full-area solid-colour graphics window.
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]));
         let background = PositionedWindow {
+            window: None,
             x: 0,
             y: 0,
             w: 10,
@@ -14834,6 +14837,7 @@ mod tests {
         grid.active_rows = 2;
         grid.put(1, 1, 'X', 0);
         let foreground = PositionedWindow {
+            window: None,
             x: 2,
             y: 2,
             w: 3,
@@ -14878,6 +14882,7 @@ mod tests {
         // Native-sized opaque chrome so build_chrome_canvas yields a real ring.
         let chrome_img = image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 30, 20, 255]));
         let chrome = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -14886,6 +14891,7 @@ mod tests {
         };
         // Story: the primary buffer at the win0 box (43,39,234,160).
         let story = PositionedWindow {
+            window: None,
             x: 5, y: 4, w: 29, h: 20, x_px: 43, y_px: 39, w_px: 234, h_px: 160,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
@@ -14935,6 +14941,7 @@ mod tests {
 
         let chrome_img = image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 30, 20, 255]));
         let chrome = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -14944,6 +14951,7 @@ mod tests {
         // Status grid: a non-blank run at native row 6 (deep, ≥ STATUS_BAND_ROWS)
         // but ABOVE the story buffer, which starts at row 7 (y_px 112).
         let status = PositionedWindow {
+            window: None,
             x: 0, y: 6, w: 40, h: 1, x_px: 0, y_px: 96, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
@@ -14956,6 +14964,7 @@ mod tests {
             }),
         };
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 7, w: 40, h: 10, x_px: 0, y_px: 112, w_px: 320, h_px: 80,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
@@ -15053,6 +15062,7 @@ mod tests {
         // STATUS_BAND_ROWS) inside the story box (native y 39..199 → the 8×16 cell
         // rows land at (y-1)/16). Distinct rows, like Shogun's real 21/22/23.
         let menu = PositionedWindow {
+            window: None,
             x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
@@ -15122,6 +15132,7 @@ mod tests {
         // difference from the case above.
         let mut model = hybrid_v6_model();
         let menu = PositionedWindow {
+            window: None,
             x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
@@ -15211,6 +15222,7 @@ mod tests {
             }
         }
         let chrome = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -15231,6 +15243,7 @@ mod tests {
             pw_px as u32, ph_px as u32, image::Rgba([200, 10, 120, 255]),
         );
         let plate = PositionedWindow {
+            window: None,
             x: 5, y: 2, w: 15, h: 15, x_px: 40, y_px: 40, w_px: pw_px, h_px: ph_px,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -15238,6 +15251,7 @@ mod tests {
             }),
         };
         let story = PositionedWindow {
+            window: None,
             x: 5, y: 2, w: 30, h: 15, x_px: 40, y_px: 40, w_px: 240, h_px: 120,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
@@ -15374,6 +15388,7 @@ mod tests {
     /// SQ-0515: a chrome grid window carrying `px_texts`, for the flood discriminator.
     fn flood_probe_window(w_px: u16, runs: Vec<crate::engine::PxText>) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
@@ -15442,6 +15457,7 @@ mod tests {
         // height quantizes to 320/16 = 20 raster rows at the default cell.
         let chrome_img = image::RgbaImage::new(640, 400); // all alpha 0 (transparent)
         let chrome = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -15449,6 +15465,7 @@ mod tests {
             }),
         };
         let story = PositionedWindow {
+            window: None,
             x: 10, y: 4, w: 58, h: 20, x_px: 86, y_px: 78, w_px: 468, h_px: 320,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
@@ -15584,6 +15601,7 @@ mod tests {
     /// relation the cell-path band split reads (SQ-0549).
     fn cell_path_v6_model() -> ScreenModel {
         let status = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
@@ -15598,6 +15616,7 @@ mod tests {
             }),
         };
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 1, w: 40, h: 24, x_px: 0, y_px: 16, w_px: 320, h_px: 384,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),

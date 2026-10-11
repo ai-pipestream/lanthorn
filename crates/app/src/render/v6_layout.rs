@@ -3335,6 +3335,7 @@ mod tests {
         const ART_END: u32 = 46; // exclusive — the frame slab occupies 0..45
         let native = (640u16, 400u16);
         let art_win = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 6, h: 25, x_px: 0, y_px: 0, w_px: ART_END as u16, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow {
@@ -3364,6 +3365,7 @@ mod tests {
             )
         };
         let status = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 74, h: 2, x_px: ART_END as u16, y_px: 0, w_px: 592, h_px: 32,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -3419,6 +3421,7 @@ mod tests {
         let native = (640u16, 400u16);
         let cell = |ch: char| GridCell { ch, style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
         let status = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 12, h: 2, x_px: 0, y_px: 0, w_px: 640, h_px: 32,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -3490,6 +3493,7 @@ mod tests {
         let native = (640u16, 400u16);
         let bar = crate::engine::PxText::derived(1, 1, "X".repeat(80), 0, 0x0300_0000, 0x03FF_FFFF, zvm::screen::V6Cell::DEFAULT);
         let status = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 80, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -3774,6 +3778,7 @@ mod tests {
             }
         }
         let frame = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win: 7, canvas: Arc::new(art), version: 0, upscale: false, undrawn: false }),
@@ -3851,6 +3856,7 @@ mod tests {
 
     fn grid_item(x_px: u16) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 win: 0,
@@ -3869,6 +3875,7 @@ mod tests {
     fn graphics_item_win(x_px: u16, win: u32) -> PositionedWindow {
         let canvas = Arc::new(image::RgbaImage::new(1, 1));
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win, canvas, version: 0, upscale: false, undrawn: false }),
         }
@@ -3876,6 +3883,7 @@ mod tests {
 
     fn buffer_item(x_px: u16, primary: bool) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary, ..Default::default() }),
         }
@@ -3885,6 +3893,7 @@ mod tests {
     fn plate_at(x: u16, y: u16, w: u32, h: u32) -> PositionedWindow {
         let canvas = Arc::new(image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255])));
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w as u16, h_px: h as u16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false, undrawn: false }),
@@ -3939,6 +3948,7 @@ mod tests {
     fn story_prose_box_ignores_an_unpainted_plate() {
         let canvas = Arc::new(image::RgbaImage::new(584, 392));
         let plate = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 28, y_px: 4, w_px: 584, h_px: 392,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false, undrawn: false }),
@@ -3951,6 +3961,7 @@ mod tests {
     /// A story window at a native box, for the clear/prose composition.
     fn story_box(x: u16, y: u16, w: u16, h: u16) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
@@ -4029,6 +4040,7 @@ mod tests {
             }
         }
         let plate = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow {
@@ -4122,6 +4134,7 @@ mod tests {
             }
         }
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0,
             w_px: native.0 as u16, h_px: native.1 as u16,
             left_margin: 0, right_margin: 0,
@@ -4137,6 +4150,7 @@ mod tests {
             vec![crate::engine::PxText::derived(y + 1, x + 1, text.into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT)]
         };
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -4579,6 +4593,7 @@ mod tests {
         src.put_pixel(40, 38, Rgba([10, 200, 30, 255])); // marker low in the canvas
         src.put_pixel(2, 2, Rgba([200, 10, 30, 255])); // marker near the top-left
         let win = |h_px: u16, canvas: image::RgbaImage| PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 40, h: 1,
             x_px: 4, y_px: 4, // window origin
             w_px: 320, h_px,
@@ -4604,6 +4619,7 @@ mod tests {
 
     fn graphics_window(x_px: u16, y_px: u16, w: u16, h: u16, canvas: image::RgbaImage) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w, h, x_px, y_px, w_px: w, h_px: h, left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win: 0, canvas: Arc::new(canvas), version: 0, upscale: false, undrawn: false }),
         }
@@ -4662,6 +4678,7 @@ mod tests {
         // row 1, col 2 in a 3-col grid.
         cells[3 + 2] = GridCell { ch: 'A', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
         let win = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 32, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 win: 0,
@@ -4694,6 +4711,7 @@ mod tests {
 
     fn px_text_grid_item(text: &str, style: u8, fg: u32, bg: u32) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 win: 0,
@@ -4763,6 +4781,7 @@ mod tests {
         let cells = |style: u8| vec![GridCell { ch: 'A', style, fg: 0, bg: 0, link: 0, glk_style: 0 }];
         let canvas = |style: u8| {
             let win = PositionedWindow {
+                window: None,
                 x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 16, left_margin: 0, right_margin: 0,
                 node: WinNode::Grid(GridWindow {
                     win: 0,
@@ -4960,6 +4979,7 @@ mod tests {
 
     fn band_grid(w_px: u16, runs: Vec<PxText>) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: (w_px / 8).max(1), h: 1, x_px: 0, y_px: 0, w_px, h_px: 16, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 win: 0,
@@ -5015,6 +5035,7 @@ mod tests {
             crate::engine::PxText::derived(y, x, s.into(), 0, ink, panel, zvm::screen::V6Cell::DEFAULT)
         };
         let win = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -5069,6 +5090,7 @@ mod tests {
     /// `bg` as its own Normal-style background.
     fn page_grid(w: u16, h: u16, bg: Option<u32>) -> PositionedWindow {
         PositionedWindow {
+            window: None,
             x: 0, y: 0, w: (w / 8).max(1), h: (h / 16).max(1), x_px: 0, y_px: 0, w_px: w, h_px: h,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -5113,6 +5135,7 @@ mod tests {
         // `story_clear_native`'s clear-interior probe.
         let full = page_grid(16, 16, Some(BLUE));
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 4, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
@@ -5185,6 +5208,7 @@ mod tests {
         // pair `honor_game_colours` governs, painted ground or not.
         let full = page_grid(16, 16, Some(BLUE));
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 4, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
@@ -5199,6 +5223,7 @@ mod tests {
     #[test]
     fn story_bg_rgba_resolves_the_windows_own_colour() {
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, bg: Some(BLUE), ..Default::default() }),
         };
@@ -5209,6 +5234,7 @@ mod tests {
     #[test]
     fn story_bg_rgba_is_none_when_the_game_set_no_colour() {
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
@@ -5220,6 +5246,7 @@ mod tests {
         // End-to-end through the same calls screen.rs makes: resolve the colour,
         // then fill_cell the story_clear_native rect with it.
         let story = PositionedWindow {
+            window: None,
             x: 0, y: 0, w: 1, h: 1, x_px: 2, y_px: 2, w_px: 4, h_px: 4, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, bg: Some(RED), ..Default::default() }),
         };

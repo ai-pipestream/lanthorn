@@ -3412,6 +3412,12 @@ impl GameSession {
     /// which is where it lives because a style reload rebuilds it (SQ-1047). `None`
     /// for the engine-only view, which says so rather than reporting a default face
     /// nobody is drawing with.
+    /// The release, serial and checksum this story's header states, for
+    /// [`crate::screen_reader::regions`].
+    pub fn game_identifier(&self) -> blorb::GameIdentifier {
+        crate::screen_reader::identify(&self.machine)
+    }
+
     pub fn v6_window_dump(
         &self,
         cells: &[crate::state::V6CellRect],
@@ -3688,6 +3694,7 @@ impl GameSession {
 
             if let Some(canvas) = visible.get(&(i as u8)) {
                 graphics_entries.push((canvas.z_seq, PositionedWindow {
+                    window: Some(i as u8),
                     x,
                     y,
                     w: cols,
@@ -3752,6 +3759,7 @@ impl GameSession {
                     ry1 = ry1.max(t.y.saturating_sub(1).saturating_add(font_h));
                 }
                 text_entries.push(PositionedWindow {
+                    window: Some(i as u8),
                     x: rx0 / font_w,
                     y: ry0 / font_h,
                     w: (rx1 - rx0).div_ceil(font_w),
@@ -3922,6 +3930,7 @@ impl GameSession {
                 })
             };
             text_entries.push(PositionedWindow {
+                window: Some(i as u8),
                 x,
                 y,
                 w: cols,
@@ -3981,6 +3990,7 @@ impl GameSession {
         // zero-extent test, so the two ask their own questions from here on.
         if text_entries.is_empty() && graphics_entries.is_empty() {
             text_entries.push(PositionedWindow {
+                window: Some(0),
                 x: 0,
                 y: 0,
                 w: content_size.0,
@@ -6511,6 +6521,12 @@ impl Engine for GameSession {
         Some(crate::story_text::zmachine_words(&self.machine.mem))
     }
 
+    /// SQ-1765: v1-v3 from the standard status globals, a known v6 release from
+    /// the global its own band prints, an unknown v6 release from the band text.
+    fn score(&self) -> Option<i32> {
+        crate::screen_reader::score(&self.machine, &self.game_identifier(), || self.screen())
+    }
+
     fn advertises_hint_booklet(&self) -> bool {
         crate::story_text::advertises_hint_booklet(&self.machine.mem)
     }
@@ -9000,12 +9016,20 @@ mod tests {
         }
     }
 
-    /// SQ-1764: Z-code does not answer the engine-neutral score yet.
+    /// SQ-1765: a Version 3 score game answers the second status global
+    /// (ZMSD 8.2.3.1), and a time game answers `None`.
     #[test]
-    fn score_is_none_for_zcode() {
+    fn score_is_the_second_global_in_a_v3_score_game() {
         let story = zvm::fixtures::load("minizork.z3").expect("committed fixture");
-        let sess = GameSession::new(story, true, false, None).expect("minizork boots");
-        assert_eq!(sess.score(), None);
+        let mut sess = GameSession::new(story, true, false, None).expect("minizork boots");
+        assert_eq!(sess.score(), Some(0));
+        sess.machine.set_global(1, 25);
+        assert_eq!(sess.score(), Some(25));
+        sess.machine.set_global(1, 0xfffe); // signed: the score may go negative
+        assert_eq!(sess.score(), Some(-2));
+        let flags1 = sess.machine.mem.read_byte(0x01);
+        sess.machine.mem.write_byte(0x01, flags1 | 0b10);
+        assert_eq!(sess.score(), None, "Flags 1 bit 1 set: a time game has no score");
     }
 
     /// SQ-1763: the engine-neutral word list is the Z-code dictionary with
