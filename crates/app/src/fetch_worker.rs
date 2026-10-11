@@ -452,6 +452,52 @@ mod tests {
         assert_eq!(super::scott_ifdb_id(&z, None), None);
     }
 
+    /// SQ-1768: the folder a fetch writes into is the folder the picker row
+    /// reads. For a `.zblorb` that means keying on the Z-code inside it, which
+    /// is what `StoryEntry::story_key` does; the file-name fallback sent the
+    /// details somewhere the row never looked. (A `.gblorb` has no release or
+    /// serial, so both sides already agree on its file name.)
+    #[test]
+    fn a_zblorbs_fetch_key_is_the_rows_key() {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = ty.to_vec();
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        // A structurally valid Version 3 header for Zork I r88 / 840726.
+        let mut z = vec![0u8; 0x100];
+        z[0] = 3;
+        z[0x02..0x04].copy_from_slice(&88u16.to_be_bytes());
+        for (off, v) in [(0x04, 0x80u16), (0x08, 0xc0), (0x0a, 0x40), (0x0c, 0x44), (0x0e, 0x80)] {
+            z[off..off + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        z[0x12..0x18].copy_from_slice(b"840726");
+        let off = 12 + 8 + 4 + 12;
+        let mut ridx = 1u32.to_be_bytes().to_vec();
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes());
+        ridx.extend_from_slice(&(off as u32).to_be_bytes());
+        let mut inner = b"IFRS".to_vec();
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"ZCOD", &z));
+        let mut file = b"FORM".to_vec();
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+
+        let dir = crate::scratch_dir("zblorb-fetch-key");
+        let path = dir.join("zork-with-sound.zblorb");
+        std::fs::write(&path, file).unwrap();
+        let roots = crate::data_roots::DataRoots::single(dir.join("data"));
+        let row = crate::picker::resolve_entry(&path, &roots).expect("a launchable row");
+        assert_eq!(crate::storage::story_key_at_from(&path, None), row.story_key());
+        assert_eq!(row.story_key(), "zork-i-r88-s840726");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[derive(Clone)]
     enum FakeResp {
         Found(Box<IFiction>),

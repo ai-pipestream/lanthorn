@@ -34,6 +34,7 @@ while any such tag, or this Unreleased section, still exists.*
 ### Fixed
 
 - **Games on disk images open faster, and CD images much faster — especially from a network drive.** Starting a game used to read the whole image file several times over, once per step of the launch; now it is read once and shared. A CD image goes further and is read only where the game needs it: starting a game off the 354 MB *Classic Text Adventure Masterpieces of Infocom* disc used to read the full 354 MB several times over, and now reads about 27 MB in all.
+- **Details fetched from IFDB for a `.zblorb` game now show up on that game.** They used to be saved under the file's name instead of the game's, so the library row never found them.
 
 ## v0.9.4 — 2026-10-10
 
