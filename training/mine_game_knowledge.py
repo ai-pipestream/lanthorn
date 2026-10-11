@@ -116,6 +116,7 @@ def mine_game(run_dirs):
         if not events_path.exists():
             continue
         current_room = None
+        pending_move = None  # (direction, event_id, from_room) awaiting a title
         for event_id, command, response in mine_run(events_path):
             command_count += 1
             norm = " ".join(command.lower().split())
@@ -124,16 +125,21 @@ def mine_game(run_dirs):
 
             move = MOVEMENT_RE.match(norm)
             new_room = room_name(response)
-            if move and not failed:
-                direction = DIRECTIONS[move.group(1).lower()]
-                if new_room:
-                    rooms_seen[new_room] += 1
-                    if current_room and current_room != new_room:
-                        edges[(current_room, direction, new_room)].append(event_id)
-                    current_room = new_room
-            elif new_room and not failed and not move:
-                # Non-movement command revealing a room title (look, restore).
-                current_room = current_room or new_room
+            if new_room and not failed:
+                rooms_seen[new_room] += 1
+                if pending_move and pending_move[2] and pending_move[2] != new_room:
+                    # A movement whose own response carried no title, with the
+                    # destination revealed by the next titled turn (e.g. look).
+                    direction, move_event, from_room = pending_move
+                    edges[(from_room, direction, new_room)].append(move_event)
+                pending_move = None
+                if move and current_room and current_room != new_room:
+                    edges[(current_room, DIRECTIONS[move.group(1).lower()], new_room)].append(event_id)
+                current_room = new_room
+            elif move and not failed:
+                pending_move = (DIRECTIONS[move.group(1).lower()], event_id, current_room)
+            else:
+                pending_move = None
 
             words = norm.split()
             if words:
