@@ -123,6 +123,9 @@ pub struct ChainReplay {
     /// The game as it stood before the line was typed.
     from: ProbeSnapshot,
     pieces: Vec<String>,
+    /// The ship words this story's dictionary holds, read while the live engine was on hand, for
+    /// any relocation search the replay starts.
+    nautical: Vec<(&'static str, Direction)>,
     stage: Stage,
     /// The question out with the worker, if any.
     token: Option<u64>,
@@ -181,7 +184,9 @@ pub fn arm_chain_replay(
         return; // a snapshot of some other moment: a restore or a reset came between
     }
     let from = ProbeSnapshot::from_save(live, std::sync::Arc::clone(save));
-    state.chain_replay = Some(ChainReplay { origin, dest, from, pieces, stage: Stage::All, token: None });
+    let nautical = crate::relocation_probe::nautical_words(state, live);
+    state.chain_replay =
+        Some(ChainReplay { origin, dest, from, pieces, nautical, stage: Stage::All, token: None });
 }
 
 /// Hand the replay's next question to the worker, if the shadow is free. Called every pass of the
@@ -279,13 +284,13 @@ pub fn deliver(state: &mut AppState, mapper: &mut Mapper, answer: &Answer) -> bo
         let Some(before) = before else { continue };
         match step.dir {
             Direction::Unknown => {
-                crate::relocation_probe::queue_search(state, hop.from, hop.to, before, false);
+                crate::relocation_probe::queue_search(state, hop.from, hop.to, before, chain.nautical.clone(), false);
             }
             Direction::In | Direction::Out => {
                 let key = (hop.from, step.dir, hop.to);
                 if !state.alias_searched.contains(&key) {
                     state.alias_searched.push(key);
-                    crate::relocation_probe::queue_search(state, hop.from, hop.to, before, true);
+                    crate::relocation_probe::queue_search(state, hop.from, hop.to, before, Vec::new(), true);
                 }
             }
             _ => {}
@@ -361,6 +366,7 @@ mod tests {
             dest: 3,
             from: ProbeSnapshot::from_save(&live, std::sync::Arc::new(live.save_state())),
             pieces: pieces.iter().map(|p| p.to_string()).collect(),
+            nautical: vec![("fore", Direction::N)],
             stage,
             token: Some(7),
         }
@@ -478,6 +484,11 @@ mod tests {
         assert_eq!(edges(&m), [(1, Direction::Unknown, 3)]);
         assert_eq!(state.relocation_queue.len(), 1);
         assert_eq!((state.relocation_queue[0].origin(), state.relocation_queue[0].dest()), (1, 3));
+        assert_eq!(
+            state.relocation_queue[0].nautical_words(),
+            [("fore", Direction::N)],
+            "the story's ship words travel with the queued search"
+        );
     }
 
     #[test]

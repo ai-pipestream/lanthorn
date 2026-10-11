@@ -181,6 +181,11 @@ impl RelocationSearch {
         self.dest
     }
 
+    /// The ship words this search will ask, for tests and diagnostics.
+    pub fn nautical_words(&self) -> &[(&'static str, Direction)] {
+        &self.nautical
+    }
+
     /// The commands the next question types, in order.
     fn commands(&self) -> Vec<String> {
         match self.stage {
@@ -194,7 +199,7 @@ impl RelocationSearch {
 }
 
 /// The ship words this story's own dictionary holds: the first known spelling per slot.
-fn nautical_words(state: &mut AppState, live: &dyn Engine) -> Vec<(&'static str, Direction)> {
+pub(crate) fn nautical_words(state: &mut AppState, live: &dyn Engine) -> Vec<(&'static str, Direction)> {
     let mut out: Vec<(&'static str, Direction)> = Vec::new();
     for (word, dir) in NAUTICAL_PROBE_WORDS {
         if out.iter().any(|&(_, d)| d == dir) {
@@ -304,15 +309,17 @@ pub fn arm_relocation_search(
 /// Queue a search for the direction behind one crossing of a replayed chained line (SQ-1772).
 ///
 /// `from` is the shadow's state just BEFORE the piece that made the crossing, which is why it
-/// takes a snapshot rather than reading the pre-turn save. The ship words are not asked (the live
-/// engine that could say which the story knows is not on hand when an answer is read); the
-/// compass, up/down and in/out are. `alias` asks for the compass word beside an In/Out portal
+/// takes a snapshot rather than reading the pre-turn save. `nautical` is the ship words the
+/// story's dictionary holds ([`nautical_words`]), computed when the chain was armed -- the live
+/// engine is not on hand when an answer is read, but the dictionary is static -- so a chain-started
+/// search runs the same Wide, Nautical, Confirm stages as a typed one. `alias` asks for the compass word beside an In/Out portal
 /// instead, exactly as for a typed `in`/`out`.
 pub(crate) fn queue_search(
     state: &mut AppState,
     origin: RoomId,
     dest: RoomId,
     from: crate::probe::ProbeSnapshot,
+    nautical: Vec<(&'static str, Direction)>,
     alias: bool,
 ) {
     state.relocation_queue.push(RelocationSearch {
@@ -321,7 +328,7 @@ pub(crate) fn queue_search(
         from,
         stage: Stage::Wide,
         wide: wide_for(alias),
-        nautical: Vec::new(),
+        nautical: if alias { Vec::new() } else { nautical },
         found: None,
         token: None,
         alias,
@@ -717,6 +724,38 @@ mod tests {
         assert!(!deliver(&mut state, &mut m, &test_answer(7, run(steps))));
         assert!(state.relocation_search.is_none());
         assert_eq!(m.graph.connections().len(), 1);
+    }
+
+    /// SQ-1772: a search queued from a chain carries the story's ship words, so a crossing only a
+    /// ship word reproduces is found (Wide misses, Nautical lands, Confirm records). With an empty
+    /// list it gives up after Wide.
+    #[test]
+    fn a_queued_search_with_ship_words_finds_a_crossing_only_they_reproduce() {
+        let bytes = include_bytes!("../../scott/tests/tiny_cave.dat").to_vec();
+        let live = crate::scott_session::ScottSession::new(bytes, None).unwrap();
+        let snap = crate::probe::ProbeSnapshot::from_save(&live, std::sync::Arc::new(live.save_state()));
+        for (words, finds) in [(vec![("fore", Direction::N)], true), (Vec::new(), false)] {
+            let mut state = AppState::default();
+            let mut m = crossed();
+            queue_search(&mut state, 1, 2, snap.clone(), words, false);
+            let mut s = state.relocation_queue.remove(0);
+            s.token = Some(7);
+            state.relocation_search = Some(s);
+            let mut steps = vec![step("look", Some(1), false)];
+            steps.extend(WIDE_ORDER.iter().map(|&d| step(long_label(d), Some(1), false)));
+            deliver(&mut state, &mut m, &test_answer(7, run(steps)));
+            if !finds {
+                assert!(state.relocation_search.is_none(), "no ship words: gives up");
+                continue;
+            }
+            state.relocation_search.as_mut().unwrap().token = Some(8);
+            assert_eq!(state.relocation_search.as_ref().unwrap().commands(), vec!["fore".to_string()]);
+            deliver(&mut state, &mut m, &test_answer(8, run(vec![step("fore", Some(2), false)])));
+            state.relocation_search.as_mut().unwrap().token = Some(9);
+            assert!(deliver(&mut state, &mut m, &test_answer(9, run(vec![step("fore", Some(2), false)]))));
+            let c = m.graph.connections();
+            assert_eq!((c[0].origin, c[0].dir, c[0].dest), (1, Direction::N, 2));
+        }
     }
 
     /// An answer nobody asked for is left alone.
