@@ -325,7 +325,20 @@ fn a_loose_story_files_directory_matches_its_release_or_its_basename() {
             ran += 1;
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             let Ok(bytes) = std::fs::read(&p) else { continue };
-            let want = match cli_host::storage::build_for_key(&bytes, None) {
+            // A `.zblorb` keys on the Z-code INSIDE it (SQ-1768), exactly as the
+            // running game does (`host/boot.rs` keys on the unwrapped
+            // executable); the raw `FORM` bytes carry no Z-machine header.
+            let exec: Vec<u8> = match blorb::Blorb::is_blorb(&bytes)
+                .then(|| blorb::Blorb::parse(bytes.clone()).ok())
+                .flatten()
+            {
+                Some(b) => match b.executable() {
+                    Ok((blorb::ExecKind::ZCode, e)) => e.to_vec(),
+                    _ => Vec::new(),
+                },
+                None => bytes.clone(),
+            };
+            let want = match cli_host::storage::build_for_key(&exec, None) {
                 Some(build) => {
                     unified += 1;
                     cli_host::storage::disk_story_key(&build)
