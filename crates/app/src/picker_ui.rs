@@ -890,6 +890,32 @@ fn draw_folder_panel(
     0
 }
 
+/// Whether a fetch result means its row must be re-read from disk, tracking the
+/// game folders this run has written into (SQ-1769).
+///
+/// A Fetched/NotFound result rewrote its folder's sidecar, so it is re-read and
+/// its folder `key` is remembered. A Skipped one wrote nothing, but if an
+/// earlier result in the run already wrote the folder it shares (one release
+/// as a `.z3` and as an Amiga `.adf`), its row is stale too. Failed writes
+/// nothing.
+fn reread_after_fetch(
+    outcome: &app::fetch_worker::Outcome,
+    key: Option<&str>,
+    touched: &mut std::collections::HashSet<String>,
+) -> bool {
+    use app::fetch_worker::Outcome;
+    match outcome {
+        Outcome::Fetched | Outcome::NotFound => {
+            if let Some(k) = key {
+                touched.insert(k.to_string());
+            }
+            true
+        }
+        Outcome::Skipped => key.is_some_and(|k| touched.contains(k)),
+        Outcome::Failed(_) => false,
+    }
+}
+
 /// Reorder `stories` by `sort`, keeping the selection on the same story (by
 /// path — see `resort_preserving_selection`), and keep the per-index caches
 /// (`row_badges`, `aux_cache`) aligned with the new order. Every reorder in
@@ -1443,6 +1469,8 @@ pub(crate) fn run_story_picker(
     // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
     let mut fetch_is_single = false;
     let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
+    // Game-folder keys a fetch wrote into (SQ-1769); see `reread_after_fetch`.
+    let mut fetch_touched_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Manual IFDB-page entry (SQ-0371): `Some` while the user is typing an IFDB
     // URL/id for the selected story; keystrokes route to the field, Enter
     // submits a fetch-by-id, Esc cancels.
@@ -1934,12 +1962,15 @@ pub(crate) fn run_story_picker(
                 app::fetch_worker::Outcome::NotFound => sweep_not_found += 1,
                 app::fetch_worker::Outcome::Failed(_) => sweep_failed += 1,
             }
-            // Only Fetched/NotFound actually (re)write the sidecar (a Skipped
-            // story's cache was already current; a Failed story's write is
-            // withheld so a later `r` retries it) — no point re-reading disk
-            // for the other two.
-            let rewrote_sidecar =
-                matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::NotFound);
+            // Fetched/NotFound (re)write the sidecar; a Failed story's write is
+            // withheld so a later `r` retries it. A Skipped story wrote nothing
+            // itself, but its game folder may be one a Fetched sibling in this
+            // run just filled (the same release as a `.z3` and as an `.adf`
+            // keys one folder), so it is re-read exactly when that folder was
+            // touched (SQ-1769) — not for every Skipped row, which on a
+            // fully-fetched library would re-read every story file.
+            let row_key = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(|e| e.story_key());
+            let rewrote_sidecar = reread_after_fetch(&p.outcome, row_key.as_deref(), &mut fetch_touched_keys);
             if rewrote_sidecar {
                 // By ROW, not by path: a compilation contributes several rows
                 // that share one path, and only the disk entry says which of
@@ -8187,6 +8218,79 @@ mod tests {
         assert_eq!(new_idx, 0, "the new title now sorts first");
         assert!(stories[new_idx].path.ends_with("zork2.z5"), "selection followed its story, not its old index");
         assert_eq!(stories[new_idx].title, "AAA Brand New Title");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// SQ-1769: two rows that key ONE game folder (the same catalogued release
+    /// as two loose files, standing in for a `.z3` and an `.adf`). The second
+    /// fetch result is `Skipped` because the first just wrote the folder, and
+    /// the handler used to re-read only Fetched/NotFound rows, so the second
+    /// row kept its stem title until the picker was reloaded.
+    #[test]
+    fn a_skipped_row_sharing_a_fetched_rows_folder_is_reread() {
+        let stories_dir = temp_dir("shared-folder");
+        // Zork I r88 / 840726: catalogued, so a loose copy keys on its build and
+        // both files name the same folder.
+        let mut zork = minimal_v3_story();
+        zork[0x02..0x04].copy_from_slice(&88u16.to_be_bytes());
+        zork[0x12..0x18].copy_from_slice(b"840726");
+        std::fs::write(stories_dir.join("a-zork.z3"), &zork).unwrap();
+        std::fs::write(stories_dir.join("b-zork-copy.z3"), &zork).unwrap();
+        let data_base = temp_dir("shared-folder-data");
+        let roots = app::data_roots::DataRoots::single(&data_base);
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &roots);
+        assert_eq!(stories.len(), 2);
+        assert_eq!(stories[0].story_key(), stories[1].story_key(), "premise: one shared folder");
+        let ifid = stories[0].meta.ifid.clone();
+        assert_eq!(ifid, stories[1].meta.ifid);
+
+        let mut title_by_ifid = std::collections::HashMap::new();
+        title_by_ifid.insert(ifid, "Shared Fetched Title".to_string());
+        let fetcher = app::fetch_worker::Fetcher::new(
+            Box::new(FakeSource { title_by_ifid }),
+            roots.clone(),
+            std::time::Duration::ZERO,
+        );
+        let order: Vec<app::fetch_worker::FetchTarget> =
+            stories.iter().map(app::fetch_worker::FetchTarget::row).collect();
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+        let mut progress = Vec::new();
+        for _ in 0..2000 {
+            progress.extend(fetcher.drain());
+            if progress.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(progress.len(), 2);
+        assert!(
+            progress.iter().any(|p| matches!(p.outcome, app::fetch_worker::Outcome::Skipped)),
+            "premise: the second row is Skipped"
+        );
+
+        // The picker loop's per-result handling.
+        let mut touched = std::collections::HashSet::new();
+        for p in &progress {
+            let key = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(|e| e.story_key());
+            if super::reread_after_fetch(&p.outcome, key.as_deref(), &mut touched) {
+                if let Some(fresh) = app::picker::resolve_entry_from(&p.path, p.disk_entry.as_deref(), &roots) {
+                    if let Some(slot) = stories.iter_mut().find(|e| e.is(&p.path, p.disk_entry.as_deref())) {
+                        *slot = fresh;
+                    }
+                }
+            }
+        }
+        for e in &stories {
+            assert_eq!(e.title, "Shared Fetched Title", "{} stayed unlinked", e.path.display());
+        }
+
+        // A Skipped row whose folder nothing in this run touched is NOT re-read.
+        let mut none = std::collections::HashSet::new();
+        assert!(!super::reread_after_fetch(&app::fetch_worker::Outcome::Skipped, Some("k"), &mut none));
+        assert!(!super::reread_after_fetch(&app::fetch_worker::Outcome::Failed("x".into()), Some("k"), &mut none));
 
         let _ = std::fs::remove_dir_all(&stories_dir);
         let _ = std::fs::remove_dir_all(&data_base);
