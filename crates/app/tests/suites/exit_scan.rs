@@ -478,19 +478,27 @@ fn adventureland_forest_self_loops_are_exits_not_walls() {
     assert_eq!(classify(&p.mapper.graph, here, Direction::Up), MatrixCell::Probed);
 }
 
-/// Walking a self-loop leaves the cell exactly as it was before Scott answered `declared_exit`
-/// (`×`, tried): a same-room arrival is recorded as a loop only when the game reprints the room
-/// heading, which Scott does not. What changed is only that nothing is marked random -- the table
-/// agrees with where the player lands -- and that the OTHER loops stay `»`.
+/// Walking a self-loop reads `↩`, not `×`: the game's own exit table says the way is there, so a
+/// wall would be a lie, and the scanned `»` is gone (it has been walked). Scott prints no heading
+/// on a loop, so the declared exit is the only evidence. A refused direction still reads `×`, and
+/// nothing is marked random.
 #[test]
-fn adventureland_walking_a_self_loop_reads_as_one_and_marks_nothing_random() {
+fn adventureland_a_walked_self_loop_reads_as_one_and_a_refusal_still_reads_as_a_wall() {
     let Some(mut p) = Play::adventureland() else { return };
     let here = p.here();
+    assert_eq!(classify(&p.mapper.graph, here, Direction::N), MatrixCell::Exit, "scanned: a yes");
     p.turn("north");
     assert_eq!(p.here(), here, "north leads back into the forest");
-    assert_eq!(classify(&p.mapper.graph, here, Direction::N), MatrixCell::Probed, "today's reading, unchanged");
+    assert_eq!(classify(&p.mapper.graph, here, Direction::N), MatrixCell::SelfLoop);
+    assert!(!p.mapper.graph.untried(here).contains(&Direction::N), "walked: no longer unexplored");
     assert!(!p.mapper.graph.is_random_exit(here, Direction::N));
+    assert_eq!(p.mapper.graph.self_loops(here), vec![Direction::N], "recorded once");
     assert_eq!(classify(&p.mapper.graph, here, Direction::S), MatrixCell::Exit, "unwalked: still a yes");
+
+    p.turn("up");
+    assert_eq!(classify(&p.mapper.graph, here, Direction::Up), MatrixCell::Probed, "refused: a wall");
+    assert!(p.mapper.graph.self_loops(here).iter().all(|d| *d != Direction::Up));
+
     p.turn("east");
     assert_ne!(p.here(), here);
     assert!(p.mapper.graph.rooms().all(|r| r.random_exits.is_empty()), "no random marks");

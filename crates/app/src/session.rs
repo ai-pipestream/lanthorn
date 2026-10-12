@@ -4373,7 +4373,20 @@ pub fn apply_turn(
         death.unresolved = true;
     }
     if let Some(snap) = &result.location {
-        let arrived = reprinted_room_heading(&result.transcript, &snap.name);
+        // The game printed the room's heading again, OR the story's own exit table declares the
+        // direction just typed a fixed exit back into the room the player is standing in (SQ-1773).
+        // The second is the same fact with different evidence: a self-loop that leaves no
+        // reprinted heading (Scott Adams prints none) must not read as a refused move, because `×`
+        // would claim a wall the table says is not there. Both go down the one `arrived` path
+        // below, so a game that does both records the loop once.
+        let declared_loop = mapper.graph.current() == Some(snap.number)
+            && mapper::direction::is_compass_command(command)
+            && parse_direction(command).is_some()
+            && matches!(
+                result.declared_exit,
+                Some(crate::engine::DeclaredExit::Room(r)) if r == snap.number
+            );
+        let arrived = reprinted_room_heading(&result.transcript, &snap.name) || declared_loop;
         // The map's FIRST room, when nothing in the object tree backs it, must be one the
         // STORY ITSELF named: the status line alone is not evidence. A pre-game
         // banner/menu/character-sheet paints a room-shaped status line and prints no matching
@@ -11547,6 +11560,32 @@ mod inherited_random_pool_tests {
     /// pools name — and reading that as "a direction into a pooled room" would mark every forest
     /// loop random. (`advent.z6` proves the same thing end to end in
     /// `z6_forest_self_loop_directions_are_always_deterministic`.)
+    ///
+    /// SQ-1773: the story's own declared exit is a second piece of evidence for the same loop. A
+    /// declared `Room(here)` records it with no reprinted heading (Scott prints none), exactly
+    /// once when the heading is ALSO reprinted, and an undeclared same-room move records nothing.
+    #[test]
+    fn a_declared_self_loop_is_recorded_once_with_or_without_a_reprinted_heading() {
+        let walk = |declared: Option<crate::engine::DeclaredExit>, heading: bool| {
+            let mut mapper = Mapper::default();
+            let mut death = DeathWatch::default();
+            apply_turn(&mut mapper, "", &TurnResult::observation(snap(2, "Forest")), &mut death);
+            let mut r = TurnResult::observation(snap(2, "Forest"));
+            if heading {
+                r.transcript = "Forest\n\nYou are in a forest.\n".to_string();
+            }
+            r.declared_exit = declared;
+            apply_turn(&mut mapper, "north", &r, &mut death);
+            mapper.graph.self_loops(2)
+        };
+        use crate::engine::DeclaredExit as D;
+        assert_eq!(walk(Some(D::Room(2)), false), vec![Direction::N], "declared, no heading");
+        assert_eq!(walk(Some(D::Room(2)), true), vec![Direction::N], "both: recorded once");
+        assert_eq!(walk(None, true), vec![Direction::N], "heading alone, as before");
+        assert!(walk(None, false).is_empty(), "undeclared and silent: a refused move");
+        assert!(walk(Some(D::Unknown), false).is_empty());
+        assert!(walk(Some(D::Room(3)), false).is_empty(), "a declaration of another room is no loop");
+    }
     #[test]
     fn a_move_that_never_left_the_room_is_not_an_arrival_in_a_pooled_room() {
         let (mut mapper, mut death) = map_with_a_known_pool();
