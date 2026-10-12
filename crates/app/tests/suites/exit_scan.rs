@@ -234,6 +234,28 @@ fn zork1_a_landing_on_a_known_room_records_the_passage_untried() {
     }
 }
 
+/// SQ-1775: the opening scan found West of House's south exit as a stub (South of House was not
+/// on the map). Walking round to South of House by another way must turn that stub into a
+/// passage, not leave `»` beside it for ever.
+///
+/// (Fixture: `zork1-r88-s840726.z3`; `look`, `north`, `east`, `south`.)
+#[test]
+fn zork1_a_stub_becomes_a_passage_once_its_room_is_reached_another_way() {
+    let Some(mut p) = Play::zork1(true) else { return };
+    let west = p.here();
+    assert!(p.stubs(west).contains(&Direction::S), "the opening scan left a south stub");
+    for cmd in ["north", "east", "south"] {
+        p.turn(cmd);
+    }
+    let south = p.here();
+    assert_eq!(p.name(south), "South of House");
+    assert_eq!(p.edge(west, Direction::S), Some(south), "West of House -S-> South of House");
+    assert_eq!(p.edge(south, Direction::W), Some(west), "South of House -W-> West of House");
+    assert!(!p.mapper.graph.is_scan_exit(west, Direction::S), "no longer a stub");
+    assert!(p.mapper.graph.is_probed(west, Direction::S));
+    assert!(!p.mapper.graph.room(west).unwrap().tried.contains(&Direction::S), "not the player's");
+}
+
 /// A revisit asks only the directions that failed: Behind House has no west/in while the window
 /// is shut. Once it is open and the player comes back, the rescan finds them.
 ///

@@ -61,7 +61,12 @@
 //! * **A landing in a room the map does NOT hold** records only that this direction is an exit
 //!   ([`mapper::graph::Room::scan_exits`]). The destination's id, name and existence stay out of
 //!   the map: it is a record of what the player has seen, and an exit stub is the whole of what
-//!   a scan may say about the far side. Walking it later is an ordinary first walk.
+//!   a scan may say about the far side. Walking it later is an ordinary first walk. The landing
+//!   id is kept HIDDEN beside the stub ([`mapper::graph::Room::scan_landings`], SQ-1775): never
+//!   shown, named, or used to create the far room, only compared when a room first enters the
+//!   map -- by a walk, a relocation or a chain replay -- at which point every stub that landed
+//!   there becomes a verified passage, as above, so reaching the room by another way does not
+//!   leave `»` standing beside it. (A self-loop stub has no landing.)
 //! * **No room change** is not an exit at present; the direction goes on
 //!   [`mapper::graph::Room::scan_walls`].
 //!
@@ -448,6 +453,13 @@ fn finish(mapper: &mut Mapper, scan: &ExitScan) -> bool {
         }
     }
     changed |= mapper.graph.record_scan(scan.room, &scan.slots, &exits);
+    // The landing id is kept, hidden, so the stub becomes a passage the moment the map holds
+    // that room by any route (SQ-1775). A self-loop has no landing to keep.
+    for &slot in &exits {
+        if let Some(&(_, Landing::Unknown(r))) = scan.confirmed.iter().find(|(d, _)| *d == slot) {
+            mapper.graph.note_scan_landing(scan.room, slot, r);
+        }
+    }
     changed
 }
 
@@ -578,6 +590,23 @@ mod tests {
         assert!(m.graph.connections().is_empty(), "and no edge was minted");
         assert!(m.graph.room(1).unwrap().tried.is_empty(), "the player tried nothing");
         assert_eq!(m.graph.untried(1), vec![Direction::Up], "the real exit is what is unexplored");
+        assert_eq!(m.graph.room(1).unwrap().scan_landings, vec![(Direction::Up, 2)], "kept hidden");
+    }
+
+    /// SQ-1775: reaching the stub's far room another way turns the stub into a passage.
+    #[test]
+    fn mapping_the_landing_room_later_upgrades_the_stub_to_a_passage() {
+        let mut state = state_scanning();
+        let mut m = map(false);
+        deliver(&mut state, &mut m, &test_answer(7, wide(Some(1), 2, false)));
+        ask_confirm(&mut state);
+        deliver(&mut state, &mut m, &test_answer(7, run(vec![step("up", Some(2), false)])));
+        m.observe(2, "Elsewhere", Some(Direction::E));
+        let c = m.graph.connections();
+        assert!(c.iter().any(|c| (c.origin, c.dir, c.dest) == (1, Direction::Up, 2)), "{c:?}");
+        assert!(m.graph.is_probed(1, Direction::Up));
+        assert!(!m.graph.room(1).unwrap().tried.contains(&Direction::Up));
+        assert!(m.graph.room(1).unwrap().scan_exits.is_empty());
     }
 
     /// A landing in a room the map holds is a verified passage, never marked tried.

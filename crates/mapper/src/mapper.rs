@@ -301,8 +301,22 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
+        if newly_seen {
+            self.resolve_scan_landings(location);
+        }
         // Re-evaluate distortion over the whole graph (cheap); no relayout.
         mark_distorted(&mut self.graph, &BTreeSet::new());
+    }
+
+    /// `room` has just entered the graph: every exit-scan stub elsewhere whose hidden landing is
+    /// `room` becomes a verified passage, exactly as a scan that landed on a known room records
+    /// one (SQ-1775). Marked probed, never tried: the player has not typed it. Called from every
+    /// route that adds a room (a walk, a relocation, a chain replay).
+    fn resolve_scan_landings(&mut self, room: RoomId) {
+        for (from, dir) in self.graph.take_scan_landings_to(room) {
+            self.graph.mark_probed(from, dir);
+            self.record_probed_passage(ProbedPassage { from, dir, to: room });
+        }
     }
 
     /// Mint one passage and lay its far end out: the whole of what recording a crossing does to
@@ -451,10 +465,14 @@ impl Mapper {
             if taken {
                 continue;
             }
-            if self.graph.room(step.to).is_none() {
+            let new_room = self.graph.room(step.to).is_none();
+            if new_room {
                 self.graph.upsert_room(step.to, step.to_name.clone());
             }
             self.mint_passage(step.from, step.dir, step.to);
+            if new_room {
+                self.resolve_scan_landings(step.to);
+            }
             changed = true;
         }
         mark_distorted(&mut self.graph, &BTreeSet::new());
@@ -502,6 +520,7 @@ impl Mapper {
         // judge either: there is no crossing here to be on either side of.
         self.arrived_via = None;
         self.pending_suggestion = None;
+        let newly_seen = self.graph.room(location).is_none();
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
         if self.graph.room(location).and_then(|r| r.pos).is_none() {
@@ -518,6 +537,9 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
+        if newly_seen {
+            self.resolve_scan_landings(location);
+        }
         mark_distorted(&mut self.graph, &BTreeSet::new());
     }
 

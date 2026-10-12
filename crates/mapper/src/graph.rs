@@ -186,6 +186,13 @@ pub struct Room {
     /// then. (An exit into a room the map DOES hold is not kept here: it became an edge.)
     #[serde(default)]
     pub scan_exits: Vec<Direction>,
+    /// The room each [`Room::scan_exits`] stub reaches, where the scan saw it land (SQ-1775).
+    /// HIDDEN: never displayed, named, or used to create or show that room -- the no-reveal rule
+    /// stands. It exists for one purpose: when the map later holds that room by any route, the
+    /// stub becomes a verified passage (see [`MapGraph::take_scan_landings_to`]) instead of
+    /// staying `»` for ever beside the walked way round. A self-loop stub has no landing here.
+    #[serde(default)]
+    pub scan_landings: Vec<(Direction, RoomId)>,
     /// Directions the scan asked and the game refused, redone on a later visit (SQ-1773): a door
     /// may have opened since. Only the room change is read, never the refusal text.
     #[serde(default)]
@@ -784,6 +791,7 @@ impl MapGraph {
                     probed: Vec::new(),
                     scanned: false,
                     scan_exits: Vec::new(),
+                    scan_landings: Vec::new(),
                     scan_walls: Vec::new(),
                     random_exits: Vec::new(),
                     random_destinations: Vec::new(),
@@ -923,6 +931,13 @@ impl MapGraph {
         let Some(mut room) = self.rooms.remove(&old) else { return false };
         room.id = new;
         self.rooms.insert(new, room);
+        for r in self.rooms.values_mut() {
+            for (_, l) in &mut r.scan_landings {
+                if *l == old {
+                    *l = new;
+                }
+            }
+        }
         for c in &mut self.conns {
             if c.origin == old {
                 c.origin = new;
@@ -1051,6 +1066,40 @@ impl MapGraph {
     /// hold (SQ-1773).
     pub fn is_scan_exit(&self, id: RoomId, dir: Direction) -> bool {
         self.rooms.get(&id).is_some_and(|r| r.scan_exits.contains(&dir))
+    }
+
+    /// Keep, hidden, the room the scan saw `dir` out of `id` land in (SQ-1775). Only meaningful
+    /// beside a [`Room::scan_exits`] stub; call it after [`MapGraph::record_scan`]. A no-op for
+    /// an unknown room or a direction that is not a stub.
+    pub fn note_scan_landing(&mut self, id: RoomId, dir: Direction, landing: RoomId) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if r.scan_exits.contains(&dir) {
+                r.scan_landings.retain(|(d, _)| *d != dir);
+                r.scan_landings.push((dir, landing));
+                self.touch_tried();
+            }
+        }
+    }
+
+    /// `room` is now on the map: take every stub whose hidden landing is `room` out of the
+    /// scan records and return them as `(origin, dir)` for the caller to turn into passages
+    /// (SQ-1775). The stub stops being a stub either way. Never touches `tried`.
+    pub fn take_scan_landings_to(&mut self, room: RoomId) -> Vec<(RoomId, Direction)> {
+        let mut out = Vec::new();
+        for r in self.rooms.values_mut() {
+            let id = r.id;
+            let hit: Vec<Direction> =
+                r.scan_landings.iter().filter(|(_, l)| *l == room).map(|(d, _)| *d).collect();
+            for d in hit {
+                r.scan_landings.retain(|(x, _)| *x != d);
+                r.scan_exits.retain(|x| *x != d);
+                out.push((id, d));
+            }
+        }
+        if !out.is_empty() {
+            self.touch_tried();
+        }
+        out
     }
 
     /// The directions a scan asked from `id` that the game refused: what a later visit redoes.
@@ -2231,6 +2280,7 @@ mod tests {
             probed: Vec::new(),
             scanned: false,
             scan_exits: Vec::new(),
+            scan_landings: Vec::new(),
             scan_walls: Vec::new(),
             random_exits: Vec::new(),
             random_destinations: Vec::new(),
@@ -2269,6 +2319,7 @@ mod tests {
             probed: Vec::new(),
             scanned: false,
             scan_exits: Vec::new(),
+            scan_landings: Vec::new(),
             scan_walls: Vec::new(),
             random_exits: Vec::new(),
             random_destinations: Vec::new(),
@@ -2791,5 +2842,24 @@ mod tried_gen_tests {
         let gen = g.tried_gen();
         g.unmark_tried(1, Direction::N); // already cleared
         assert_eq!(g.tried_gen(), gen, "unmarking an already-clear direction must not bump");
+    }
+
+    /// SQ-1775: a stub's hidden landing upgrades to a probed (never tried) passage once mapped.
+    #[test]
+    fn scan_stub_landing_is_taken_when_the_room_is_mapped_and_survives_a_round_trip() {
+        let mut m = crate::mapper::Mapper::default();
+        m.graph.upsert_room(1, "A".into());
+        m.graph.record_scan(1, &[Direction::S], &[Direction::S]);
+        m.graph.note_scan_landing(1, Direction::S, 2);
+        let json = serde_json::to_string(&m.graph.room(1).unwrap()).unwrap();
+        let back: Room = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scan_landings, vec![(Direction::S, 2)], "persisted with the room");
+        m.observe(2, "B", Some(Direction::E));
+        let c = m.graph.connections();
+        assert!(c.iter().any(|c| (c.origin, c.dir, c.dest) == (1, Direction::S, 2)), "{c:?}");
+        assert!(m.graph.is_probed(1, Direction::S));
+        assert!(!m.graph.room(1).unwrap().tried.contains(&Direction::S), "the player's record");
+        let r = m.graph.room(1).unwrap();
+        assert!(r.scan_exits.is_empty() && r.scan_landings.is_empty());
     }
 }
