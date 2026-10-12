@@ -35,6 +35,7 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **An empty `~/.lanthorn` folder no longer hides your settings.** A leftover `~/.lanthorn` with nothing real in it used to make lanthorn ignore the settings and saves in its standard folders, so everything looked reset. It is now ignored unless it holds a config, saves or other players. When both locations hold your files, lanthorn asks which to use before it starts and offers to rename the other (nothing is deleted); in a script or container it uses the standard folders and says so on stderr.
 - **Typing several moves on one line now maps each step.** `north then east` used to draw one passage north that does not exist; the map now follows the rooms you actually walked through, and a step the game refuses records nothing.
 - **Rewinding to an earlier turn now shows that turn's status line straight away.** On Z-machine games with a status bar, going back used to leave the bar blank until you typed your next command.
 - **Games on disk images open faster, and CD images much faster — especially from a network drive.** Starting a game used to read the whole image file several times over, once per step of the launch; now it is read once and shared. A CD image goes further and is read only where the game needs it: starting a game off the 354 MB *Classic Text Adventure Masterpieces of Infocom* disc used to read the full 354 MB several times over, and now reads about 27 MB in all.

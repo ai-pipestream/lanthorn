@@ -110,6 +110,11 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         std::process::exit(2);
     }
 
+    // When `~/.lanthorn` and the platform folders both hold real settings or saves
+    // the choice is the person's (SQ-1776). Asked here, in the plain terminal,
+    // before anything reads a config; an explicit `--user-dir` skips it.
+    app::user_dir_conflict::run_at_startup(cli.user_dir.as_deref());
+
     // Where the user's files live (SQ-1721/1722) must be knowable BEFORE anything
     // is read or written: with no home directory and no `--user-dir` there is
     // nowhere sensible to keep them, and the working directory is not it.

@@ -49,9 +49,21 @@ that is what XDG asks for, and a user who wants one folder keeps (or creates)
    keeps meaning today's single-folder layout under X (config, `saves/`,
    `documents/`, `cache/` all inside X). `--data-dir` keeps standing in for the
    catalogue base, as `DataRoots::resolve` documents.
-2. **Legacy**: if `~/.lanthorn` exists, it is used whole, exactly as today
-   (single-folder layout, cache inside it). Nothing is migrated on its own and
-   there is no prompt. The one way out is opt-in: `lanthorn --migrate-user-dir
+2. **Legacy**: if `~/.lanthorn` holds real content, it is used whole, exactly as
+   today (single-folder layout, cache inside it). Real content
+   (`user_dirs::has_real_content`) is a `config.toml`, a `style.toml`, a
+   `saves/` with at least one file anywhere under it, or a non-empty `users/`;
+   anything less (an empty `saves/`) is ignored so it cannot hide the platform
+   folders' settings (SQ-1776). Nothing is migrated on its own.
+   **When the platform folders hold real content too**, `UserDirs::conflict`
+   (public, so a host can ask its own way) reports both sets. The TUI asks in
+   the plain terminal before the config is loaded (`user_dir_conflict.rs`): both
+   sets with their `config.toml` mtime and save-file count, then an offer to
+   rename the other set to `<name>.unused-YYYY-MM-DD` (`-2`, `-3` on a name
+   clash; each platform folder separately; nothing deleted). Declining the
+   rename applies the choice to this launch only (`pin_choice`). With stdin or
+   stdout not a terminal it never reads stdin: the platform folders win and one
+   line on stderr names both. `--user-dir` bypasses it. The one way out is opt-in: `lanthorn --migrate-user-dir
    [--yes]` (`migrate_user_dir.rs`) lists every move, asks, then moves
    `config.toml`/`style.toml` to the platform config root, the contents of
    `cache/` to the cache root, top-level `*.log` files to the logs root and

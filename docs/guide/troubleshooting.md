@@ -75,8 +75,20 @@ config can travel with your dotfiles.
 - **Cache folder:** only things lanthorn can rebuild on its own, which is safe
   to delete.
 
-If you already have a `~/.lanthorn` folder from an earlier version, lanthorn
-keeps using it for everything, exactly as before; nothing is moved. To keep it
+If you already have a `~/.lanthorn` folder from an earlier version with your
+settings or saves in it (a `config.toml`, a `style.toml`, saves, or other
+players' `users/`), lanthorn keeps using it for everything, exactly as before;
+nothing is moved. An empty `~/.lanthorn`, or one holding only an empty `saves/`
+folder, is ignored, so it can never hide the settings in the standard folders.
+
+If both `~/.lanthorn` and the standard folders hold your files, lanthorn asks
+which to use before it starts, showing each one's location, when its
+`config.toml` last changed and how many save files it holds. It then offers to
+rename the other set to `<name>.unused-<date>` beside itself so the question
+does not come back; nothing is ever deleted. Say no and your choice applies to
+that launch only. When lanthorn is not running in a terminal (a script, Docker)
+it never stops to ask: it uses the standard folders and prints one line to
+stderr naming both. Passing `--user-dir <folder>` skips all of this. To keep it
 all in one folder of your choosing, pass `--user-dir <folder>`: config, saves,
 documents and cache all go inside it. `--data-dir` moves just the saves.
 

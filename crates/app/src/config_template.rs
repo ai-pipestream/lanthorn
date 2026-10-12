@@ -102,8 +102,8 @@ const STARTUP: &[Row] = &[
         &[
             "Root directory for lanthorn data (saves/, users/, documents/).",
             "Default: your platform's data folder (macOS and Linux ~/.local/share/lanthorn,",
-            "Windows %APPDATA%\\lanthorn), or ~/.lanthorn if that",
-            "folder already exists. config.toml and style.toml stay in the config folder.",
+            "Windows %APPDATA%\\lanthorn), or ~/.lanthorn if that holds settings or saves",
+            "(if both hold files, lanthorn asks). config.toml and style.toml stay in the config folder.",
         ],
     ),
     ex(

@@ -14,9 +14,21 @@
 //!
 //! 1. an **explicit** value: a `UserDirs` an embedding host hands in, or
 //!    `--user-dir X` (the single-folder layout inside X);
-//! 2. **legacy**: `~/.lanthorn` already exists, so it is used whole, as before;
+//! 2. **legacy**: `~/.lanthorn` holds real content ([`has_real_content`]: a
+//!    `config.toml`, a `style.toml`, a `saves/` with at least one file in it, or
+//!    a non-empty `users/`), so it is used whole, as before. A folder that holds
+//!    less than that (an empty `saves/` left by something that only touched it)
+//!    is NOT legacy and is ignored: it must never hide the settings in the
+//!    platform folders (SQ-1776);
 //! 3. the **platform defaults** (macOS and Linux XDG,
 //!    Windows `%APPDATA%` / `%LOCALAPPDATA%`), under the plain name `lanthorn`.
+//!
+//! When legacy AND the platform folders both hold real content, nothing is picked
+//! silently: [`UserDirs::conflict`] reports both sets ([`Conflict`]) so a host can
+//! ask its own way, and the TUI asks in the terminal before it starts
+//! (`user_dir_conflict`). Until someone answers, [`Inputs::from_environment`]
+//! resolves to the platform folders; [`pin_choice`] records an answer for the
+//! rest of the process.
 //!
 //! [`UserDirs::resolve`] is a pure function over an [`Inputs`] value, so every
 //! platform's row is testable on any OS; [`Inputs::from_environment`] is the only
@@ -28,6 +40,8 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 /// The folder name under each platform's base directory.
 pub const APP_DIR: &str = "lanthorn";
@@ -101,7 +115,10 @@ pub struct Inputs {
     /// `%LOCALAPPDATA%`). Only read on Windows.
     pub appdata: Option<PathBuf>,
     pub local_appdata: Option<PathBuf>,
-    /// Whether `<home>/.lanthorn` exists.
+    /// Whether the legacy `<home>/.lanthorn` is to be used: it holds real content
+    /// ([`has_real_content`]) and has not lost to the platform folders in a
+    /// [`Conflict`]. [`Inputs::from_environment`] works this out; a host building
+    /// `Inputs` by hand says it directly.
     pub legacy_exists: bool,
     /// `--user-dir`.
     pub explicit: Option<PathBuf>,
@@ -137,9 +154,9 @@ impl Inputs {
         } else {
             (None, None)
         };
-        Inputs {
+        let mut inputs = Inputs {
             platform,
-            legacy_exists: home.as_ref().is_some_and(|h| h.join(LEGACY_DIR).exists()),
+            legacy_exists: home.as_ref().is_some_and(|h| has_real_content(&UserDirs::single(h.join(LEGACY_DIR)))),
             home,
             xdg_config: env_path("XDG_CONFIG_HOME"),
             xdg_data: env_path("XDG_DATA_HOME"),
@@ -148,8 +165,87 @@ impl Inputs {
             appdata,
             local_appdata,
             explicit: explicit.map(Path::to_path_buf),
+        };
+        if inputs.legacy_exists {
+            inputs.legacy_exists = match PINNED.get() {
+                Some(Choice::Legacy) => true,
+                Some(Choice::Platform) => false,
+                // Both sets hold real content and nobody has chosen: the
+                // platform folders, with the question asked at startup.
+                None => UserDirs::conflict(&inputs).is_none(),
+            };
         }
+        inputs
     }
+}
+
+/// Which of two competing sets of files to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// The legacy `~/.lanthorn`.
+    Legacy,
+    /// The platform folders.
+    Platform,
+}
+
+static PINNED: OnceLock<Choice> = OnceLock::new();
+
+/// Record an answer to a [`Conflict`] for the rest of the process, so every later
+/// [`Inputs::from_environment`] resolves the same way. The first call wins.
+pub fn pin_choice(choice: Choice) {
+    let _ = PINNED.set(choice);
+}
+
+/// Names the OS scatters in a folder; they are not content.
+const CLUTTER: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini"];
+
+/// How many files (not folders, not OS clutter) lie under `dir`, recursively.
+fn count_files(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.filter_map(|e| e.ok())
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => count_files(&e.path()),
+            Ok(t) if t.is_file() && !CLUTTER.contains(&e.file_name().to_string_lossy().as_ref()) => 1,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Whether `dirs` holds anything a person would miss: a `config.toml` or
+/// `style.toml` in the config root, or in the data root a `saves/` with at least
+/// one file in it (recursively) or a non-empty `users/`. An empty folder, or one
+/// with an empty `saves/`, is not content (SQ-1776).
+pub fn has_real_content(dirs: &UserDirs) -> bool {
+    dirs.config().join("config.toml").is_file()
+        || dirs.config().join("style.toml").is_file()
+        || count_files(&dirs.data().join("saves")) > 0
+        || std::fs::read_dir(dirs.data().join("users")).is_ok_and(|mut r| r.next().is_some())
+}
+
+/// What one set of files holds, for showing to a person choosing between two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub dirs: UserDirs,
+    /// Modified time of `config.toml`; `None` when there is none.
+    pub config_modified: Option<SystemTime>,
+    /// Files under `saves/`, recursively.
+    pub save_files: usize,
+}
+
+impl Summary {
+    fn of(dirs: UserDirs) -> Self {
+        let config_modified = std::fs::metadata(dirs.config().join("config.toml")).and_then(|m| m.modified()).ok();
+        let save_files = count_files(&dirs.data().join("saves"));
+        Summary { dirs, config_modified, save_files }
+    }
+}
+
+/// Both the legacy `~/.lanthorn` and the platform folders hold real content, so
+/// neither can be picked silently. See [`UserDirs::conflict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub legacy: Summary,
+    pub platform: Summary,
 }
 
 /// The one home-directory helper. `None` when it cannot be found; callers decide
@@ -246,6 +342,27 @@ impl UserDirs {
                 Ok(UserDirs { config: base.clone(), data: base, logs: local.join("logs"), cache: local })
             }
         }
+    }
+
+    /// Whether the legacy `~/.lanthorn` and the platform folders both hold real
+    /// content ([`has_real_content`]), which makes the choice between them the
+    /// person's. `None` when only one (or neither) does, when `inputs.explicit`
+    /// is set (an explicit folder bypasses all of this), or when no folders can be
+    /// worked out. Reads the file system; ignores `inputs.legacy_exists`.
+    ///
+    /// This is the one check: the TUI's startup question and any embedding host
+    /// ask it. A host answers its own way, then resolves with `legacy_exists`
+    /// set to match ([`Choice::Legacy`] means true).
+    pub fn conflict(inputs: &Inputs) -> Option<Conflict> {
+        if inputs.explicit.is_some() {
+            return None;
+        }
+        let legacy = UserDirs::single(inputs.home.as_ref()?.join(LEGACY_DIR));
+        if !has_real_content(&legacy) {
+            return None;
+        }
+        let platform = Self::resolve(&Inputs { legacy_exists: false, ..inputs.clone() }).ok()?;
+        has_real_content(&platform).then(|| Conflict { legacy: Summary::of(legacy), platform: Summary::of(platform) })
     }
 
     /// [`UserDirs::resolve`] against the real environment, with `--user-dir`.
@@ -474,6 +591,89 @@ mod tests {
     #[test]
     fn the_single_layout_keeps_logs_at_base() {
         assert_eq!(UserDirs::single("/srv/lt").logs(), Path::new("/srv/lt"));
+    }
+
+    use crate::scratch_dir;
+    use std::fs;
+
+    /// A Linux home with nothing in it but what the case adds.
+    fn real_home(tag: &str) -> (PathBuf, Inputs) {
+        let home = scratch_dir(tag);
+        let i = Inputs { home: Some(home.clone()), ..Inputs::empty(Platform::Linux) };
+        (home, i)
+    }
+
+    fn legacy_used(i: &Inputs) -> bool {
+        let legacy = i.home.as_ref().unwrap().join(".lanthorn");
+        has_real_content(&UserDirs::single(legacy))
+    }
+
+    #[test]
+    fn an_empty_legacy_folder_is_not_legacy() {
+        let (home, i) = real_home("ud-empty-legacy");
+        fs::create_dir_all(home.join(".lanthorn/saves")).unwrap();
+        assert!(!legacy_used(&i), "an empty saves/ is not content");
+        fs::create_dir_all(home.join(".lanthorn/saves/zork")).unwrap();
+        fs::write(home.join(".lanthorn/saves/.DS_Store"), "x").unwrap();
+        fs::create_dir_all(home.join(".lanthorn/users")).unwrap();
+        assert!(!legacy_used(&i), "empty folders and OS clutter are not content");
+        // The settings in the platform folders are what a launch must see.
+        fs::create_dir_all(home.join(".config/lanthorn")).unwrap();
+        fs::write(home.join(".config/lanthorn/config.toml"), "x").unwrap();
+        assert!(UserDirs::conflict(&i).is_none(), "an empty legacy cannot conflict");
+        let d = UserDirs::resolve(&Inputs { legacy_exists: legacy_used(&i), ..i }).unwrap();
+        assert_eq!(d.config(), home.join(".config/lanthorn"));
+    }
+
+    #[test]
+    fn each_kind_of_real_content_makes_legacy_win_over_an_empty_platform() {
+        type Make = fn(&Path);
+        let kinds: [(&str, Make); 4] = [
+            ("config", |l| fs::write(l.join("config.toml"), "x").unwrap()),
+            ("style", |l| fs::write(l.join("style.toml"), "x").unwrap()),
+            ("saves", |l| {
+                fs::create_dir_all(l.join("saves/g/deep")).unwrap();
+                fs::write(l.join("saves/g/deep/a.lanthorn"), "x").unwrap();
+            }),
+            ("users", |l| fs::create_dir_all(l.join("users/bob")).unwrap()),
+        ];
+        for (name, make) in kinds {
+            let (home, i) = real_home(&format!("ud-kind-{name}"));
+            let l = home.join(".lanthorn");
+            fs::create_dir_all(&l).unwrap();
+            make(&l);
+            assert!(legacy_used(&i), "{name}");
+            assert!(UserDirs::conflict(&i).is_none(), "{name}: the platform folders are empty");
+            let d = UserDirs::resolve(&Inputs { legacy_exists: true, ..i }).unwrap();
+            assert_eq!(d, UserDirs::single(&l), "{name}");
+        }
+    }
+
+    #[test]
+    fn both_sets_real_is_a_conflict_reporting_both() {
+        let (home, i) = real_home("ud-both");
+        fs::create_dir_all(home.join(".lanthorn/saves/g")).unwrap();
+        fs::write(home.join(".lanthorn/saves/g/a.lanthorn"), "x").unwrap();
+        fs::write(home.join(".lanthorn/saves/g/b.lanthorn"), "x").unwrap();
+        fs::create_dir_all(home.join(".config/lanthorn")).unwrap();
+        fs::write(home.join(".config/lanthorn/config.toml"), "x").unwrap();
+        let c = UserDirs::conflict(&i).expect("both hold content");
+        assert_eq!(c.legacy.dirs, UserDirs::single(home.join(".lanthorn")));
+        assert_eq!((c.legacy.save_files, c.legacy.config_modified.is_some()), (2, false));
+        assert_eq!(c.platform.dirs.config(), home.join(".config/lanthorn"));
+        assert_eq!((c.platform.save_files, c.platform.config_modified.is_some()), (0, true));
+    }
+
+    #[test]
+    fn an_explicit_user_dir_bypasses_the_conflict() {
+        let (home, i) = real_home("ud-explicit");
+        fs::create_dir_all(home.join(".lanthorn")).unwrap();
+        fs::write(home.join(".lanthorn/config.toml"), "x").unwrap();
+        fs::create_dir_all(home.join(".config/lanthorn")).unwrap();
+        fs::write(home.join(".config/lanthorn/config.toml"), "x").unwrap();
+        assert!(UserDirs::conflict(&i).is_some());
+        let e = Inputs { explicit: Some(p("/srv/lt")), ..i };
+        assert!(UserDirs::conflict(&e).is_none());
     }
 
     #[test]
