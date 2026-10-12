@@ -4398,6 +4398,57 @@ impl Machine {
         Ok(())
     }
 
+    /// Call the function at `func` on a machine nobody will keep and run it to
+    /// its return, with every character it prints captured, giving up after
+    /// `max_steps` instructions (SQ-1774).
+    ///
+    /// For a THROWAWAY machine only (see `objects::NameRunner`). Printing is
+    /// diverted into the capture buffer for the whole call ([`Machine::emit_capture`]),
+    /// which bypasses the I/O system entirely: nothing reaches a Glk stream or the
+    /// backend, and a filter-mode (`@setiosys 1`) story prints the same text.
+    /// Returns `Some((return value, captured text))`, or `None` when the function
+    /// ran out of steps, faulted, halted the machine, or suspended for input, a
+    /// save/restore or a file prompt. On every exit the stack pointers are put
+    /// back where they were found and the machine is usable for the next call.
+    pub fn run_function_capped(&mut self, func: u32, args: &[u32], max_steps: u64) -> Option<(u32, String)> {
+        let (sp, fp, pc) = (self.sp, self.fp, self.pc);
+        self.halted = false;
+        self.faulted = false;
+        self.emit_capture = Some(String::new());
+        self.capture_depth = 0;
+        let result = self.drive_function_capped(func, args, max_steps);
+        let text = self.emit_capture.take().unwrap_or_default();
+        self.sp = sp;
+        self.fp = fp;
+        self.pc = pc;
+        let _ = self.reload_frame_meta();
+        self.halted = false;
+        self.faulted = false;
+        self.pending_input = None;
+        self.pending_event = None;
+        self.pending_saveload = None;
+        self.pending_fileref = None;
+        result.map(|v| (v, text))
+    }
+
+    fn drive_function_capped(&mut self, func: u32, args: &[u32], max_steps: u64) -> Option<u32> {
+        let resume_fp = self.fp;
+        self.call_function(func, args, Dest::Push).ok()?;
+        let mut steps = 0u64;
+        while self.fp != resume_fp {
+            let suspended = self.pending_input.is_some()
+                || self.pending_event.is_some()
+                || self.pending_saveload.is_some()
+                || self.pending_fileref.is_some();
+            if self.fp < resume_fp || self.halted || suspended || steps >= max_steps {
+                return None;
+            }
+            self.step_once().ok()?;
+            steps += 1;
+        }
+        self.pop32().ok()
+    }
+
     /// Decode a Glulx string OBJECT at `addr` into a String for the Glk
     /// `put_string`/`put_string_uni` dispatch arms. The Glk string argument is a
     /// type-tagged Inform string (the reference decodes it via `DecodeVMString`),

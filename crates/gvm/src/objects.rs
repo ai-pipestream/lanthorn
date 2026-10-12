@@ -782,8 +782,9 @@ impl ParseNames {
     /// the parenthesised identifiers `(Alike_Maze_1)`… as hardware names, which
     /// no player ever sees.
     ///
-    /// **A `short_name` ROUTINE keeps the hardware name.** `PrintOrRun` calls
-    /// it, and machine code cannot be read statically. That case is detected
+    /// **A `short_name` ROUTINE keeps the hardware name HERE.** `PrintOrRun` calls
+    /// it, and machine code cannot be read statically; [`NameRunner`] is the
+    /// answer for a caller holding the live machine (SQ-1774). That case is detected
     /// rather than guessed: Glulx tags every object in memory, and
     /// [`crate::disasm::string_text`] answers `None` for anything that is not
     /// one of the string types (§1.6.1's `E0`/`E1`/`E2`), a function (`C0`/`C1`)
@@ -807,6 +808,20 @@ impl ParseNames {
         }
         let text = crate::disasm::string_text(mem, mem.decode_table(), mem.read32(data)?, None)?;
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// The address of the FUNCTION the object's `short_name` property holds, or
+    /// `None` when the image names no such property, this object does not carry
+    /// it, or its value is not a function (§1.6.1: `C0`/`C1`). The complement of
+    /// [`Self::inform_short_name`]'s string case; see [`NameRunner`] for running it.
+    pub fn short_name_function(&self, mem: &Memory, addr: u32) -> Option<u32> {
+        let prop = self.short_name_prop?;
+        let (data, length) = self.property(mem, addr, prop)?;
+        if length != 1 {
+            return None;
+        }
+        let value = mem.read32(data)?;
+        matches!(mem.read8(value), Some(0xC0) | Some(0xC1)).then_some(value)
     }
 
     /// The object's hardware short name, decoded. Empty when it has none, which
@@ -977,6 +992,76 @@ fn walk_object_list(mem: &Memory, head: u32, attr_bytes: u32, stride: u32) -> Op
     }
 }
 
+// ── The name a short_name FUNCTION prints (SQ-1774) ───────────────────────────
+
+/// Instructions a name function may run before it is abandoned. Real ones are a
+/// handful of tests and prints; this is a stall guard, not a budget anyone
+/// plans to reach.
+pub const NAME_FUNCTION_STEP_CAP: u64 = 20_000;
+
+/// Runs `short_name` functions on a throwaway copy of the story, so the name of
+/// an object whose name is COMPUTED can be read without touching the live
+/// machine (SQ-1774). The Glulx twin of `zvm::objects::NameRunner`; read its
+/// doc for the Inform convention (the function PRINTS the name; a true return
+/// means it is complete; a false one means the hardware name follows).
+///
+/// * **`self`.** Inform runs a property function with the global `self` set to
+///   the object. Its address is `@accelparam 6` — the Glulx specification's
+///   "Function Acceleration" appendix defines parameter 6 as the address of
+///   `self` — which the live machine already holds (the story's own `@accelparam`
+///   call, or the veneer fingerprint's reading of the same operand, see
+///   `veneer.rs`'s `jeq @self, obj` template). It is written into the copy's
+///   RAM before each run. Where the live machine holds none, the function runs
+///   without it: Inform 7's compiled name functions have the object baked in
+///   and never read `self`.
+/// * **Output.** `Machine::run_function_capped` diverts every print into a buffer
+///   for the whole call, so nothing touches a Glk stream or the backend.
+/// * **Current.** Before each run the copy's RAM is overwritten with the live
+///   game's, and the string-decoding table is carried over, so the answer is
+///   about the state of the game NOW and nothing one run does can leak into
+///   the next. The live machine is only read.
+/// * **Capped.** A function that loops, faults, halts, or asks for input or a
+///   file is abandoned after [`NAME_FUNCTION_STEP_CAP`] instructions and the
+///   caller keeps [`ParseNames::printed_name`]'s answer.
+pub struct NameRunner {
+    machine: crate::exec::Machine,
+}
+
+impl NameRunner {
+    /// A runner for `live`'s story, or `None` if a copy cannot be started.
+    pub fn new(live: &crate::exec::Machine) -> Option<NameRunner> {
+        let mem = live.mem();
+        let image = mem.raw_bytes().get(..mem.extstart() as usize)?.to_vec();
+        let copy = Memory::new(image).ok()?;
+        let machine = crate::exec::Machine::with_glk(copy, Box::new(crate::glk::TestBackend::new()));
+        Some(NameRunner { machine })
+    }
+
+    /// What the story prints for the object at `obj`, when that is computed by a
+    /// `short_name` FUNCTION and it ran to completion in `live`'s current state;
+    /// `None` for every other case (no `short_name`, a string one, a fault, the
+    /// step cap, no text), where the caller keeps [`ParseNames::printed_name`]'s.
+    pub fn name_of(&mut self, live: &crate::exec::Machine, names: &ParseNames, obj: u32) -> Option<String> {
+        let func = names.short_name_function(live.mem(), obj)?;
+        let m = &mut self.machine;
+        if !m.mem.copy_ram_from(&live.mem) {
+            return None;
+        }
+        m.cur_stringtbl = live.cur_stringtbl;
+        if let Some(self_addr) = live.accel_param(6) {
+            // A `self` outside RAM would be a malformed image; run without it.
+            let _ = m.mem.write32(self_addr, obj);
+        }
+        let (ret, mut text) = m.run_function_capped(func, &[], NAME_FUNCTION_STEP_CAP)?;
+        if ret == 0 {
+            // `print (object) obj` follows a function that declined to finish.
+            text.push_str(&names.short_name(live.mem(), obj)?);
+        }
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,6 +1127,14 @@ mod tests {
     const SCENERY_ATTR: u16 = 5;
     const STATIC_ATTR: u16 = 6;
     const DICT: u32 = 0x118;
+    /// SQ-1774: a free stretch of RAM above everything else for the name-function
+    /// tests: `TABLE`'s function, two strings, the long that points at one of
+    /// them, and the cell standing in for Inform's `self`.
+    const FUNC: u32 = 0xA00;
+    const STR_A: u32 = 0x900;
+    const STR_B: u32 = 0x920;
+    const PTR: u32 = 0x940;
+    const SELF_CELL: u32 = 0x950;
     /// `DICT_ENTRY_BYTE_LENGTH` for a byte-valued dictionary of nine
     /// characters: `7 + DICT_WORD_SIZE` (`Inform6/inform.c`).
     const DICT_STRIDE: u32 = 16;
@@ -1074,18 +1167,27 @@ mod tests {
 
     struct Story {
         buf: Vec<u8>,
+        /// The body of `TABLE`'s `short_name` function, after its `C1 00 00` header.
+        table_code: Vec<u8>,
+        /// The body of the start function, after its `C1 00 00` header.
+        start_code: Vec<u8>,
     }
 
     impl Story {
         fn new() -> Story {
-            let mut s = Story { buf: vec![0u8; EXT as usize] };
+            Story::with_code(Vec::new(), Vec::new())
+        }
+
+        fn with_code(table_code: Vec<u8>, start_code: Vec<u8>) -> Story {
+            let mut s = Story { buf: vec![0u8; EXT as usize], table_code, start_code };
             s.buf[0..4].copy_from_slice(b"Glul");
             s.w32(0x04, 0x0003_0102);
             s.w32(0x08, RAM);
             s.w32(0x0C, EXT);
             s.w32(0x10, EXT);
             s.w32(0x14, 0x1000);
-            s.w32(0x18, 0x40); // start function; never executed here
+            s.w32(0x18, 0x40); // start function; a runner's copy enters it, so it is a valid one
+            s.func(0x40, &s.start_code.clone());
             s.tables();
             s.objects();
             s.identifiers();
@@ -1113,6 +1215,12 @@ mod tests {
             let byte = at + 1 + bit as u32 / 8;
             let mask = 1u8 << (bit % 8);
             self.buf[byte as usize] |= mask;
+        }
+
+        /// A stack-argument function (§1.6.1 `C1`, empty local format) at `at`.
+        fn func(&mut self, at: u32, code: &[u8]) {
+            self.buf[at as usize..at as usize + 3].copy_from_slice(&[0xC1, 0, 0]);
+            self.buf[at as usize + 3..at as usize + 3 + code.len()].copy_from_slice(code);
         }
 
         /// An unencoded Glulx string: `$E0`, then Latin-1, then a zero byte.
@@ -1247,9 +1355,8 @@ mod tests {
                 ROOM => Some(self.string(IDENT_STRINGS + 0xC0, "Maze")),
                 TABLE => {
                     // §1.6.1: `C1` starts a function with local-format args.
-                    let at = IDENT_STRINGS + 0xE0;
-                    self.b(at, 0xC1);
-                    Some(at)
+                    self.func(FUNC, &self.table_code.clone());
+                    Some(FUNC)
                 }
                 _ => None,
             }
@@ -1582,5 +1689,123 @@ mod tests {
         // cached numbers `detect` resolved really are the SAME ones a fresh lookup would find.
         assert_eq!(pn.scenery_attr, Some(SCENERY_ATTR));
         assert_eq!(pn.door_attr, Some(DOOR_ATTR));
+    }
+
+    // ── SQ-1774: running a short_name FUNCTION ────────────────────────────────
+
+    fn be(v: u32) -> [u8; 4] {
+        v.to_be_bytes()
+    }
+    /// `streamstr #addr` (opcode 0x72, one 4-byte constant).
+    fn streamstr(addr: u32) -> Vec<u8> {
+        [&[0x72, 0x03][..], &be(addr)].concat()
+    }
+    /// `streamstr @addr` — print the string whose address is stored AT `addr`.
+    fn streamstr_at(addr: u32) -> Vec<u8> {
+        [&[0x72, 0x07][..], &be(addr)].concat()
+    }
+    /// `streamnum @addr`.
+    fn streamnum_at(addr: u32) -> Vec<u8> {
+        [&[0x71, 0x07][..], &be(addr)].concat()
+    }
+    /// `copy #0, @addr`.
+    fn zero_at(addr: u32) -> Vec<u8> {
+        [&[0x40, 0x70][..], &be(addr)].concat()
+    }
+    const STREAM_SPACE: [u8; 3] = [0x70, 0x01, 0x20];
+    const RETURN_1: [u8; 3] = [0x31, 0x01, 0x01];
+    const RETURN_0: [u8; 2] = [0x31, 0x00];
+    /// `jump` to itself: a 1-byte offset of -1 lands on the instruction's own
+    /// first byte (target = next pc + offset - 2).
+    const SPIN: [u8; 3] = [0x20, 0x01, 0xFF];
+
+    fn live_of(story: &Story) -> crate::exec::Machine {
+        let mut s = Story::with_code(story.table_code.clone(), story.start_code.clone());
+        s.string(STR_A, "stone");
+        s.string(STR_B, "glass");
+        s.w32(PTR, STR_A);
+        crate::exec::Machine::with_glk(s.mem(), Box::new(crate::glk::TestBackend::new()))
+    }
+
+    fn name_of_table(code: Vec<u8>) -> Option<String> {
+        let story = Story::with_code(code, Vec::new());
+        let live = live_of(&story);
+        let pn = ParseNames::detect(live.mem()).unwrap();
+        let mut runner = NameRunner::new(&live)?;
+        runner.name_of(&live, &pn, story.obj(TABLE))
+    }
+
+    #[test]
+    fn a_function_that_returns_true_is_the_whole_name() {
+        let code = [streamstr(STR_A), RETURN_1.to_vec()].concat();
+        let story = Story::with_code(code.clone(), Vec::new());
+        let live = live_of(&story);
+        let pn = ParseNames::detect(live.mem()).unwrap();
+        assert!(pn.short_name_function(live.mem(), story.obj(TABLE)).is_some());
+        assert_eq!(pn.short_name_function(live.mem(), story.obj(ROOM)), None, "ROOM's is a string");
+        assert_eq!(name_of_table(code).as_deref(), Some("stone"), "the hardware name 'table' is not added");
+    }
+
+    #[test]
+    fn a_function_that_returns_false_is_followed_by_the_hardware_name() {
+        // Inform's PrintShortName: `if (i == 0) print (object) obj;`
+        let code = [streamstr(STR_A), STREAM_SPACE.to_vec(), RETURN_0.to_vec()].concat();
+        assert_eq!(name_of_table(code).as_deref(), Some("stone table"));
+    }
+
+    #[test]
+    fn a_function_that_never_returns_falls_back_after_the_step_cap() {
+        let code = [streamstr(STR_A), SPIN.to_vec()].concat();
+        assert_eq!(name_of_table(code), None);
+    }
+
+    #[test]
+    fn a_function_that_prints_nothing_falls_back() {
+        assert_eq!(name_of_table(RETURN_1.to_vec()), None);
+    }
+
+    #[test]
+    fn a_string_short_name_is_not_run() {
+        let story = Story::with_code(RETURN_1.to_vec(), Vec::new());
+        let live = live_of(&story);
+        let pn = ParseNames::detect(live.mem()).unwrap();
+        let mut runner = NameRunner::new(&live).unwrap();
+        assert_eq!(runner.name_of(&live, &pn, story.obj(ROOM)), None, "a string is printed_name's job");
+        assert_eq!(pn.printed_name(live.mem(), story.obj(ROOM)).as_deref(), Some("Maze"));
+    }
+
+    #[test]
+    fn running_a_name_reads_the_live_ram_now_and_never_writes_it() {
+        // The function prints whichever string PTR points at, then zeroes PTR.
+        let code = [streamstr_at(PTR), zero_at(PTR), RETURN_1.to_vec()].concat();
+        let story = Story::with_code(code, Vec::new());
+        let mut live = live_of(&story);
+        let pn = ParseNames::detect(live.mem()).unwrap();
+        let mut runner = NameRunner::new(&live).unwrap();
+        let table = story.obj(TABLE);
+        assert_eq!(runner.name_of(&live, &pn, table).as_deref(), Some("stone"));
+        assert_eq!(live.mem().read32(PTR), Some(STR_A), "the function's write landed on the copy only");
+        // The game moves on; the very next ask reads the new state, and the copy's
+        // earlier zeroing of PTR does not leak into it.
+        live.mem.write32(PTR, STR_B).unwrap();
+        assert_eq!(runner.name_of(&live, &pn, table).as_deref(), Some("glass"));
+        assert_eq!(live.mem().read32(PTR), Some(STR_B));
+    }
+
+    #[test]
+    fn self_is_the_object_being_named() {
+        // Start function: `accelparam #6, #SELF_CELL` (spec: parameter 6 is the
+        // address of `self`). Name function: `streamnum @SELF_CELL`.
+        let start = [&[0x81, 0x81, 0x21, 0x06][..], &(SELF_CELL as u16).to_be_bytes()].concat();
+        let code = [streamnum_at(SELF_CELL), RETURN_1.to_vec()].concat();
+        let story = Story::with_code(code, start);
+        let mut live = live_of(&story);
+        live.step_once().expect("the start function runs its accelparam");
+        assert_eq!(live.accel_param(6), Some(SELF_CELL));
+        let pn = ParseNames::detect(live.mem()).unwrap();
+        let mut runner = NameRunner::new(&live).unwrap();
+        let table = story.obj(TABLE);
+        assert_eq!(runner.name_of(&live, &pn, table), Some(table.to_string()));
+        assert_eq!(live.mem().read32(SELF_CELL), Some(0), "the live `self` is untouched");
     }
 }

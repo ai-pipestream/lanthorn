@@ -207,6 +207,10 @@ pub struct GlulxSession {
     /// [`settle_after_event`](Self::settle_after_event) or the two restore
     /// paths, and each of those takes this cell.
     object_word_set: std::cell::RefCell<Option<std::sync::Arc<grammar_model::ObjectWordSet>>>,
+    /// Names that a `short_name` FUNCTION computes, run on a throwaway copy of the
+    /// story (SQ-1774) — see [`RunningNames`]. Dropped with the other caches of
+    /// live data ([`drop_world_caches`](Self::drop_world_caches)).
+    running_names: std::cell::RefCell<RunningNames>,
     /// The avatar's object address, derived on first ask each turn and dropped
     /// beside [`object_word_set`](Self::object_word_set) — same lifetime, same
     /// reason, and dropped by the same call so the next cache added here cannot
@@ -770,6 +774,7 @@ impl GlulxSession {
             vocab_cache: std::cell::OnceCell::new(),
             room_addrs: std::cell::RefCell::new(std::collections::HashMap::new()),
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             player_addr: std::cell::RefCell::new(None),
             player_hint: None,
             aux: BTreeMap::new(),
@@ -1140,6 +1145,26 @@ impl GlulxSession {
                 self.pending_filename = Some(FilenameReq { usage, fmode })
             }
         }
+    }
+
+    /// `objs` with every object whose `short_name` is a FUNCTION renamed to what
+    /// that function prints right now (SQ-1774) — the Glulx twin of
+    /// `GameSession::with_running_names`; read its doc. Everything else passes
+    /// through untouched, so a story with no such function pays one property
+    /// read per object. Computed on a throwaway machine, once per object per
+    /// turn ([`RunningNames`]); the live machine is only read.
+    fn with_running_names(&self, mut objs: Vec<grammar_model::ObjectWords>) -> Vec<grammar_model::ObjectWords> {
+        let Some(names) = self.parse_names() else { return objs };
+        let mut cache = self.running_names.borrow_mut();
+        for o in &mut objs {
+            if names.short_name_function(self.machine.mem(), o.id).is_none() {
+                continue;
+            }
+            if let Some(name) = cache.name_of(&self.machine, names, o.id) {
+                o.printed_name = name;
+            }
+        }
+        objs
     }
 
     /// The reader for the words this story's parser accepts for an object,
@@ -1634,6 +1659,10 @@ impl GlulxSession {
     /// derived from the tree is dropped at all six sites by construction.
     fn drop_world_caches(&mut self) {
         self.object_word_set.take();
+        // Only the ANSWERS go; the throwaway machine is a copy of ROM plus RAM it re-reads
+        // from the live game before every run, so it outlives the turn (building one costs
+        // 1.6 ms on King of Shreds and Patches, 2.7 ms on Blue Lacuna).
+        self.running_names.get_mut().names.clear();
         self.player_addr.take();
     }
 }
@@ -2036,7 +2065,7 @@ impl GlulxSession {
         // without this it appears in every room of every game (SQ-0667). By
         // handle, never by name: an Inform 7 object prints nothing at all.
         let skip = exclude.and_then(|h| self.resolve_handle(h.into()));
-        names
+        let objs = names
             .children(self.machine.mem(), addr)
             .into_iter()
             .filter(|&c| Some(c) != skip)
@@ -2044,7 +2073,8 @@ impl GlulxSession {
             // SQ-1747: I7's pronoun-group placeholders ("he"/"him", "she"/"her")
             // sit in the room's child list but are not things in it.
             .filter(|ow| !ow.is_pronoun_group())
-            .collect()
+            .collect::<Vec<_>>();
+        self.with_running_names(objs)
     }
 
     /// SQ-1751: keep [`Self::room_text`] current. A turn that names the room, or moves
@@ -3889,6 +3919,29 @@ impl Engine for GlulxSession {
     }
 }
 
+/// The per-turn memo behind [`GlulxSession::with_running_names`] (SQ-1774): the
+/// throwaway machine that runs `short_name` functions, built on first need, and
+/// each object's answer so a function runs at most once per object per turn
+/// however many panels ask. `None` in the map means the function ran and
+/// produced nothing usable, which is as much an answer as a name.
+#[derive(Default)]
+struct RunningNames {
+    runner: Option<Option<gvm::objects::NameRunner>>,
+    names: std::collections::HashMap<u32, Option<String>>,
+}
+
+impl RunningNames {
+    fn name_of(&mut self, live: &gvm::Machine, names: &gvm::objects::ParseNames, obj: u32) -> Option<String> {
+        if let Some(hit) = self.names.get(&obj) {
+            return hit.clone();
+        }
+        let runner = self.runner.get_or_insert_with(|| gvm::objects::NameRunner::new(live));
+        let name = runner.as_mut().and_then(|r| r.name_of(live, names, obj));
+        self.names.insert(obj, name.clone());
+        name
+    }
+}
+
 /// Object-tree introspection over an Inform story's own `$70` object list
 /// (SQ-1241).
 ///
@@ -3922,7 +3975,7 @@ impl Introspect for GlulxSession {
         let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(container.into())) else {
             return Vec::new();
         };
-        names.contents(self.machine.mem(), addr)
+        self.with_running_names(names.contents(self.machine.mem(), addr))
     }
 
     fn room_objects(&self, room: mapper::graph::RoomId) -> Vec<crate::engine::ObjectWords> {
