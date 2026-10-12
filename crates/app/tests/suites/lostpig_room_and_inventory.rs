@@ -206,3 +206,85 @@ fn lostpig_gnome_room_survives_its_own_mid_game_rename() {
         session.introspect().unwrap().contents(player).iter().filter_map(|o| o.display_name()).collect();
     assert_eq!(carried_after, carried_before, "Grunk's inventory is unaffected by the room's rename");
 }
+
+
+// ── SQ-1774: a name a ROUTINE computes ────────────────────────────────────
+//
+// Lost Pig's food bricks are `Brick_1` .. `Brick_17` in the object header and are
+// named at PLAY time by a `short_name` routine: "brick" while whole, "half brick"
+// once broken (the game's own INVENTORY says "brick" / "two half brick"). The
+// header identifier is rejected as a non-name, so before the fix the inventory
+// panel and the WHAT-CARRIED column fell through to the word list and showed the
+// bare adjective ("whole", "half"). Fixture: `LostPig.z8` Release 2 / 080406.
+
+/// The commands from the opening to a brick lying in the coin box's basket:
+/// the coin box is in the Table Room, and the coin is picked up on the way.
+const LOST_PIG_TO_THE_BRICK: &[&str] = &[
+    "X ME", "INVENTORY", "X FARM", "X FOREST", "LOOK FOR PIG", "LISTEN", "NORTHEAST", "X STAIRS",
+    "X METAL THING", "TAKE TUBE AND TORCH", "LOOK INSIDE TUBE", "BLOW IN TUBE", "X CRACK", "EAST",
+    "X PIG", "FOLLOW PIG", "CATCH IT", "X FOUNTAIN", "X BOWL", "X COIN", "X CURTAIN", "X MAN",
+    "NORTH", "X WEST MURAL", "X EAST MURAL", "X STATUE", "X HAT", "TAKE IT", "WEAR IT", "SOUTH",
+    "SOUTHWEST", "X BOX", "PUT COIN IN SLOT", "PULL LEVER",
+];
+
+/// What the inventory panel is fed (`TurnResult::items`, carried) and what the
+/// WHAT-CARRIED column offers (`Introspect::visible_contents` through
+/// `vocab::typeable_name`, the call `command_band::refresh_objects` makes).
+fn brick_names(session: &GameSession, items: &[app::session::ItemObservation]) -> (Vec<String>, Vec<String>) {
+    let panel: Vec<String> = items
+        .iter()
+        .filter(|i| matches!(i.location, app::session::ObservedItemLocation::Carried))
+        .map(|i| i.name.clone())
+        .filter(|n| n.to_lowercase().contains("brick") || n == "whole" || n == "half")
+        .collect();
+    let player = session.introspect().and_then(|i| i.player_object()).expect("Grunk is identifiable");
+    let mut band: Vec<String> = Vec::new();
+    let mut vocab = app::vocab::VocabState::default();
+    let vocab = vocab.get(session);
+    for o in session.introspect().unwrap().visible_contents(player) {
+        // The column shows one row per distinct typeable name, as `refresh_objects` does.
+        if let Some(n) = app::vocab::typeable_name(&o, vocab) {
+            if (n.to_lowercase().contains("brick") || n == "whole" || n == "half") && !band.contains(&n) {
+                band.push(n);
+            }
+        }
+    }
+    (panel, band)
+}
+
+#[test]
+fn lostpig_bricks_are_named_by_their_routine_in_the_panel_and_in_what_carried() {
+    let Some(mut session) = boot_lostpig() else { return };
+    let _ = session.submit("");
+    for cmd in LOST_PIG_TO_THE_BRICK {
+        let r = session.submit(cmd);
+        assert!(r.fault.is_none(), "{cmd:?} faulted: {:?}", r.fault);
+    }
+
+    // A whole brick: the game's own INVENTORY calls it "brick".
+    let r = session.submit("TAKE BRICK");
+    let (panel, band) = brick_names(&session, &r.items);
+    assert_eq!(panel, vec!["brick"], "inventory panel, whole brick (was the bare adjective \"whole\")");
+    assert_eq!(band, vec!["brick"], "WHAT-CARRIED, whole brick");
+
+    // The state-dependent half: breaking it changes what the routine prints, on
+    // the very next turn. (WHAT-CARRIED shows only what the parser will take, so
+    // a half whose parse words have not caught up reads "brick" there, never the
+    // bare adjective.)
+    let r = session.submit("BREAK BRICK");
+    assert!(r.transcript.contains("break brick in two"), "non-vacuity: {}", r.transcript);
+    let (panel, band) = brick_names(&session, &r.items);
+    assert_eq!(panel, vec!["half brick", "half brick"], "inventory panel, after the break");
+    assert!(band.iter().all(|n| n.ends_with("brick")), "WHAT-CARRIED, after the break: {band:?}");
+
+    // Whole and halves together, as the game's INVENTORY lists them.
+    for cmd in ["HIT BOX", "TAKE COIN", "PUT COIN IN SLOT", "PULL LEVER", "TAKE BRICK"] {
+        let _ = session.submit(cmd);
+    }
+    let inv = session.submit("INVENTORY");
+    assert!(inv.transcript.contains("two half brick"), "non-vacuity, the game's own list: {}", inv.transcript);
+    let (mut panel, band) = brick_names(&session, &inv.items);
+    panel.sort();
+    assert_eq!(panel, vec!["brick", "half brick", "half brick"], "inventory panel, whole and halves");
+    assert_eq!(band, vec!["brick", "half brick"], "WHAT-CARRIED, whole and halves");
+}

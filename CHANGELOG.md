@@ -39,6 +39,7 @@ while any such tag, or this Unreleased section, still exists.*
 - **Rewinding to an earlier turn now shows that turn's status line straight away.** On Z-machine games with a status bar, going back used to leave the bar blank until you typed your next command.
 - **Games on disk images open faster, and CD images much faster — especially from a network drive.** Starting a game used to read the whole image file several times over, once per step of the launch; now it is read once and shared. A CD image goes further and is read only where the game needs it: starting a game off the 354 MB *Classic Text Adventure Masterpieces of Infocom* disc used to read the full 354 MB several times over, and now reads about 27 MB in all.
 - **Details fetched from IFDB for a `.zblorb` game now show up on that game.** They used to be saved under the file's name instead of the game's, so the library row never found them.
+- **Items whose names change as you play now show their full names in the inventory.** Lost Pig's food bricks used to appear as just "whole" and "half" in the inventory panel and the carried-things column; they now read "brick" and "half brick", exactly as the game itself lists them, and update the moment you break one.
 - **A game you have in two formats now shows its IFDB details on both straight after a fetch.** When the same game sits in your library twice (say as a `.z3` and as an Amiga disk image), only the first copy picked up the fetched title and author until you reopened the picker.
 
 ## v0.9.4 — 2026-10-10

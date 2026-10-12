@@ -251,6 +251,22 @@ impl Memory {
         &self.bytes
     }
 
+    /// Overwrite this image's DYNAMIC memory with `other`'s, byte for byte.
+    ///
+    /// Returns `false` and changes nothing when the two images do not share a
+    /// dynamic-memory size (they are then not the same story). Static and high
+    /// memory are read-only (§1.1) and are not touched, so this is what lets a
+    /// throwaway copy of a story be brought up to the live game's CURRENT state
+    /// for the price of one slice copy (SQ-1774).
+    pub fn copy_dynamic_from(&mut self, other: &Memory) -> bool {
+        let n = self.header.static_mem_base as usize;
+        if other.header.static_mem_base as usize != n || self.bytes.len() < n || other.bytes.len() < n {
+            return false;
+        }
+        self.bytes[..n].copy_from_slice(&other.bytes[..n]);
+        true
+    }
+
     /// Look up a ZSCII code ≥ 155 in the custom Unicode translation table
     /// (ZMSD §3.8.5.4). Returns `Some(char)` if the story defines a custom
     /// table and the code falls within it; `None` otherwise (caller falls back

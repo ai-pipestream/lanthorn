@@ -914,6 +914,11 @@ pub struct GameSession {
     /// tallies every property of every object once, and the answer describes the
     /// compiler's layout, which no turn can change.
     parse_names: std::cell::OnceCell<Option<zvm::objects::ParseNames>>,
+    /// Names that a `short_name` ROUTINE computes, run on a throwaway copy of the
+    /// story (SQ-1774) — see [`RunningNames`]. Dropped wherever
+    /// [`object_word_set`](Self::object_word_set) is, for the same reason: a
+    /// name read off the game's state is only good while that state is.
+    running_names: std::cell::RefCell<RunningNames>,
     /// The story's avatar-candidate pools (SQ-1259 perf follow-up) — cached
     /// beside [`parse_names`](Self::parse_names) for the identical reason:
     /// both depend only on what is compiled into the story (short names and
@@ -1342,6 +1347,7 @@ impl GameSession {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -2065,6 +2071,7 @@ impl GameSession {
         // the game's own @restore/@restart), so this is the per-turn
         // invalidation the cache's soundness rests on (SQ-1176).
         self.object_word_set.take();
+        self.running_names.take();
         // A mid-turn @restart re-booted the VM: drop the app-side v6 chrome the
         // VM's own screen reset cannot reach — the rasterized picture-canvas
         // cache and the window-0 char counters — so the reboot's fresh boot art
@@ -4887,8 +4894,10 @@ const BARE_NON_NAMES: [&str; 5] = ["it", "them", "this", "that", "thing"];
 ///   auto-multiplied brick instances, `"Brick_1"` .. `"Brick_6"`). Verified not a decoding bug on
 ///   Lost Pig specifically: `zvm::objects::printed_name` — the SQ-1372-aware reader that checks
 ///   the Inform `short_name` PROPERTY before falling back to the header — returns the exact same
-///   text, so these objects genuinely provide no player-facing name at all; the header identifier
-///   is all there is.
+///   text, so no STATIC name exists for these objects; the header identifier is all there is. The
+///   bricks' real name is computed by a `short_name` ROUTINE, which `GameSession::with_running_names`
+///   runs before a name ever reaches this filter (SQ-1774); what is left here is the objects that
+///   have no name even then.
 fn printed_name_is_a_non_name(name: &str) -> bool {
     if BARE_NON_NAMES.contains(&name.to_lowercase().as_str()) {
         return true;
@@ -6241,6 +6250,7 @@ impl Engine for GameSession {
         // drain a turn — drop the cached object-word set here as `drain_turn`
         // does, or it keeps answering for the session we just left (SQ-1176).
         self.object_word_set.take();
+        self.running_names.take();
         self.v6_model_memo.take(); // same duty for the memoized screen model (SQ-1191)
         // The restored memory brings NO screen with it — Quetzal archives none by
         // design — so whatever is in the upper window belongs to the moment we
@@ -6300,6 +6310,7 @@ impl Engine for GameSession {
         // Memory was swapped without draining a turn — same duty as in
         // `restore_state` above (SQ-1176).
         self.object_word_set.take();
+        self.running_names.take();
         self.v6_model_memo.take(); // same duty for the memoized screen model (SQ-1191)
         // complete_restore_success lands mid-way through the game's save verb
         // (just past the @save descriptor), not at a read. Run forward to the
@@ -6621,6 +6632,29 @@ impl GameSession {
             .as_ref()
     }
 
+    /// `objs` with every object whose `short_name` is a ROUTINE renamed to what
+    /// that routine prints right now (SQ-1774): Lost Pig's bricks are
+    /// `Brick_1`..`Brick_17` in the header and "whole brick" / "half brick" to a
+    /// player, depending on the brick. Everything else passes through untouched,
+    /// so a story with no such routine pays one property read per object.
+    ///
+    /// The name is computed on a throwaway machine ([`zvm::objects::NameRunner`]),
+    /// once per object per turn ([`RunningNames`]); the live machine is only read.
+    fn with_running_names(&self, mut objs: Vec<grammar_model::ObjectWords>) -> Vec<grammar_model::ObjectWords> {
+        let mem = &self.machine.mem;
+        let mut cache = self.running_names.borrow_mut();
+        for o in &mut objs {
+            let Ok(obj) = u16::try_from(o.id) else { continue };
+            if zvm::objects::short_name_routine(mem, obj).is_none() {
+                continue;
+            }
+            if let Some(name) = cache.name_of(mem, obj) {
+                o.printed_name = name;
+            }
+        }
+        objs
+    }
+
     /// The story's avatar-candidate pools, derived on first use — see the
     /// [`player_candidates`](Self::player_candidates) field's doc comment.
     pub fn player_candidates(&self) -> &PlayerCandidates {
@@ -6670,7 +6704,8 @@ impl GameSession {
                 nested_room_num = Some(room_num);
                 // The room's own top level. The player object is structurally a child of
                 // whatever room they stand in (SQ-0667's exact hazard) — excluded by id, not name.
-                direct = crate::inventory::list_inventory(&self.machine.mem, names, room_num)
+                direct = self
+                    .with_running_names(crate::inventory::list_inventory(&self.machine.mem, names, room_num))
                     .into_iter()
                     .filter(|o| Some(o.id) != player_obj.map(u32::from))
                     .collect::<Vec<_>>();
@@ -6678,20 +6713,21 @@ impl GameSession {
                 // Everything else the room reveals is nested by construction: it was excluded
                 // from `direct` above, so any object here that isn't in `direct_ids` was reached
                 // only by recursing into a supporter/container/scenery bucket.
-                nested = crate::render::room_info::list_room_objects_excluding(
-                    self.world_model(),
-                    names,
-                    &self.machine.mem,
-                    loc.number,
-                    player_obj.unwrap_or(0),
-                )
-                .into_iter()
+                nested = self
+                    .with_running_names(crate::render::room_info::list_room_objects_excluding(
+                        self.world_model(),
+                        names,
+                        &self.machine.mem,
+                        loc.number,
+                        player_obj.unwrap_or(0),
+                    ))
+                    .into_iter()
                 .filter(|o| !direct_ids.contains(&o.id))
                 .collect();
             }
         }
         let carried: Vec<grammar_model::ObjectWords> = match player_obj {
-            Some(p) => crate::inventory::list_inventory(&self.machine.mem, names, p),
+            Some(p) => self.with_running_names(crate::inventory::list_inventory(&self.machine.mem, names, p)),
             None => Vec::new(),
         };
 
@@ -6753,22 +6789,45 @@ impl GameSession {
     }
 }
 
+/// The per-turn memo behind [`GameSession::with_running_names`] (SQ-1774): the
+/// throwaway machine that runs `short_name` routines, built on first need, and
+/// each object's answer so a routine runs at most once per object per turn however
+/// many panels ask. `None` in the map means the routine ran and produced nothing
+/// usable, which is as much an answer as a name.
+#[derive(Default)]
+struct RunningNames {
+    runner: Option<Option<zvm::objects::NameRunner>>,
+    names: std::collections::HashMap<u16, Option<String>>,
+}
+
+impl RunningNames {
+    fn name_of(&mut self, live: &zvm::memory::Memory, obj: u16) -> Option<String> {
+        if let Some(hit) = self.names.get(&obj) {
+            return hit.clone();
+        }
+        let runner = self.runner.get_or_insert_with(|| zvm::objects::NameRunner::new(live));
+        let name = runner.as_mut().and_then(|r| r.name_of(live, obj));
+        self.names.insert(obj, name.clone());
+        name
+    }
+}
+
 impl Introspect for GameSession {
     fn vocabulary(&self) -> Vec<String> {
         zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
     }
 
     fn contents(&self, container: u16) -> Vec<crate::engine::ObjectWords> {
-        crate::inventory::list_inventory(&self.machine.mem, self.parse_names(), container)
+        self.with_running_names(crate::inventory::list_inventory(&self.machine.mem, self.parse_names(), container))
     }
 
     fn room_objects(&self, room: mapper::graph::RoomId) -> Vec<crate::engine::ObjectWords> {
-        crate::render::room_info::list_room_objects(
+        self.with_running_names(crate::render::room_info::list_room_objects(
             self.world_model(),
             self.parse_names(),
             &self.machine.mem,
             room,
-        )
+        ))
     }
 
     fn room_objects_excluding(
@@ -6776,22 +6835,22 @@ impl Introspect for GameSession {
         room: mapper::graph::RoomId,
         exclude: Option<u16>,
     ) -> Vec<crate::engine::ObjectWords> {
-        crate::render::room_info::list_room_objects_excluding(
+        self.with_running_names(crate::render::room_info::list_room_objects_excluding(
             self.world_model(),
             self.parse_names(),
             &self.machine.mem,
             room,
             exclude.unwrap_or(0),
-        )
+        ))
     }
 
     fn visible_contents(&self, container: u16) -> Vec<crate::engine::ObjectWords> {
-        crate::inventory::list_visible_contents(
+        self.with_running_names(crate::inventory::list_visible_contents(
             self.world_model(),
             self.parse_names(),
             &self.machine.mem,
             container,
-        )
+        ))
     }
 
     fn all_object_words(&self) -> Option<Vec<crate::engine::ObjectWords>> {
@@ -9474,6 +9533,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9552,6 +9612,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9625,6 +9686,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9687,6 +9749,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9792,6 +9855,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9856,6 +9920,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9904,6 +9969,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -9966,6 +10032,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -10066,6 +10133,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -10124,6 +10192,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
@@ -10736,6 +10805,7 @@ mod tests {
             player_candidates: std::cell::OnceCell::new(),
             player_hint: None,
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,

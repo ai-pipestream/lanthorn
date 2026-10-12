@@ -5275,6 +5275,47 @@ impl Machine {
         ret
     }
 
+    /// Call `packed_routine` with no arguments on a machine nobody will keep,
+    /// giving up after `max_steps` instructions (SQ-1774).
+    ///
+    /// For a THROWAWAY machine only — one built to answer a single question and
+    /// then dropped or reset by its owner, like `objects::NameRunner`'s. Unlike
+    /// [`Machine::run_routine`] it takes no care to preserve a suspended
+    /// read/save/restore, because a throwaway has none. It returns `Some(value)`
+    /// when the routine returned within the cap, and `None` when it ran out of
+    /// steps, faulted, or tried to read/save/restore/restart/quit; on every exit
+    /// the call and evaluation stacks are left as they were found.
+    pub fn run_routine_capped(&mut self, packed_routine: u16, max_steps: u32) -> Option<u16> {
+        let base_frames = self.state.frames.len();
+        let base_stack = self.state.eval_stack.len();
+        call_routine(&mut self.state, &mut self.mem, packed_routine, &[], Some(0));
+        if self.state.frames.len() == base_frames {
+            // packed 0 / bad address: call_routine pushed 0 to the stack already.
+            let ret = self.state.eval_stack.pop();
+            self.state.eval_stack.truncate(base_stack);
+            return ret;
+        }
+        self.nested_call_depth += 1;
+        let mut finished = false;
+        for _ in 0..max_steps {
+            match self.step() {
+                StepResult::Continue => {
+                    if self.state.frames.len() <= base_frames {
+                        finished = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        self.nested_call_depth -= 1;
+        let ret = if finished { self.state.eval_stack.pop() } else { None };
+        self.state.frames.truncate(base_frames);
+        self.state.eval_stack.truncate(base_stack);
+        self.state.fault = None;
+        ret
+    }
+
     /// v6 newline interrupt (ZMSD §8.8.3.2.2) — the print-path analogue of
     /// Frotz's `countdown()` (`src/common/screen.c`). Each new-line a *scrolling*
     /// window emits decrements that window's interrupt countdown (prop 9); when it
