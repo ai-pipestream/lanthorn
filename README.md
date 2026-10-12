@@ -220,6 +220,10 @@ itself.**
   gnome tunnels are the example — draws no arrow at all, just a `?` marking
   that the destination varies; hover the little number beside it to see
   where it's actually sent you.
+  The first time you stand in a room, lanthorn also quietly asks the game which
+  ways lead out, so the map marks real exits (`»`) — even ones the description
+  never mentions — without ever revealing what lies beyond them; and a move like
+  `climb tree` or `jump in river` is placed on the map by the direction that leads to the same room.
   An Inform 7 game hands over its own world model, so the room
   you wake up in is on the map at the first prompt under the author's own name
   for it, and no room is ever drawn twice because the game spelled its name two

@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.9.4`) versions every crate and every
+version in `Cargo.toml` (currently `0.9.5`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -19,13 +19,18 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
+## v0.9.5 — 2026-10-12
 
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
+### Highlights
+
+- **The map shows a room's real exits before you walk them.** The first time you
+  stand in a room, the ways out are marked (`»`), even ones the description never
+  mentions, without revealing what lies beyond.
+- **Rooms reached by `climb tree` or `jump in river` now land in the right place
+  on the map**, and `north then east` maps each step you actually walked.
+- **Scott Adams games now complete your words as you type**, like Z-machine and
+  Glulx stories.
+- **Disk and CD images open much faster**, especially from a network drive.
 
 ### Added
 
