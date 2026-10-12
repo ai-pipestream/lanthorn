@@ -823,6 +823,29 @@ change (rooms passed through included; a directionless piece goes through this s
 from the state just before it) only if the shadow ends in the room the live game did, with a
 first-piece-only retry for a game, like Scott's, that ignores the rest of the line.
 
+### Which ways lead out: the exit scan (SQ-1773)
+
+`app::scan_probe` scans a room from the end-of-turn snapshot the first time the player is
+in it (and on any turn in a still-unscanned room, once per session): `look` as a control,
+then the twelve compass words plus the story's ship words (`relocation_probe::nautical_words`),
+each from a freshly restored state, in questions of four words so the shadow is never held
+long. A `look` that does not leave the shadow in the scanned room means the moment is unstable
+(a clock) or the engine cannot say where it is: nothing is recorded, not even a wall. Every
+word that landed elsewhere is replayed once and must land in the same room (a death is not a
+landing). A confirmed landing in a room the map holds is recorded as the return probe records
+one (`record_probed_passage` plus `probed`, never `tried`); a landing in a room the map does NOT
+hold records only the direction (`Room::scan_exits`) -- no room, name or id reaches the graph.
+Every other asked direction goes on `Room::scan_walls`, the only directions a later visit asks
+again. `Room::scanned`, `scan_exits` and `scan_walls` are a third record beside `tried` (the
+player's) and `probed` (the return search's), persisted with the rooms. For a scanned room
+`MapGraph::untried` is the real exits not yet walked, and the matrix classifies them
+`MatrixCell::Exit` (`»`, selector `map.matrix.cell:exit`) while refused directions read as walls;
+unscanned rooms keep the old reading. The scan is the lowest-priority user of the shadow:
+`pump_exit_scan` runs after the chain, relocation and return pumps in `host::probe::poll` and
+asks nothing while any of them (or a random-exit search) is pending; queued scans are capped
+and a scan whose room a rewind removed is dropped. Gated by `scan_exits` (default on),
+independent of `return_probe`.
+
 ### Declared exits: a room's own data, read before a move is judged (SQ-1257)
 
 Some Inform games move the player somewhere their own exit table never named —

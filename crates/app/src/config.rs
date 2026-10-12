@@ -1428,6 +1428,7 @@ pub mod keys {
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
     pub const GUIDANCE: &str = "guidance";
     pub const RETURN_PROBE: &str = "return_probe";
+    pub const SCAN_EXITS: &str = "scan_exits";
     pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
     pub const SYSTEM_COLOURS: &str = "system_colours";
@@ -1701,6 +1702,21 @@ pub struct Config {
     /// belongs.
     #[serde(default = "default_true")]
     pub return_probe: bool,
+    /// Scan each room's exits in a silent copy of the game, the first time you are in it
+    /// (SQ-1773). Default true.
+    ///
+    /// Typed on the same shadow as [`return_probe`](Self::return_probe) and answering a
+    /// different question: not "what is the way back" but "which ways out does the game have
+    /// from here". The copy is asked each direction from the moment you arrived and the map
+    /// keeps only which ones worked -- never the room beyond, never its name -- so an unwalked
+    /// exit reads as a real exit instead of one of ten maybes. Off, the map's unexplored exits
+    /// are every direction you have not typed, as before.
+    ///
+    /// **Independent of `return_probe`**: both ride the shadow seam, which is armed whatever
+    /// either says, and each is switched by its own key. Needs an engine that supports probes;
+    /// where there is none the setting does nothing.
+    #[serde(default = "default_true")]
+    pub scan_exits: bool,
     /// Keep [`adult_words`](Self::adult_words) out of any panel that ENUMERATES
     /// a story's vocabulary unprompted (SQ-1122). Default true.
     ///
@@ -2467,6 +2483,7 @@ impl Default for Config {
             guidance: true,
             guidance_probe: true,
             return_probe: true,
+            scan_exits: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::EveryRoom,
@@ -2816,6 +2833,7 @@ fn resolve_config_layers(
             cfg.guidance = from_file.guidance;
             cfg.guidance_probe = from_file.guidance_probe;
             cfg.return_probe = from_file.return_probe;
+            cfg.scan_exits = from_file.scan_exits;
             cfg.hide_adult_words = from_file.hide_adult_words;
             cfg.adult_words = from_file.adult_words;
             cfg.background_tidy = from_file.background_tidy;
@@ -3147,6 +3165,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
     doc.put("return_probe", cfg.return_probe.into(), cfg.return_probe == def.return_probe);
+    doc.put("scan_exits", cfg.scan_exits.into(), cfg.scan_exits == def.scan_exits);
     doc.put("hide_adult_words", cfg.hide_adult_words.into(), cfg.hide_adult_words == def.hide_adult_words);
     // The LIST is the one setting lanthorn seeds LIVE rather than commented
     // (SQ-1122), so `put`'s "always update a key the file already has" half keeps
@@ -4480,6 +4499,7 @@ use_defaults = false
             guidance: true,
             guidance_probe: true,
             return_probe: true,
+            scan_exits: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::OnOverlap,

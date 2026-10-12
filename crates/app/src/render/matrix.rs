@@ -92,6 +92,7 @@ fn cell_width(m: &Matrix, with_return: bool) -> u16 {
 /// | `⇱out` | leaves the layer; the destination is footnoted |
 /// | `×`    | tried, and there is no path that way           |
 /// | `·`    | untried — the exploration frontier             |
+/// | `»`    | a real exit nobody has walked yet (an exit scan found it; SQ-1773) |
 /// | `?`    | tried; the story sends a different room each time (SQ-1257) |
 pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
     let tag = |id: RoomId| m.labels.tag_of(id).to_string();
@@ -114,6 +115,7 @@ pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
         }
         MatrixCell::Probed => "×".to_string(),
         MatrixCell::Untried => "·".to_string(),
+        MatrixCell::Exit => "»".to_string(),
         // A bare `?` when nothing is recorded yet; a superscript count of recorded destinations
         // once there are some (SQ-1261) — `?²` for two rooms this direction has actually landed
         // in, agreeing with the room card's "destination varies: A, B" and the same glyph table
@@ -291,6 +293,7 @@ pub fn render_matrix(
     let path_style = state.colors.theme.get("map.matrix.cell:path").style;
     let frontier_style = state.colors.theme.get("map.matrix.cell:frontier").style;
     let random_style = state.colors.theme.get("map.matrix.cell:random").style;
+    let exit_style = state.colors.theme.get("map.matrix.cell:exit").style;
     let footnote_style = state.colors.theme.get("map.matrix.footnote").style;
     let trail_style = state.colors.theme.get("map.trail").style;
 
@@ -394,6 +397,8 @@ pub fn render_matrix(
                 frontier_style
             } else if matches!(cell, MatrixCell::Random { .. }) {
                 random_style
+            } else if matches!(cell, MatrixCell::Exit) {
+                exit_style
             } else {
                 row_style
             };

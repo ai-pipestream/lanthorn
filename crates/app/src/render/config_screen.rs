@@ -69,6 +69,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     // in the middle renumbers every row after it in four places at once. The
     // grouping is worth less than not making that edit (SQ-0785).
     ("return_probe",         ConfigRowKind::Bool, "After a move, look for the way BACK in a silent throwaway copy of the game, and put it on the map when it is found — closing the one-way gaps an automap is otherwise full of, without ever assuming that a passage runs both ways. Nothing is recorded unless the copy comes out in the room you left. Off by default; the footprint on the map pane's bottom border switches it for one game."),
+    ("scan_exits",           ConfigRowKind::Bool, "The first time you stand in a room, ask a silent throwaway copy of the game which ways lead out of it, and show the real exits you have not walked yet. Only the direction is kept: the map never shows or names the room beyond until you walk there. A refused direction is asked again on a later visit. Off, every direction you have not typed counts as unexplored."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +277,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         28 => bool_str(cfg.guidance_probe),
         29 => bool_str(cfg.hide_adult_words),
         30 => bool_str(cfg.return_probe),
+        31 => bool_str(cfg.scan_exits),
         _ => String::new(),
     }
 }

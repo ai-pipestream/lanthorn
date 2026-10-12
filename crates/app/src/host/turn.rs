@@ -521,9 +521,14 @@ pub fn finish_command_turn(
     // SQ-1771: the relocation search starts from the same moment, for every engine -- a Scott
     // Adventure has no seed but its snapshot is as cheap as the Z-machine's -- so the gate also
     // opens when that feature is on.
-    let keeps_pre_move = session.rng_seed().is_some() || (state.config.return_probe && state.probe.is_armed());
+    let keeps_pre_move = session.rng_seed().is_some()
+        || ((state.config.return_probe || state.config.scan_exits) && state.probe.is_armed());
     state.random_exit_pre_move_save = keeps_pre_move
         .then(|| (mapper.graph.current().unwrap_or(0), turn_save.get(&*session)));
+
+    // SQ-1773: the room the player now stands in is scanned for its exits from that very
+    // moment, on the shadow, behind every search their own moves need.
+    crate::scan_probe::arm_exit_scan(state, mapper, &*session, room_before);
 
     // Background map maintenance: a geometry change (new room/connection) is the
     // ONLY thing that can require re-layout, so all of it runs on a worker thread —

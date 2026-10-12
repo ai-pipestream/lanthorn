@@ -5105,6 +5105,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         28 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance_probe = !cs.working.guidance_probe; } }
         29 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
         30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.return_probe = !cs.working.return_probe; } }
+        31 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.scan_exits = !cs.working.scan_exits; } }
         _ => {}
     }
 }
@@ -5208,6 +5209,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         28 => working.guidance_probe = !working.guidance_probe,
         29 => working.hide_adult_words = !working.hide_adult_words,
         30 => working.return_probe = !working.return_probe,
+        31 => working.scan_exits = !working.scan_exits,
         _ => {}
     }
 }

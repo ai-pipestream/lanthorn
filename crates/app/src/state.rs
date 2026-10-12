@@ -2735,6 +2735,15 @@ pub struct AppState {
     /// A replay of a chained command line (`north then east`) in the shadow, running right now,
     /// if any (SQ-1772). At most one. Session state. See [`crate::chain_probe`].
     pub chain_replay: Option<crate::chain_probe::ChainReplay>,
+    /// The exit scan of one room running right now, if any (SQ-1773). At most one, and only when
+    /// nothing more urgent wants the shadow. Session state, never persisted -- what it learns is
+    /// on the room. See [`crate::scan_probe`].
+    pub scan_search: Option<crate::scan_probe::ExitScan>,
+    /// Exit scans waiting their turn behind the other searches (SQ-1773). Session state.
+    pub scan_queue: Vec<crate::scan_probe::ExitScan>,
+    /// Rooms an unscanned-room scan has already been queued for this session, so a room whose
+    /// `look` control keeps failing is not re-armed every turn (SQ-1773). Session state.
+    pub scan_attempted: Vec<mapper::graph::RoomId>,
     /// In/Out passages `(origin, portal, dest)` whose compass alias has already been searched
     /// for (SQ-1771): each is asked once, the first time the map sees it. Session state.
     pub alias_searched: Vec<(mapper::graph::RoomId, mapper::direction::Direction, mapper::graph::RoomId)>,
@@ -3975,6 +3984,9 @@ impl Default for AppState {
             relocation_search: None,
             relocation_queue: Vec::new(),
             chain_replay: None,
+            scan_search: None,
+            scan_queue: Vec::new(),
+            scan_attempted: Vec::new(),
             alias_searched: Default::default(),
             random_exit_search: None,
             random_exit_pre_move_save: None,

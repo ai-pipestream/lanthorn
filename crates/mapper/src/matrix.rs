@@ -65,6 +65,11 @@ pub enum MatrixCell {
     Probed,
     /// Never tried — the exploration frontier.
     Untried,
+    /// A real exit nobody has walked yet (SQ-1773): an exit scan asked the game and the move
+    /// worked, into a room the map does not hold. Unlike [`MatrixCell::Untried`] this is not a
+    /// maybe -- the game said yes -- and it names NO destination, because the map must not
+    /// reveal a room the player has not seen. Walking it is an ordinary first walk.
+    Exit,
     /// Tried; the story sent the player somewhere different each time (SQ-1257) —
     /// Lost Pig's gnome tunnels are the specimen. Explored, not a frontier, and
     /// names no SINGLE destination because none is stable enough to name: the
@@ -94,6 +99,7 @@ impl MatrixCell {
             MatrixCell::SelfLoop
             | MatrixCell::Probed
             | MatrixCell::Untried
+            | MatrixCell::Exit
             | MatrixCell::Random { .. } => None,
         }
     }
@@ -193,7 +199,17 @@ fn classify_with(graph: &MapGraph, idx: &ConnIndex<'_>, room: RoomId, dir: Direc
         }
         // No edge at all: the room's own record of what has been TYPED here is the only thing
         // that separates a wall from unexplored ground.
-        return if graph.is_tried(room, dir) { MatrixCell::Probed } else { MatrixCell::Untried };
+        if graph.is_tried(room, dir) {
+            return MatrixCell::Probed;
+        }
+        // A room whose exit scan has finished (SQ-1773) KNOWS: a real exit not walked yet is
+        // `Exit`, and a direction the game refused is a wall, not a maybe. Only a room nobody
+        // has scanned keeps the old `Untried`.
+        return if graph.is_scanned(room) {
+            if graph.is_scan_exit(room, dir) { MatrixCell::Exit } else { MatrixCell::Probed }
+        } else {
+            MatrixCell::Untried
+        };
     };
     if graph.layer_of(dest) != graph.layer_of(room) {
         return MatrixCell::LeavesLayer { dest };
@@ -725,5 +741,39 @@ mod tests {
         // The existing OUTBOUND crossing (2 → 9) must never appear as inbound.
         assert!(edges.iter().all(|&(o, _, d)| o != 2 || d != 9));
         assert!(inbound_border_edges(&g, l).iter().all(|&(o, _, _)| g.layer_of(o) != l));
+    }
+
+    /// SQ-1773: a scanned room KNOWS. A real exit nobody has walked is `Exit`, a direction the
+    /// scan asked and the game refused is a wall (`Probed`), and an unscanned room keeps `Untried`.
+    #[test]
+    fn a_scanned_room_reads_real_exits_and_walls_not_maybes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Elsewhere".into());
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Untried, "unscanned: a maybe");
+        assert_eq!(g.untried(1).len(), 10);
+
+        g.record_scan(1, &[Direction::N, Direction::E, Direction::In], &[Direction::N, Direction::In]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Exit);
+        assert_eq!(classify(&g, 1, Direction::In), MatrixCell::Exit, "in/out are exits too");
+        assert_eq!(classify(&g, 1, Direction::E), MatrixCell::Probed, "refused: a wall");
+        assert_eq!(
+            classify(&g, 1, Direction::S),
+            MatrixCell::Probed,
+            "a scanned room has no maybes left"
+        );
+        assert!(!MatrixCell::Exit.is_frontier(), "a yes is not dimmed like a maybe");
+        assert_eq!(g.untried(1), vec![Direction::N, Direction::In], "unexplored = the real exits");
+        assert_eq!(g.scan_walls(1), vec![Direction::E]);
+
+        // Walking it: the edge wins, and it is no longer unexplored.
+        g.add_edge(1, Direction::N, 2);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::OneWay { dest: 2 });
+        assert_eq!(g.untried(1), vec![Direction::In]);
+
+        // A later visit finds the door open: the wall leaves the list and becomes an exit.
+        g.record_scan(1, &[Direction::E], &[Direction::E]);
+        assert_eq!(classify(&g, 1, Direction::E), MatrixCell::Exit);
+        assert!(g.scan_walls(1).is_empty());
     }
 }

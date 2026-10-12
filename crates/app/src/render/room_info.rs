@@ -74,6 +74,7 @@ fn card_detail(
         }
         C::Probed => ("×", "tried, no way through".to_string()),
         C::Untried => ("·", String::new()),
+        C::Exit => ("»", "exit, not walked yet".to_string()),
         C::Random { .. } => {
             // Every distinct room this direction has actually been seen to land in (SQ-1261),
             // named the same way every other cell here names a destination — falling back to
@@ -333,6 +334,8 @@ fn build_info_rows(
     // The `?` random-exit glyph (SQ-1257) gets the matrix's own `map.matrix.cell:random` selector
     // — not `frontier`, since a random exit is explored, not unexplored ground.
     let random_style = theme.get("map.matrix.cell:random").style;
+    // `»` -- a real exit an exit scan found and nobody has walked (SQ-1773).
+    let exit_style = theme.get("map.matrix.cell:exit").style;
     rows.push(Row::Line("Exits:".to_string(), section_style));
 
     // One entry per line of the card: the twelve travel directions, then the non-compass
@@ -343,6 +346,8 @@ fn build_info_rows(
             let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
             let style = if *glyph == "?" {
                 random_style
+            } else if *glyph == "»" {
+                exit_style
             } else if detail.is_empty() || *glyph == "×" {
                 frontier_style
             } else {

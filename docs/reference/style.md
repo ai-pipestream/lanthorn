@@ -93,6 +93,7 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `map.matrix.cell:path` | Map | Style | `accent` | `bold underline` | |
 | `map.matrix.cell:frontier` | Map | Style | `muted` |  | |
 | `map.matrix.cell:random` | Map | Style | `alert` |  | |
+| `map.matrix.cell:exit` | Map | Style | `accent` |  | |
 | `map.matrix.footnote` | Map | Style | `muted` |  | |
 | `map.edge:oneway` | Map | Style | `map.connector` |  | |
 | `map.edge:asym` | Map | Style | `map.connector` |  | |

@@ -252,6 +252,24 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d(
+        "scan_exits",
+        "true",
+        &[
+            "The first time you stand in a room, ask a silent throwaway copy of the",
+            "game which ways lead out of it, and let the map show the real exits you",
+            "have not walked yet (the \"»\" marks in the matrix and the room card),",
+            "including ones the room description never mentions. Only the direction",
+            "is kept: the map never shows, names or creates the room on the far side",
+            "until you walk there yourself. A way the game refused is asked again on",
+            "a later visit, since a door may have opened. Off, every direction you",
+            "have not typed counts as unexplored, as before.",
+            "",
+            "On by default; it runs your game a few extra turns in private, never",
+            "touches your screen or saves, and waits behind the searches your own",
+            "moves need. Independent of return_probe.",
+        ],
+    ),
+    d(
         "hide_adult_words",
         "true",
         &[

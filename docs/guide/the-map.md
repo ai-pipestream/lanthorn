@@ -190,6 +190,18 @@ found what's over there. It's on by default, and the footprint control on the st
 shows whether it's currently running; toggle it per story with
 `/set-return-probe`.
 
+**Spotting the exits before you walk them.** The first time you stand in a
+room, lanthorn quietly asks that same throwaway copy of your game which ways
+lead out — north, south, up, in, the ship words if the story has them — and
+remembers the ones that work. In the matrix view and the room card those show as
+`»`, a real exit you haven't walked yet, instead of the dim `·` of "maybe";
+directions the game refused read as dead ends. It includes exits the room
+description never mentions, and it never draws, names or even records the room on
+the far side — that appears only when you walk there yourself. A way that was
+refused is asked again on a later visit, since a door may have opened. It runs
+behind everything your own moves need, and `scan_exits = false` in `config.toml`
+(or the Settings screen) turns it off, leaving every untyped direction as a maybe.
+
 **Click the compass, walk the map.** A graphical v6 game paints its own
 compass rose into the frame around the story — *Zork Zero*'s sits in the banner
 overhead — and those spokes are live. Click one and you walk that way, exactly

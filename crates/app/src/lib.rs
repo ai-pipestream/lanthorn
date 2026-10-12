@@ -144,6 +144,7 @@ pub mod random_exit_probe;
 pub mod relocation_probe;
 pub mod chain_probe;
 pub mod return_probe;
+pub mod scan_probe;
 pub mod reveal;
 pub mod roomid;
 pub mod room_menu;

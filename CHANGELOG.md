@@ -30,6 +30,7 @@ while any such tag, or this Unreleased section, still exists.*
 ### Added
 
 - **The map now places rooms reached by `climb tree`, `jump in river` and the like.** When a command that names no direction moves you, the game is quietly asked which direction leads there, and the room snaps into place on the map as Up, East and so on. Moves that no direction reproduces stay unplaced. Rooms you go into or out of (`enter window`, `out`) now line up with the rest of the map when a compass direction also leads there.
+- **The map now shows which exits are real before you walk them.** The first time you stand in a room, the game is quietly asked which directions work, and the map marks those exits (`»` in the matrix and room card) instead of treating every direction you haven't typed as a maybe. It finds exits the room description never mentions, asks again on a later visit about the ways that were refused (a door may have opened), and never shows or names the room on the far side until you walk there. Turn it off with `scan_exits = false`.
 - **Scott Adams games now complete your words as you type.** The game's own verbs and nouns are offered by autocomplete, as they already were for Z-machine and Glulx stories. (Adventure databases store only the first few letters of each word, so where the game's own text names the whole word, `lam` is offered as `lamp`.)
 
 ### Fixed

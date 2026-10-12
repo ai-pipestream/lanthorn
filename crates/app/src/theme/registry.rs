@@ -393,6 +393,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // tunnels being the specimen. Deliberately not `frontier`: this is a random exit is explored,
     // not unexplored ground, so it defaults to `alert` rather than dimmed out of the way like `·`/`×`.
     row("map.matrix.cell:random", Section::Map, Kind::Style, Some("alert"), Delta::EMPTY),
+    // `»` -- a real exit nobody has walked yet (SQ-1773): an exit scan asked the game and the move
+    // worked. Deliberately not `frontier`: that dim dot is a MAYBE, this one is a yes, so it
+    // takes the `accent` role and reads as a way forward instead of being dimmed out of the way.
+    row("map.matrix.cell:exit", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.matrix.footnote", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── Honest asymmetric edges in the DRAWN view (SQ-0666). Both default to the current
     // connector appearance, so nothing changes look until someone styles them.
@@ -844,6 +848,7 @@ mod tests {
         "map.matrix.cell:path",
         "map.matrix.cell:frontier",
         "map.matrix.cell:random",
+        "map.matrix.cell:exit",
         "map.matrix.footnote",
         "map.edge:oneway",
         "map.edge:asym",

@@ -168,6 +168,28 @@ pub struct Room {
     /// most twelve long. Absent from older map files, hence `serde(default)`.
     #[serde(default)]
     pub probed: Vec<Direction>,
+    /// True once an EXIT SCAN has finished for this room (SQ-1773): a silent copy of the game was
+    /// asked every direction from here, so [`Room::scan_exits`] and [`Room::scan_walls`] are
+    /// knowledge rather than silence. Until then the room keeps the old reading of
+    /// [`MapGraph::untried`] ("every direction the player has not typed").
+    ///
+    /// A third record beside `tried` (the player's) and `probed` (the return search's), and for
+    /// the same reason it must never be merged into either: it answers "which ways out does the
+    /// GAME have", which is neither "what has the player typed" nor "what has the return search
+    /// already spent". Absent from older map files, hence `serde(default)`.
+    #[serde(default)]
+    pub scanned: bool,
+    /// Directions the scan found to be real exits into rooms the map does NOT hold (SQ-1773).
+    /// Only the direction is stored -- never the room it reaches, its id or its name: the map is
+    /// a record of what the player has seen, and an exit stub is the whole of what the scan may
+    /// say about the far side. Walking one later is an ordinary first walk and mints the room
+    /// then. (An exit into a room the map DOES hold is not kept here: it became an edge.)
+    #[serde(default)]
+    pub scan_exits: Vec<Direction>,
+    /// Directions the scan asked and the game refused, redone on a later visit (SQ-1773): a door
+    /// may have opened since. Only the room change is read, never the refusal text.
+    #[serde(default)]
+    pub scan_walls: Vec<Direction>,
     /// Compass directions this room's own map data declared a FIXED
     /// destination for, that the player nonetheless left through and arrived
     /// somewhere else (SQ-1257) — Lost Pig's gnome tunnels, where the story's
@@ -760,6 +782,9 @@ impl MapGraph {
                     loc_method: None,
                     tried: Vec::new(),
                     probed: Vec::new(),
+                    scanned: false,
+                    scan_exits: Vec::new(),
+                    scan_walls: Vec::new(),
                     random_exits: Vec::new(),
                     random_destinations: Vec::new(),
                     random_inherited: Vec::new(),
@@ -997,11 +1022,71 @@ impl MapGraph {
         typed || self.conns.iter().any(|c| c.origin == id && c.dir == dir)
     }
 
+    /// The exits not yet explored from `id`.
+    ///
+    /// For a room whose exit scan has finished (SQ-1773) these are the REAL exits the player has
+    /// not walked yet -- including `in`/`out` and the ship words' slots when the game has them,
+    /// and including exits the room description never mentions. For any other room it is every
+    /// compass direction nobody has typed, as it always was.
     pub fn untried(&self, id: RoomId) -> Vec<Direction> {
-        if !self.rooms.contains_key(&id) {
+        let Some(room) = self.rooms.get(&id) else {
             return Vec::new();
+        };
+        if room.scanned {
+            return crate::matrix::MATRIX_DIRS
+                .iter()
+                .copied()
+                .filter(|d| room.scan_exits.contains(d) && !self.is_tried(id, *d))
+                .collect();
         }
         crate::direction::UNTRIED_DIRS.iter().copied().filter(|d| !self.is_tried(id, *d)).collect()
+    }
+
+    /// True once an exit scan has finished for `id` (SQ-1773).
+    pub fn is_scanned(&self, id: RoomId) -> bool {
+        self.rooms.get(&id).is_some_and(|r| r.scanned)
+    }
+
+    /// True when a scan found `dir` out of `id` to be a real exit into a room the map does not
+    /// hold (SQ-1773).
+    pub fn is_scan_exit(&self, id: RoomId, dir: Direction) -> bool {
+        self.rooms.get(&id).is_some_and(|r| r.scan_exits.contains(&dir))
+    }
+
+    /// The directions a scan asked from `id` that the game refused: what a later visit redoes.
+    pub fn scan_walls(&self, id: RoomId) -> Vec<Direction> {
+        self.rooms.get(&id).map(|r| r.scan_walls.clone()).unwrap_or_default()
+    }
+
+    /// Record what an exit scan learned about `id` (SQ-1773) and mark the room scanned.
+    ///
+    /// `asked` is every direction the scan put to the game; `exits` is the subset that led into a
+    /// room the map does not hold. A direction asked and found neither an exit nor an edge (the
+    /// caller records a landing on a known room as a passage BEFORE calling) is a wall, kept for
+    /// the next visit to redo. Asking a direction clears any older wall on it first, so a door
+    /// that opened leaves the wall list. Nothing here touches [`Room::tried`] or
+    /// [`Room::probed`]. Returns whether anything changed; a no-op for an unknown room.
+    pub fn record_scan(&mut self, id: RoomId, asked: &[Direction], exits: &[Direction]) -> bool {
+        let edges: Vec<Direction> =
+            self.conns.iter().filter(|c| c.origin == id).map(|c| c.dir).collect();
+        let Some(r) = self.rooms.get_mut(&id) else { return false };
+        let before = (r.scanned, r.scan_exits.clone(), r.scan_walls.clone());
+        r.scanned = true;
+        for &d in asked {
+            r.scan_walls.retain(|w| *w != d);
+            if exits.contains(&d) {
+                if !r.scan_exits.contains(&d) {
+                    r.scan_exits.push(d);
+                }
+            } else if !edges.contains(&d) && !r.scan_exits.contains(&d) {
+                r.scan_walls.push(d);
+            }
+        }
+        let changed = before != (r.scanned, r.scan_exits.clone(), r.scan_walls.clone());
+        if changed {
+            self.touch_tried();
+        }
+        changed
     }
 
     /// Record that a return probe has tried `dir` out of `id` (SQ-0785). Idempotent.
@@ -2144,6 +2229,9 @@ mod tests {
             loc_method: None,
             tried: Vec::new(),
             probed: Vec::new(),
+            scanned: false,
+            scan_exits: Vec::new(),
+            scan_walls: Vec::new(),
             random_exits: Vec::new(),
             random_destinations: Vec::new(),
             random_inherited: Vec::new(),
@@ -2179,6 +2267,9 @@ mod tests {
             loc_method: None,
             tried: Vec::new(),
             probed: Vec::new(),
+            scanned: false,
+            scan_exits: Vec::new(),
+            scan_walls: Vec::new(),
             random_exits: Vec::new(),
             random_destinations: Vec::new(),
             random_inherited: Vec::new(),

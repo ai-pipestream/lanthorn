@@ -65,6 +65,13 @@ pub fn poll(state: &mut AppState, mapper: &mut Mapper, bg_tidy_counter: &mut u32
                 super::turn::schedule_map_maintenance(state, mapper, false, true, bg_tidy_counter);
                 changed = true;
             }
+        } else if crate::scan_probe::owns(state, answer.token) {
+            // SQ-1773: a room's exits were just learned -- verified passages into known rooms
+            // are new edges, so the same layout and redraw as any other probe's edge.
+            if crate::scan_probe::deliver(state, mapper, &answer) {
+                super::turn::schedule_map_maintenance(state, mapper, false, true, bg_tidy_counter);
+                changed = true;
+            }
         } else if crate::return_probe::owns(state, answer.token)
             && crate::return_probe::deliver(state, mapper, &answer).is_some()
         {
@@ -92,5 +99,8 @@ pub fn poll(state: &mut AppState, mapper: &mut Mapper, bg_tidy_counter: &mut u32
     crate::chain_probe::pump_chain_replay(state);
     crate::relocation_probe::pump_relocation_search(state);
     crate::return_probe::pump_return_search(state);
+    // Last, and only when none of the above has anything to ask: an exit scan is the lowest
+    // priority user of the shadow (SQ-1773).
+    crate::scan_probe::pump_exit_scan(state, mapper);
     changed
 }

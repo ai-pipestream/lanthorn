@@ -671,7 +671,8 @@ hidden however empty the column looks.
 | `↩`    | self-loop — this direction leads back into this very room |
 | `⇱out` | leaves the layer; the destination is footnoted below the table |
 | `×`    | tried, and there is no path that way |
-| `·`    | untried — the exploration frontier |
+| `·`    | untried — the exploration frontier (a room nobody has scanned) |
+| `»`    | a real exit nobody has walked yet: an exit scan found it (SQ-1773; `scan_exits`) |
 
 A move that got you *killed* leaves no `×` behind. Dying says nothing about whether
 the passage is open, so the attempt is taken back and the cell stays `·`, still on

@@ -176,6 +176,22 @@ mod tests {
         );
     }
 
+    /// SQ-1773: what an exit scan learned must survive the map file, or every restore would
+    /// forget which exits are real and go back to listing every direction as a maybe.
+    #[test]
+    fn round_trips_exit_scan_records() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.graph.record_scan(1, &[Direction::N, Direction::E], &[Direction::N]);
+
+        let m2 = from_json(&to_json(&m)).unwrap();
+        assert!(m2.graph.is_scanned(1));
+        assert!(m2.graph.is_scan_exit(1, Direction::N));
+        assert_eq!(m2.graph.scan_walls(1), vec![Direction::E]);
+        assert_eq!(m2.graph.untried(1), vec![Direction::N]);
+        assert!(m2.graph.room(1).unwrap().tried.is_empty(), "and it never became the player's");
+    }
+
     /// A map file saved before SQ-1257 has no `random_exits` field at all; it must load as an
     /// empty list rather than fail to parse.
     #[test]
