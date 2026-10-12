@@ -56,7 +56,11 @@ that is what XDG asks for, and a user who wants one folder keeps (or creates)
    anything less (an empty `saves/`) is ignored so it cannot hide the platform
    folders' settings (SQ-1776). Nothing is migrated on its own.
    **When the platform folders hold real content too**, `UserDirs::conflict`
-   (public, so a host can ask its own way) reports both sets. The TUI asks in
+   (public, so a host can ask its own way) reports both sets, and
+   `user_dir_conflict::rename_plan(&conflict, keep, date)` / `apply_rename_plan`
+   (public, the same two the TUI prompt calls) give it the rename step: the
+   `(from, to)` list for the set not kept, then the renames with per-move
+   failures reported and nothing deleted or overwritten. The TUI asks in
    the plain terminal before the config is loaded (`user_dir_conflict.rs`): both
    sets with their `config.toml` mtime and save-file count, then an offer to
    rename the other set to `<name>.unused-YYYY-MM-DD` (`-2`, `-3` on a name

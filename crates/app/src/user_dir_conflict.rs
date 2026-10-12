@@ -84,15 +84,69 @@ fn unused_name(from: &Path, date: &str) -> PathBuf {
     to
 }
 
-/// What renaming `set` would do, as `(from, to)` pairs.
-fn rename_plan(set: &Summary, single: bool, date: &str) -> Vec<(PathBuf, PathBuf)> {
-    folders(set, single)
+/// What renaming the set NOT kept would do: the folders to move out of the way,
+/// each paired with its `<name>.unused-<date>` destination. Built by
+/// [`rename_plan`], executed by [`apply_rename_plan`]. Empty when the other set
+/// has no folders on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RenamePlan {
+    /// `(from, to)` for each folder, outermost folders only, in a stable order.
+    pub moves: Vec<(PathBuf, PathBuf)>,
+}
+
+/// The renames that would settle `conflict` once the host has chosen `keep`.
+///
+/// For a host that asks its own way: show `plan.moves` to the person, and call
+/// [`apply_rename_plan`] if they agree. The plan covers the set that is NOT
+/// `keep` (the legacy folder when keeping the platform set; the platform
+/// config, data, cache and logs folders when keeping legacy). Folders that do
+/// not exist are skipped, and a destination that is already taken gets `-2`,
+/// `-3`... appended. `date` is `YYYY-MM-DD` (the host supplies it, so tests
+/// and hosts without a clock stay deterministic). Reads the filesystem; changes
+/// nothing.
+pub fn rename_plan(conflict: &Conflict, keep: Choice, date: &str) -> RenamePlan {
+    let (other, single) = match keep {
+        Choice::Legacy => (&conflict.platform, false),
+        Choice::Platform => (&conflict.legacy, true),
+    };
+    let moves = folders(other, single)
         .into_iter()
         .map(|f| {
             let t = unused_name(&f, date);
             (f, t)
         })
-        .collect()
+        .collect();
+    RenamePlan { moves }
+}
+
+/// What [`apply_rename_plan`] did, move by move.
+#[derive(Debug, Default)]
+pub struct RenameOutcome {
+    /// The `(from, to)` moves that succeeded.
+    pub renamed: Vec<(PathBuf, PathBuf)>,
+    /// The moves that failed, with the reason; those folders were left in place.
+    pub failed: Vec<(PathBuf, PathBuf, std::io::Error)>,
+}
+
+/// Perform `plan` with `std::fs::rename`, one move at a time. A failed move
+/// is recorded in [`RenameOutcome::failed`] and does not stop the others.
+/// Nothing is ever deleted or overwritten: a destination that appeared since
+/// the plan was made makes that move fail rather than replace it (a rename onto
+/// an existing directory fails, and an existing file is checked for first).
+pub fn apply_rename_plan(plan: &RenamePlan) -> RenameOutcome {
+    let mut out = RenameOutcome::default();
+    for (from, to) in &plan.moves {
+        let res = if to.symlink_metadata().is_ok() {
+            Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "destination already exists"))
+        } else {
+            std::fs::rename(from, to)
+        };
+        match res {
+            Ok(()) => out.renamed.push((from.clone(), to.clone())),
+            Err(e) => out.failed.push((from.clone(), to.clone(), e)),
+        }
+    }
+    out
 }
 
 /// Ask the person (over `input`/`out`) or, when not `interactive`, take the
@@ -139,16 +193,12 @@ pub fn resolve(
         let _ = writeln!(out, "\nNo answer; using the standard platform folders for this launch and nothing was changed.");
         return Decision { choice: Choice::Platform, renamed: Vec::new() };
     };
-    let (other, other_single) = match choice {
-        Choice::Legacy => (&conflict.platform, false),
-        Choice::Platform => (&conflict.legacy, true),
-    };
-    let plan = rename_plan(other, other_single, date);
-    if plan.is_empty() {
+    let plan = rename_plan(conflict, choice, date);
+    if plan.moves.is_empty() {
         return Decision { choice, renamed: Vec::new() };
     }
     let _ = writeln!(out, "\nTo stop this question coming back, the other set can be renamed (nothing is deleted):");
-    for (from, to) in &plan {
+    for (from, to) in &plan.moves {
         let _ = writeln!(out, "  {} -> {}", from.display(), to.display());
     }
     let _ = write!(out, "Rename it? [y/N] ");
@@ -159,14 +209,9 @@ pub fn resolve(
         let _ = writeln!(out, "Not renamed; using your choice for this launch only. You will be asked again next time.");
         return Decision { choice, renamed: Vec::new() };
     }
-    let mut renamed = Vec::new();
-    for (from, to) in plan {
-        match std::fs::rename(&from, &to) {
-            Ok(()) => renamed.push((from, to)),
-            Err(e) => {
-                let _ = writeln!(err, "lanthorn: could not rename {}: {e}; left in place", from.display());
-            }
-        }
+    let RenameOutcome { renamed, failed } = apply_rename_plan(&plan);
+    for (from, _, e) in &failed {
+        let _ = writeln!(err, "lanthorn: could not rename {}: {e}; left in place", from.display());
     }
     for (from, to) in &renamed {
         let _ = writeln!(out, "Renamed {} -> {}", from.display(), to.display());
@@ -296,5 +341,60 @@ mod tests {
         assert!(e.contains(&c.platform.dirs.config().display().to_string()), "{e}");
         assert!(e.contains("--migrate-user-dir"), "{e}");
         assert!(home.join(".lanthorn").exists(), "nothing renamed");
+    }
+
+    #[test]
+    fn plan_keeping_legacy_covers_platform_folders_and_skips_missing() {
+        let (home, i) = both("plan-keep-legacy");
+        let c = UserDirs::conflict(&i).unwrap();
+        let plan = rename_plan(&c, Choice::Legacy, "2026-10-12");
+        assert_eq!(
+            plan.moves,
+            vec![
+                (home.join(".config/lanthorn"), home.join(".config/lanthorn.unused-2026-10-12")),
+                (home.join(".local/share/lanthorn"), home.join(".local/share/lanthorn.unused-2026-10-12")),
+            ]
+        );
+        assert!(home.join(".config/lanthorn").exists(), "planning changes nothing");
+    }
+
+    #[test]
+    fn plan_keeping_platform_covers_legacy_with_collision_suffix() {
+        let (home, i) = both("plan-keep-platform");
+        fs::create_dir_all(home.join(".lanthorn.unused-2026-10-12")).unwrap();
+        let c = UserDirs::conflict(&i).unwrap();
+        let plan = rename_plan(&c, Choice::Platform, "2026-10-12");
+        assert_eq!(plan.moves, vec![(home.join(LEGACY_DIR), home.join(".lanthorn.unused-2026-10-12-2"))]);
+    }
+
+    #[test]
+    fn apply_moves_folders_and_deletes_nothing() {
+        let (home, i) = both("plan-apply");
+        let c = UserDirs::conflict(&i).unwrap();
+        let plan = rename_plan(&c, Choice::Platform, "2026-10-12");
+        let out = apply_rename_plan(&plan);
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        assert_eq!(out.renamed, plan.moves);
+        assert!(!home.join(".lanthorn").exists());
+        assert!(home.join(".lanthorn.unused-2026-10-12/saves/g/a.lanthorn").exists());
+    }
+
+    #[test]
+    fn apply_reports_failures_instead_of_panicking_or_overwriting() {
+        let home = scratch_dir("plan-apply-fail");
+        fs::create_dir_all(home.join("real")).unwrap();
+        fs::write(home.join("taken"), "keep me").unwrap();
+        let plan = RenamePlan {
+            moves: vec![
+                (home.join("vanished"), home.join("vanished.unused")),
+                (home.join("real"), home.join("missing-parent").join("real.unused")),
+                (home.join("real"), home.join("taken")),
+                (home.join("real"), home.join("real.unused")),
+            ],
+        };
+        let out = apply_rename_plan(&plan);
+        assert_eq!(out.failed.len(), 3, "{:?}", out.failed);
+        assert_eq!(out.renamed, vec![(home.join("real"), home.join("real.unused"))]);
+        assert_eq!(fs::read_to_string(home.join("taken")).unwrap(), "keep me");
     }
 }
