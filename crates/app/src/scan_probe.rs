@@ -29,9 +29,11 @@
 //! **The `look` control.** The first command of the first question is `look`, from the same
 //! state. If it does not leave the shadow in the room being scanned, the moment is unstable (a
 //! timed event is carrying the player off whatever they type, as in [`crate::relocation_probe`]),
-//! or the engine cannot say where the shadow is at all -- either way every direction would be
-//! "answered" by something other than the direction. **Nothing is recorded for the scan**, not
-//! even a wall, so the room stays unscanned and is simply tried again.
+//! every direction would be "answered" by something other than the direction. **Nothing is
+//! recorded for the scan**, not even a wall, so the room stays unscanned and is simply tried
+//! again. Only a `look` that PROVABLY lands in another room (or quits, escapes, dies) rejects:
+//! an unknown location is accepted, because the shadow restores with a blank status line
+//! (SQ-0785) and a v4+ story that repaints only changed fields reports no room after `look`.
 //!
 //! **The confirm replay.** Every word that landed somewhere is replayed once more, alone, from
 //! the same state, and must land in the same room. A random exit that fires on one restore would
@@ -380,9 +382,10 @@ pub fn deliver(state: &mut AppState, mapper: &mut Mapper, answer: &crate::probe:
         return false; // the room is gone: the map was rewound
     }
     if controls == 1 {
-        // The control must keep the shadow where the player is. Anything else -- a different
-        // room, or no room at all -- means the answers below would not be about the directions.
-        let stayed = run.steps[0].location == Some(scan.room)
+        // The control is rejected only when `look` provably lands elsewhere (or the run ended).
+        // An unknown location is stable: the shadow restores with a blank status line and some
+        // v4+ stories repaint only the fields that changed, so `look` reports no room at all.
+        let stayed = run.steps[0].location.is_none_or(|l| l == scan.room)
             && !run.steps[0].quit
             && !run.steps[0].escaped
             && !run.steps[0].died;
@@ -551,14 +554,22 @@ mod tests {
     /// about the direction. Nothing is recorded -- not even a wall -- and the scan ends.
     #[test]
     fn the_look_control_rejects_a_moment_that_is_not_stable() {
-        for look_at in [Some(2), None] {
-            let mut state = state_scanning();
-            let mut m = map(true);
-            assert!(!deliver(&mut state, &mut m, &test_answer(7, wide(look_at, 2, false))));
-            assert!(state.scan_search.is_none(), "the scan is over: {look_at:?}");
-            assert!(!m.graph.is_scanned(1), "and the room is not marked scanned: {look_at:?}");
-            assert!(m.graph.scan_walls(1).is_empty(), "no walls either: {look_at:?}");
-        }
+        let mut state = state_scanning();
+        let mut m = map(true);
+        assert!(!deliver(&mut state, &mut m, &test_answer(7, wide(Some(2), 2, false))));
+        assert!(state.scan_search.is_none(), "the scan is over");
+        assert!(!m.graph.is_scanned(1), "and the room is not marked scanned");
+        assert!(m.graph.scan_walls(1).is_empty(), "no walls either");
+    }
+
+    /// An unknown location (blank status line, SQ-0785) is not a provable move: the scan goes on.
+    #[test]
+    fn a_look_that_reports_no_location_is_accepted_as_stable() {
+        let mut state = state_scanning();
+        let mut m = map(false);
+        assert!(!deliver(&mut state, &mut m, &test_answer(7, wide(None, 2, false))));
+        let scan = state.scan_search.as_ref().expect("still scanning");
+        assert_eq!(scan.commands(), vec!["up".to_string()]);
     }
 
     /// Falsifier for the test above: the same answer with a `look` that stays goes on to the

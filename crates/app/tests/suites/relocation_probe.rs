@@ -70,7 +70,11 @@ impl Play {
     }
 
     fn zork1() -> Option<Play> {
-        let bytes = story("zork1-r88-s840726.z3")?;
+        Play::zork1_file("zork1-r88-s840726.z3")
+    }
+
+    fn zork1_file(name: &str) -> Option<Play> {
+        let bytes = story(name)?;
         let mut s = app::session::GameSession::new_with_trace(
             bytes.clone(),
             true,
@@ -208,6 +212,24 @@ fn zork1_climbing_the_tree_is_up_and_climbing_down_is_down() {
         "down: {}",
         p.dump()
     );
+    assert_eq!(p.unlabelled(), 0, "{}", p.dump());
+}
+
+/// The same on the Version 5 release (r52), whose shadow `look` reports no location: the control
+/// must not read an unknown location as a landing in the destination.
+///
+/// (Fixture: `zork1-invclues-r52-s871125.z5`; `look`, `north`, `north`, `climb tree`.)
+#[test]
+fn zork1_r52_climbing_the_tree_is_still_placed_up() {
+    let Some(mut p) = Play::zork1_file("zork1-invclues-r52-s871125.z5") else { return };
+    p.turn("north");
+    p.turn("north");
+    let path = p.here();
+    assert_eq!(p.name(path), "Forest Path", "{}", p.dump());
+    p.turn("climb tree");
+    let tree = p.here();
+    assert_eq!(p.name(tree), "Up a Tree");
+    assert_eq!(p.edge(path, Direction::Up), Some(tree), "up: {}", p.dump());
     assert_eq!(p.unlabelled(), 0, "{}", p.dump());
 }
 

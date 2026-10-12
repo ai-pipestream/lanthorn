@@ -58,8 +58,14 @@ fn zork_session(bytes: &[u8]) -> app::session::GameSession {
         None,
         Some((25, 80)),
     )
-    .expect("zork1-r88-s840726.z3 boots without a ZError");
+    .expect("the story boots without a ZError");
     s.set_strip_prompt(false);
+    // A story that opens on a `[Please press SPACE to begin.]` gate (Curses) needs a KEY.
+    let mut keys = 0;
+    while s.pending_input() == app::session::InputKind::Char && keys < 12 {
+        let _ = s.submit_char(b' ');
+        keys += 1;
+    }
     s
 }
 
@@ -73,7 +79,12 @@ struct Play {
 
 impl Play {
     fn zork1(scan: bool) -> Option<Play> {
-        let bytes = story(ZORK1)?;
+        Play::zmachine(ZORK1, scan)
+    }
+
+    /// Any Z-machine story, booted and `look`ed at.
+    fn zmachine(name: &str, scan: bool) -> Option<Play> {
+        let bytes = story(name)?;
         let mut state = AppState::default();
         state.config.scan_exits = scan;
         state.probe.arm(recipe(&bytes));
@@ -194,6 +205,51 @@ fn zork1_west_of_house_exits_are_what_the_game_allows() {
     }
     assert_eq!(classify(&p.mapper.graph, here, Direction::E), MatrixCell::Probed);
     eprintln!("West of House exits: {truth:?}");
+}
+
+const ZORK1_R52: &str = "zork1-invclues-r52-s871125.z5";
+const CURSES: &str = "curses.z5";
+
+/// Scanned on arrival, and equal to a fresh game typing each compass word, after `moves`.
+fn assert_scan_matches_oracle(name: &str, moves: &[&str]) -> Option<(Play, Vec<Direction>)> {
+    let bytes = story(name)?;
+    let mut p = Play::zmachine(name, true)?;
+    for m in moves {
+        p.turn(m);
+    }
+    let here = p.here();
+    assert!(p.mapper.graph.is_scanned(here), "{name}: the scan finished in {}", p.name(here));
+    let truth = oracle_exits(&bytes, moves);
+    assert!(!truth.is_empty(), "{name}: the oracle found exits");
+    // An exit into a room the map holds is a recorded passage, not a stub.
+    let found: Vec<Direction> =
+        MATRIX_DIRS.iter().copied().filter(|d| p.stubs(here).contains(d) || p.edge(here, *d).is_some()).collect();
+    assert_eq!(found, truth, "{name} {moves:?}: scan vs. a fresh game typing each word");
+    eprintln!("{name} {moves:?}: {} exits {truth:?}", p.name(here));
+    Some((p, truth))
+}
+
+/// Version 5 Zork I (r52) repaints only the changed status-line fields, so the shadow's `look`
+/// reports no location; the scan must still complete (and not record the boarded door).
+///
+/// (Fixture: `zork1-invclues-r52-s871125.z5`; `look`, then `north` to North of House.)
+#[test]
+fn zork1_r52_scans_rooms_although_the_shadow_reports_no_location() {
+    let Some((p, truth)) = assert_scan_matches_oracle(ZORK1_R52, &[]) else { return };
+    assert_eq!(p.name(p.here()), "West of House");
+    assert!(!truth.contains(&Direction::E), "the boarded door is no exit");
+    assert!(!p.mapper.graph.untried(p.here()).contains(&Direction::E));
+    let Some((p, _)) = assert_scan_matches_oracle(ZORK1_R52, &["north"]) else { return };
+    assert_eq!(p.name(p.here()), "North of House");
+}
+
+/// The same on Curses (v5), the other story that repaints only changed status fields.
+///
+/// (Fixture: `curses.z5`; the opening `look` only -- the first room.)
+#[test]
+fn curses_scans_its_first_room() {
+    let Some((p, _)) = assert_scan_matches_oracle(CURSES, &[]) else { return };
+    eprintln!("Curses first room: {}", p.name(p.here()));
 }
 
 /// The no-reveal rule: an exit into a room the map has not seen records only the direction. No

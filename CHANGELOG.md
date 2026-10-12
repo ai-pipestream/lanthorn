@@ -29,6 +29,9 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **The map now finds a room's exits in more games.** Some stories, such as the
+  Version 5 releases of Zork I and Curses, left rooms unmarked; their exits
+  (`»`) now appear on arrival like everywhere else.
 - **Restoring a save in a narrower window no longer breaks Zork I's score and
   moves.** After a few turns the status line used to wrap onto a second row or
   scramble the room name; Lanthorn now checks whether the game re-lays its status
