@@ -19,24 +19,6 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
-
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
-
-### Fixed
-
-- **The map now finds a room's exits in more games.** Some stories, such as the
-  Version 5 releases of Zork I and Curses, left rooms unmarked; their exits
-  (`»`) now appear on arrival like everywhere else.
-- **Restoring a save in a narrower window no longer breaks Zork I's score and
-  moves.** After a few turns the status line used to wrap onto a second row or
-  scramble the room name; Lanthorn now checks whether the game re-lays its status
-  line out for the new width and only keeps the saved width when it does not.
-
 ## v0.9.5 — 2026-10-12
 
 ### Highlights
@@ -58,6 +40,10 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **Restoring a save in a narrower window no longer breaks Zork I's score and
+  moves.** After a few turns the status line used to wrap onto a second row or
+  scramble the room name; lanthorn now checks whether the game re-lays its status
+  line out for the new width and only keeps the saved width when it does not.
 - **An empty `~/.lanthorn` folder no longer hides your settings.** A leftover `~/.lanthorn` with nothing real in it used to make lanthorn ignore the settings and saves in its standard folders, so everything looked reset. It is now ignored unless it holds a config, saves or other players. When both locations hold your files, lanthorn asks which to use before it starts and offers to rename the other (nothing is deleted); in a script or container it uses the standard folders and says so on stderr.
 - **Typing several moves on one line now maps each step.** `north then east` used to draw one passage north that does not exist; the map now follows the rooms you actually walked through, and a step the game refuses records nothing.
 - **Rewinding to an earlier turn now shows that turn's status line straight away.** On Z-machine games with a status bar, going back used to leave the bar blank until you typed your next command.
