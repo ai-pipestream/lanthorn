@@ -352,3 +352,178 @@ fn a_restored_status_row_heals_on_the_next_repaint() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SQ-1778: the floor must survive the game's NEXT turns, not only the first.
+//
+// Zork 1 r52 reads header byte $21 every turn yet draws Score/Moves at the
+// columns it computed once (52 and 65). SQ-1604 released the floor on that read,
+// so after the first post-restore turn the poll narrowed the header, the
+// out-of-range `set_cursor`s were dropped and the bar wrapped (at 60) or garbled
+// the room name (at 40). Every case below therefore plays THREE turns, with the
+// pane re-declared before each as the poller does.
+
+/// The bar must be the saved 80-column layout, intact, after every turn.
+fn assert_bar_intact(s: &GameSession, ctx: &str) {
+    let row = grid_row(s);
+    let name_region = &row[..row.len().min(40)];
+    assert!(
+        !name_region.chars().any(|c| c.is_ascii_digit()),
+        "no field digit on the room name ({ctx}): {row:?}"
+    );
+    assert!(
+        row.starts_with(' ') && row.trim_start().chars().next().is_some_and(|c| c.is_alphabetic()),
+        "the room name leads the bar ({ctx}): {row:?}"
+    );
+    assert_eq!(row.find("Score:"), OPENING_BAR_80.find("Score:"), "Score column ({ctx}): {row:?}");
+    assert_eq!(row.find("Moves:"), OPENING_BAR_80.find("Moves:"), "Moves column ({ctx}): {row:?}");
+    let moves_at = row.find("Moves:").unwrap();
+    assert!(row[moves_at..].chars().any(|c| c.is_ascii_digit()), "move count printed ({ctx}): {row:?}");
+    assert_eq!(s.machine.screen.upper.rows, 1, "the status line is one row ({ctx})");
+}
+
+const TURNS: [&str; 3] = ["north", "east", "south"];
+
+#[test]
+fn a_restored_save_state_keeps_the_bar_intact_for_several_turns() {
+    for honor in [true, false] {
+        let Some((save, screen)) = capture_save_at(honor, 80) else {
+            eprintln!("SKIP: gitignored story missing");
+            return;
+        };
+        for pane_w in [60u16, 40] {
+            let mut narrow = boot(honor, (24, pane_w)).expect("story present");
+            Engine::restore_state(&mut narrow, &save).expect("the Save State restores");
+            app::session::restore_screen(&mut narrow, screen.clone());
+            for (i, cmd) in TURNS.iter().enumerate() {
+                let (bar, _) = play_and_render(&mut narrow, honor, pane_w, cmd);
+                let ctx = format!("save state, honor={honor}, pane={pane_w}, turn {} {cmd:?}, rendered {bar:?}", i + 1);
+                assert_bar_intact(&narrow, &ctx);
+            }
+        }
+    }
+}
+
+/// The measurement the whole rule rests on: Zork 1 r52 does NOT re-lay its bar
+/// out when the header width drops mid-game. Lowered to 60, "Moves:" (column 65)
+/// is dropped; lowered to 40, the digits land on the room name. (The fields are
+/// computed from the width once, at boot.)
+#[test]
+fn r52_keeps_its_boot_columns_when_the_header_width_is_lowered_mid_game() {
+    let Some(mut s) = boot(true, (24, 80)) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let _ = s.submit("look");
+    Engine::set_screen_dims(&mut s, 24, 60);
+    let _ = s.submit("north");
+    let row = grid_row(&s);
+    assert_eq!(row.find("Score:"), OPENING_BAR_80.find("Score:"), "Score stays at its boot column: {row:?}");
+    assert!(!row.contains("Moves:"), "Moves (column 65) is past a 60-wide header and is dropped: {row:?}");
+    Engine::set_screen_dims(&mut s, 24, 40);
+    let _ = s.submit("south");
+    let row = grid_row(&s);
+    assert!(row[..20].chars().any(|c| c.is_ascii_digit()), "at 40 the digits land on the room name: {row:?}");
+}
+
+/// The same through the game's own Quetzal path (`.qzl`). Here r52 needs no
+/// protection: restoring through its own RESTORE verb makes the game recompute
+/// its field columns from the width it is now told (measured: the tail of the
+/// restore already redraws a compact "0/1" bar at $21 = 60), so the bar is
+/// intact at every width without any floor. What matters is that the shadow
+/// check sees that, releases the guessed floor, and the pane width is what the
+/// game is declared for the following turns. (Fails on neither side of
+/// SQ-1778 for r52; it pins that the guess-80 floor does not clip the game.)
+#[test]
+fn a_restored_qzl_keeps_the_bar_intact_for_several_turns() {
+    for honor in [true, false] {
+        let Some(mut wide) = boot(honor, (24, 80)) else {
+            eprintln!("SKIP: gitignored story missing");
+            return;
+        };
+        let _ = play_and_render(&mut wide, honor, 80, "look");
+        let r = wide.submit("save");
+        assert_eq!(r.pending_io, Some(app::session::PendingIo::Save), "Zork 1 reaches @save on `save`");
+        let blob = wide.machine.save_quetzal();
+        for pane_w in [60u16, 40] {
+            let mut narrow = boot(honor, (24, pane_w)).expect("story present");
+            Engine::restore_game_save(&mut narrow, &blob).expect("the .qzl restores");
+            app::engine_helpers::note_bare_quetzal_width(&mut narrow);
+            assert_eq!(narrow.boot_screen_cols, 80, "a bare Quetzal guesses 80 until the story is asked");
+            for (i, cmd) in TURNS.iter().enumerate() {
+                let _ = play_and_render(&mut narrow, honor, pane_w, cmd);
+                let row = grid_row(&narrow);
+                let ctx = format!("qzl, honor={honor}, pane={pane_w}, turn {} {cmd:?}, row {row:?}", i + 1);
+                let name_end = row.trim_end().len().min(30);
+                assert!(
+                    row.trim_start().chars().next().is_some_and(|c| c.is_alphabetic()),
+                    "the room name leads the bar ({ctx})"
+                );
+                assert!(
+                    !row[..name_end.min(20)].chars().any(|c| c.is_ascii_digit()),
+                    "no field digit on the room name ({ctx})"
+                );
+                assert!(
+                    row[20..].chars().any(|c| c.is_ascii_digit()),
+                    "the score/moves digits are on the bar ({ctx})"
+                );
+                assert_eq!(narrow.machine.screen.upper.rows, 1, "one status row ({ctx})");
+            }
+            assert_eq!(
+                narrow.boot_screen_cols, pane_w,
+                "the shadow check released the guessed floor: r52 re-lays out on a Quetzal restore (pane={pane_w})"
+            );
+        }
+    }
+}
+
+/// A Save State taken during an intro (title card waiting on a key) and restored
+/// into a 60-column session: the saved width is kept through the intro, and the
+/// width question is settled only once play starts (a line read with the status
+/// line drawn). Curses and A Mind Forever Voyaging both wait on a key with text
+/// already in the upper window and then reach a line prompt.
+#[test]
+fn a_save_state_taken_during_an_intro_holds_then_settles_once_play_starts() {
+    for name in ["curses.z5", "amfv-r77-s850814.z4"] {
+        let path = stories_dir().join(name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: {name} missing");
+            continue;
+        };
+        let new_at = |cols: u16| {
+            GameSession::new_with_trace(bytes.clone(), true, false, None, false, vec![], None, None, Some((24, cols)))
+                .expect("story boots")
+        };
+        let wide = new_at(80);
+        assert_eq!(wide.pending_input(), InputKind::Char, "{name}: boots to a key wait (the intro)");
+        let save = Engine::save_state(&wide);
+        let screen = wide.machine.screen.clone();
+
+        let mut narrow = new_at(60);
+        Engine::restore_state(&mut narrow, &save).expect("the Save State restores");
+        app::session::restore_screen(&mut narrow, screen);
+        assert_eq!(narrow.boot_screen_cols, 80, "{name}: the saved width is kept on restore");
+        assert_eq!(narrow.pending_input(), InputKind::Char, "{name}: restored into the intro");
+
+        // Through the intro: still held, whatever the keys.
+        let mut keys = 0;
+        while narrow.pending_input() == InputKind::Char && keys < 10 {
+            narrow.submit_char(32);
+            keys += 1;
+            assert_eq!(narrow.boot_screen_cols, 80, "{name}: the intro does not settle the floor");
+        }
+        assert_eq!(narrow.pending_input(), InputKind::Line, "{name}: play has started");
+        assert_eq!(narrow.boot_screen_cols, 80, "{name}: nothing settles before the first command");
+
+        // Play: the first line read with a drawn status line is the check.
+        let r = narrow.submit("look");
+        assert!(r.fault.is_none(), "{name}: faulted: {:?}", r.fault);
+        let r = narrow.submit("look");
+        assert!(r.fault.is_none(), "{name}: faulted: {:?}", r.fault);
+        let settled = narrow.boot_screen_cols;
+        // Measured: Curses re-lays its line out for the width it is told (released
+        // to the pane), A Mind Forever Voyaging keeps the columns it baked (kept).
+        let want = if name == "curses.z5" { 60 } else { 80 };
+        assert_eq!(settled, want, "{name}: the verdict once play has started");
+    }
+}

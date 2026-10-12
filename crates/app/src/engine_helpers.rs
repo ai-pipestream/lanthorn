@@ -277,7 +277,7 @@ pub fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Re
 /// first would pin a genuinely 60-column save to 80.
 pub fn note_bare_quetzal_width(session: &mut dyn Engine) {
     if let Some(z) = zvm_session_opt_mut(session) {
-        z.note_restored_screen_cols(zvm::screen::DEFAULT_SCREEN_COLS as u16);
+        z.note_guessed_screen_cols(zvm::screen::DEFAULT_SCREEN_COLS as u16);
     }
 }
 

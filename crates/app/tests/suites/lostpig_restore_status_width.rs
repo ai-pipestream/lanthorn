@@ -5,17 +5,15 @@
 //! the pin protects nothing once the story has repainted once more.
 //!
 //! Zork 1 r52 (`zork1_restore_status_width.rs`) is the specimen that pin must
-//! never let go of: it computes its field columns ONCE at boot and never
-//! reads `$21` again, so nothing ever tells the host it is safe to release
-//! the floor, and it must stay raised for the rest of the session.
+//! never let go of: it computes its field columns ONCE at boot and draws there
+//! forever, even though it reads `$21` every turn (SQ-1778: a `$21` read is no
+//! evidence), so the floor must stay raised for the rest of the session.
 //!
 //! Lost Pig (`LostPig.z8`, Inform 7) is the other specimen: it lays its
-//! status line out fresh from `$21` every turn, so the floor's protection is
-//! needed only until the very next turn — and this suite is where that
-//! release is pinned. `zvm::cpu::exec::Machine::take_header_width_read`
-//! (SQ-1604) is the new instrumentation that tells the two apart: it fires
-//! only from the game's own `loadb`/`loadw` of header byte `$21`, never from
-//! the interpreter's internal reads.
+//! status line out fresh from the width it is told, so the floor's protection
+//! is needed only until the first command, when `GameSession::settle_width_floor`
+//! replays it on a throwaway copy at the pane width, sees every upper-window
+//! cursor move fit, and releases the floor.
 //!
 //! **Falsified**: this suite's `a_restore_floor_releases_once_the_story_reads_21_itself`
 //! reproduces the permanently-clipped-width symptom against the pre-fix code
@@ -98,7 +96,7 @@ fn a_restore_floor_releases_once_the_story_reads_21_itself() {
 
     // Perturb: play the turn(s) after the restore — CLAUDE.md's convention,
     // and also the mechanism itself: a restore never executes Z-code, so
-    // `take_header_width_read` cannot have fired yet, and the release can
+    // the shadow check cannot have run yet, and the release can
     // only happen once the story's own bytecode runs and re-reads $21.
     for cmd in ["", "look"] {
         let r = narrow.submit(cmd);

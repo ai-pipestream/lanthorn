@@ -1109,24 +1109,39 @@ pub struct GameSession {
     ///
     /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
     pub boot_screen_cols: u16,
-    /// What [`boot_screen_cols`](Self::boot_screen_cols) was immediately BEFORE
-    /// the most recent [`note_restored_screen_cols`](Self::note_restored_screen_cols)
-    /// raised it, so the raise can be given back once it is safe to (SQ-1604).
+    /// While `Some`, a restore has raised [`boot_screen_cols`](Self::boot_screen_cols)
+    /// above the pane this session booted at and nobody yet knows whether the
+    /// running story needs that floor. The value is the pane width to give back
+    /// if it does not (SQ-1604, reworked SQ-1778).
     ///
     /// The SQ-0681 floor is a blunt protection: it holds the restored save's
-    /// width for the rest of the session even for a story that recomputes its
-    /// status-line layout from header byte $21 every turn, for which the floor
-    /// protects nothing after the first repaint. Set only when a restore is
-    /// about to WIDEN the floor (`cols > boot_screen_cols`, so a restore into a
-    /// narrower save that never raises anything leaves this `None` and never
-    /// reverts a floor the story's own boot established). `drain_turn` clears it
-    /// back to `None` the first time [`GameSession::take_header_width_read`]
-    /// reports the game itself read `$21` — proof the running story does not
-    /// need the floor's protection any more, because it lays its own fields out
-    /// fresh every turn rather than baking them in once at boot the way Zork 1
-    /// r52 does (SQ-0681's specimen, which never reads `$21` again and must keep
-    /// this pin forever).
+    /// width for the rest of the session. Right for Zork 1 r52, which computes
+    /// its status columns once (52 and 65) and keeps drawing there; wrong for
+    /// Lost Pig, which lays the line out afresh from the width it is told.
+    /// A READ of header byte $21 does not tell them apart (r52 reads it every
+    /// turn and still draws at fixed columns), so
+    /// [`settle_width_floor`](Self::settle_width_floor) asks the story directly:
+    /// at the first line read with text in the upper window it replays the
+    /// player's own command on a throwaway copy whose $21 is this pane width and
+    /// counts the cursor moves that fall outside it. None outside means the
+    /// story adapts and the floor is released; any means the layout is baked and
+    /// the floor stays. Cleared once a verdict is in.
     pre_restore_screen_cols: Option<u16>,
+    /// The story file as loaded, kept so the shadow width check can boot a
+    /// throwaway copy (the live image is dirtied by play and by restores).
+    story: std::sync::Arc<Vec<u8>>,
+    /// The floor was a guess (a bare Quetzal `.qzl` carries no screen width, so
+    /// [`note_bare_quetzal_width`](crate::engine_helpers::note_bare_quetzal_width)
+    /// assumes 80). A baked verdict then refines it to the width the story's
+    /// furthest status column implies instead of keeping the guess.
+    floor_is_guess: bool,
+    /// What the shadow width check concluded about this story, remembered for
+    /// the session so a later restore does not ask again (SQ-1778).
+    width_verdict: Option<WidthVerdict>,
+    /// Inconclusive shadow checks so far (a turn that moved no upper-window
+    /// cursor says nothing); capped so a story that never draws a status line
+    /// does not boot a shadow for every command.
+    width_check_tries: u8,
     /// The pre-loaded text (ZMSD §15 `read`, v5+ — TerpEtude option 12,
     /// Beyond Zork's "AGAIN") `zvm` reported for the CURRENTLY pending line
     /// read, empty when nothing is pre-loaded (the overwhelmingly common
@@ -1145,6 +1160,24 @@ pub struct GameSession {
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
+
+/// What the shadow width check learned about a story (SQ-1778).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidthVerdict {
+    /// Every upper-window cursor move fit the narrower width: the story lays its
+    /// status line out for the width it is told.
+    Adapts,
+    /// Some moves fell outside it: the columns are baked in.
+    Baked,
+}
+
+/// What a throwaway turn at a given header width reported.
+struct ShadowWidthReport {
+    moves: u32,
+    overreach: u32,
+    /// Furthest non-blank upper-window column after the turn.
+    extent: u16,
+}
 
 impl GameSession {
     /// Build a new session from raw story bytes.
@@ -1311,6 +1344,7 @@ impl GameSession {
         config: zvm::cpu::exec::BootConfig,
         trace_from_boot: bool,
     ) -> Result<GameSession, ZError> {
+        let story_image = std::sync::Arc::new(story.clone());
         let mem = Memory::new(story)?;
         // Both read BEFORE the config is handed over, because it is consumed by
         // the boot. `resolved_art_scale` is the same number `BootConfig` scaled
@@ -1362,6 +1396,10 @@ impl GameSession {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: story_image,
             line_preload,
             line_preload_seeded: false,
         })
@@ -1831,6 +1869,7 @@ impl GameSession {
     /// known prefix is stripped back off here first — passing the untouched
     /// `command` through unchanged would double it.
     pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u8) -> TurnResult {
+        self.settle_width_floor(command, terminator);
         self.echo_style = self.read_input_style();
         let typed = command.strip_prefix(self.line_preload.as_str()).unwrap_or(command);
         self.machine.supply_line(typed, terminator);
@@ -1980,23 +2019,117 @@ impl GameSession {
         if version < 4 || version == 6 {
             return;
         }
-        // Remember what the floor was about to give up, but only when this
-        // restore actually raises it — a restore into a narrower save is a
-        // no-op `max` with nothing to revert (SQ-1604).
         if cols > self.boot_screen_cols {
-            self.pre_restore_screen_cols = Some(self.boot_screen_cols);
+            match self.width_verdict {
+                // A story already shown to lay itself out for the width it is
+                // told has no baked columns to protect (SQ-1778).
+                Some(WidthVerdict::Adapts) => return,
+                // Already shown to bake them: raise the floor, nothing to ask.
+                Some(WidthVerdict::Baked) => {}
+                // Unknown: raise it, and remember the pane width so the first
+                // qualifying moment can ask the story (`settle_width_floor`).
+                None => {
+                    if self.pre_restore_screen_cols.is_none() {
+                        self.pre_restore_screen_cols = Some(self.boot_screen_cols);
+                    }
+                }
+            }
         }
         self.boot_screen_cols = self.boot_screen_cols.max(cols);
     }
 
-    /// Drain whether the game's own `loadb`/`loadw` read header byte `$21`
-    /// (screen width) since the last drain (SQ-1604) — `zvm`'s own
-    /// [`zvm::cpu::exec::Machine::take_header_width_read`], set inside those
-    /// two opcode arms alone (never the interpreter's own internal reads),
-    /// forwarded from here so `drain_turn` reads it the same way it reads
-    /// every other per-turn VM signal.
-    pub fn take_header_width_read(&mut self) -> bool {
-        self.machine.take_header_width_read()
+    /// [`note_restored_screen_cols`](Self::note_restored_screen_cols) for a
+    /// width that is only a guess (a bare Quetzal save carries none).
+    pub fn note_guessed_screen_cols(&mut self, cols: u16) {
+        let before = self.boot_screen_cols;
+        self.note_restored_screen_cols(cols);
+        if self.boot_screen_cols > before && self.pre_restore_screen_cols.is_some() {
+            self.floor_is_guess = true;
+        }
+    }
+
+    /// Whether the upper window holds any text at all.
+    fn upper_window_holds_text(&self) -> bool {
+        self.machine.screen.upper.cells.iter().any(|c| !c.ch.is_whitespace())
+    }
+
+    /// Replay one command on a throwaway copy of this session whose header
+    /// width is `cols`, and report where the story aimed its upper-window
+    /// cursor (SQ-1778). Nothing here touches `self`, its screen or the host.
+    fn shadow_width_turn(&self, command: &str, terminator: u8, cols: u16) -> Option<ShadowWidthReport> {
+        let rows = self.machine.mem.read_byte(0x20) as u16;
+        let interp = self.machine.mem.read_byte(0x1E);
+        let save = Engine::save_state(self);
+        let mut sh = GameSession::new_with_trace(
+            (*self.story).clone(),
+            false,
+            false,
+            Some(interp),
+            false,
+            Vec::new(),
+            None,
+            None,
+            Some((rows, cols)),
+        )
+        .ok()?;
+        Engine::restore_state(&mut sh, &save).ok()?;
+        sh.machine.screen = self.machine.screen.clone();
+        Engine::set_screen_dims(&mut sh, rows, cols);
+        if sh.pending != InputKind::Line {
+            return None;
+        }
+        let _ = sh.machine.take_upper_cursor_moves();
+        let typed = command.strip_prefix(self.line_preload.as_str()).unwrap_or(command);
+        sh.machine.supply_line(typed, terminator);
+        let _ = sh.advance_after_input(false);
+        let (moves, overreach) = sh.machine.take_upper_cursor_moves();
+        let u = &sh.machine.screen.upper;
+        let extent = (1..=u.cols)
+            .rev()
+            .find(|&c| (1..=u.rows).any(|r| !u.cell(r, c).ch.is_whitespace()))
+            .unwrap_or(0);
+        Some(ShadowWidthReport { moves, overreach, extent })
+    }
+
+    /// Decide, at the first qualifying moment after a restore, whether the
+    /// SQ-0681 floor still protects anything (SQ-1778).
+    ///
+    /// Qualifying: a floor is on trial, the game is at a LINE read (not a key
+    /// wait, so a Save State taken at an intro just keeps its width through the
+    /// intro) and its upper window holds text (the status line has been drawn).
+    /// Then the player's own command is replayed on a throwaway copy whose
+    /// header says the pane width; the live screen never sees it. A turn that
+    /// aimed no cursor at the upper window is no evidence and the floor stays
+    /// on trial.
+    fn settle_width_floor(&mut self, command: &str, terminator: u8) {
+        let Some(narrow) = self.pre_restore_screen_cols else { return };
+        if self.pending != InputKind::Line || !self.upper_window_holds_text() || self.width_check_tries >= 4 {
+            return;
+        }
+        let Some(report) = self.shadow_width_turn(command, terminator, narrow) else { return };
+        if report.moves == 0 {
+            self.width_check_tries += 1;
+            return;
+        }
+        let rows = self.machine.mem.read_byte(0x20) as u16;
+        if report.overreach == 0 {
+            self.width_verdict = Some(WidthVerdict::Adapts);
+            self.boot_screen_cols = narrow;
+        } else {
+            self.width_verdict = Some(WidthVerdict::Baked);
+            if self.floor_is_guess {
+                // The save said nothing about its width: take it from where the
+                // story draws when nothing stops it.
+                if let Some(wide) = self.shadow_width_turn(command, terminator, 255) {
+                    self.boot_screen_cols = narrow.max(wide.extent);
+                }
+            }
+        }
+        self.pre_restore_screen_cols = None;
+        self.floor_is_guess = false;
+        // Do not wait for the host's next poll: this very turn must run at the
+        // settled width.
+        Engine::set_screen_dims(self, rows, self.boot_screen_cols);
     }
 
     /// Build the `TurnResult` from a `RunStop` and drain the VM's per-turn
@@ -2116,21 +2249,6 @@ impl GameSession {
                 .and_then(|v6| v6.windows.get(idx))
                 .is_some_and(|w| w.stream_origin == Some(pen))
         });
-        // SQ-1604: a real turn just ran, so this is the earliest safe point to
-        // ask whether the story read header byte $21 itself — restoring never
-        // executes Z-code, so `take_header_width_read` cannot fire from the
-        // restore that raised `pre_restore_screen_cols` in the first place,
-        // only from a turn processed after it. Once it fires, give the
-        // SQ-0681 floor back what a restore borrowed from it: a story that
-        // reads $21 every turn (Lost Pig) lays its fields out fresh from
-        // whatever's declared next turn, so the wide pin has nothing left to
-        // protect; one that never reads it again (Zork 1 r52) never satisfies
-        // this and keeps the pin forever, exactly as SQ-0681 intended.
-        if self.take_header_width_read() {
-            if let Some(cols) = self.pre_restore_screen_cols.take() {
-                self.boot_screen_cols = cols;
-            }
-        }
         let win0_base = self.v6_win0_chars_seen;
         let (erase_lower, cleared_at) = self.take_screen_clear();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
@@ -9561,6 +9679,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9640,6 +9762,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9714,6 +9840,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9777,6 +9907,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9883,6 +10017,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9948,6 +10086,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9997,6 +10139,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10060,6 +10206,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10161,6 +10311,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10220,6 +10374,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10833,6 +10991,10 @@ mod tests {
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
             pre_restore_screen_cols: None,
+            floor_is_guess: false,
+            width_verdict: None,
+            width_check_tries: 0,
+            story: std::sync::Arc::new(Vec::new()),
             line_preload: String::new(),
             line_preload_seeded: false,
         }

@@ -27,6 +27,13 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Fixed
+
+- **Restoring a save in a narrower window no longer breaks Zork I's score and
+  moves.** After a few turns the status line used to wrap onto a second row or
+  scramble the room name; Lanthorn now checks whether the game re-lays its status
+  line out for the new width and only keeps the saved width when it does not.
+
 ## v0.9.5 — 2026-10-12
 
 ### Highlights

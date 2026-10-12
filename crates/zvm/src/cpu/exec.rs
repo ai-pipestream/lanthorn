@@ -714,6 +714,15 @@ pub struct Machine {
     /// shape: set inside opcode execution, drained once per turn by the host
     /// via [`Self::take_header_width_read`].
     header_width_read: bool,
+    /// How many `set_cursor` moves the story aimed at the UPPER window since the
+    /// host last drained them, and how many of those named a column past the
+    /// header's screen width ($21), which ZMSD §8.7.2.3 makes illegal and this
+    /// interpreter therefore drops. A host that narrows $21 on a throwaway copy
+    /// and replays a turn reads these to learn whether the story re-lays its
+    /// status line out for the width it is told (no overreach) or has the
+    /// columns baked in (overreach). See [`Self::take_upper_cursor_moves`].
+    upper_cursor_moves: u32,
+    upper_cursor_overreach: u32,
     /// v5/v6 mouse state (ZMSD §15/§8). Set by [`set_mouse`](Machine::set_mouse)
     /// when the host reports a click; `read_mouse` (EXT:0x16) reports these back.
     /// Coordinates are game pixels, 1-based (ZMSD §8.8.1 coordinate convention).
@@ -911,6 +920,8 @@ impl Machine {
             buffer_screen_mode: 0,
             transcript_bit_seen: false,
             header_width_read: false,
+            upper_cursor_moves: 0,
+            upper_cursor_overreach: 0,
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: 0,
@@ -2175,6 +2186,14 @@ impl Machine {
     /// last drained it (SQ-1604).
     pub fn take_header_width_read(&mut self) -> bool {
         std::mem::take(&mut self.header_width_read)
+    }
+
+    /// Take and clear the upper-window `set_cursor` tally as
+    /// `(moves, overreach)`: every move the story aimed at window 1, and the
+    /// subset whose column lay past header byte $21 (and was dropped as illegal,
+    /// ZMSD §8.7.2.3). v1-5 only; a v6 story never reaches this arm.
+    pub fn take_upper_cursor_moves(&mut self) -> (u32, u32) {
+        (std::mem::take(&mut self.upper_cursor_moves), std::mem::take(&mut self.upper_cursor_overreach))
     }
 
     /// Latch a fault for an opcode number this Z-machine version does not
@@ -3823,6 +3842,12 @@ impl Machine {
                         && col >= 1
                         && (screen_rows == 0 || row <= screen_rows)
                         && (screen_cols == 0 || col <= screen_cols);
+                    if self.screen.current_window == 1 {
+                        self.upper_cursor_moves += 1;
+                        if screen_cols != 0 && col > screen_cols {
+                            self.upper_cursor_overreach += 1;
+                        }
+                    }
                     if self.screen.current_window == 1 && in_range {
                         self.screen.cursor_row = row;
                         self.screen.cursor_col = col;
