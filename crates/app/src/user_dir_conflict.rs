@@ -292,7 +292,9 @@ mod tests {
         assert!(o.is_empty());
         let e = String::from_utf8(e).unwrap();
         assert_eq!(e.lines().count(), 1, "{e}");
-        assert!(e.contains(".lanthorn") && e.contains(".config/lanthorn") && e.contains("--migrate-user-dir"), "{e}");
+        assert!(e.contains(&c.legacy.dirs.config().display().to_string()), "{e}");
+        assert!(e.contains(&c.platform.dirs.config().display().to_string()), "{e}");
+        assert!(e.contains("--migrate-user-dir"), "{e}");
         assert!(home.join(".lanthorn").exists(), "nothing renamed");
     }
 }
