@@ -1132,6 +1132,34 @@ impl Engine for ScottSession {
         self.snapshot_location()
     }
 
+    /// The database's own room exit table (SQ-1773): `Room(x)` when room `origin` lists room `x`
+    /// for `dir`. Scott has only n s e w u d, in the table's own order; anything else, a room the
+    /// database does not hold and a zero entry (the table's "no exit") are `Unknown`.
+    ///
+    /// Read from the table and never from anything walked, so a self-loop (a maze room whose
+    /// north leads back to itself) is declared as `Room(origin)` -- which the exit scan needs to
+    /// tell it from a wall, as both leave the player in the same room.
+    fn declared_exit(
+        &self,
+        origin: mapper::graph::RoomId,
+        dir: mapper::direction::Direction,
+    ) -> crate::engine::DeclaredExit {
+        use mapper::direction::Direction as D;
+        let slot = match dir {
+            D::N => 0,
+            D::S => 1,
+            D::E => 2,
+            D::W => 3,
+            D::Up => 4,
+            D::Down => 5,
+            _ => return crate::engine::DeclaredExit::Unknown,
+        };
+        match self.vm.database().rooms.get(origin as usize).map(|r| r.exits[slot]) {
+            Some(x) if x != 0 => crate::engine::DeclaredExit::Room(x as mapper::graph::RoomId),
+            _ => crate::engine::DeclaredExit::Unknown,
+        }
+    }
+
     fn set_debug_trace(&mut self, on: bool) {
         // Turning the inspector on enables fired-action tracing; off stops it.
         // The cumulative `ever_fired` set (permanent colour + persisted coverage)

@@ -195,7 +195,7 @@ room, lanthorn quietly asks that same throwaway copy of your game which ways
 lead out — north, south, up, in, the ship words if the story has them — and
 remembers the ones that work. In the matrix view and the room card those show as
 `»`, a real exit you haven't walked yet, instead of the dim `·` of "maybe";
-directions the game refused read as dead ends. It includes exits the room
+directions the game refused read as dead ends. (An exit that leads back into the same room, as in a maze, still counts as an exit when the game's own exit table says so, and looks like any other.) It includes exits the room
 description never mentions, and it never draws, names or even records the room on
 the far side — that appears only when you walk there yourself. A way that was
 refused is asked again on a later visit, since a door may have opened. It runs

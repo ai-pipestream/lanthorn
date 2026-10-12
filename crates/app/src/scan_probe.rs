@@ -38,6 +38,15 @@
 //! otherwise be filed as a fixed passage on a coin flip. A disagreement is not an exit; the
 //! direction is kept as a wall, so a later visit asks again.
 //!
+//! **A self-loop is an exit, not a wall.** Some exits lead back into the room they leave -- every
+//! way out of a maze room, three of the four exits of Adventureland's start forest -- and the
+//! shadow cannot tell one from a refusal by the room alone. So when a direction leaves the shadow
+//! in the SAME room, the story's own declared exit ([`crate::engine::Engine::declared_exit`],
+//! read from the live engine when the scan is queued) is consulted: `Room(this room)` makes it a
+//! real exit, anything else keeps it a wall. Refusal text is never read. It is recorded as a scan
+//! exit only -- no passage, and nothing that says it loops -- so the map shows `»` like any other
+//! unwalked exit and a maze stays a puzzle.
+//!
 //! **A death is not a landing** ([`crate::probe::ProbeStep::landing`], SQ-1506): the troll that
 //! kills the shadow wakes it in the Forest, a room the map holds, and that is not where `north`
 //! leads.
@@ -98,12 +107,16 @@ enum Landing {
     /// A room the map does not hold. The id exists only to compare the confirm replay against;
     /// it is session state and never reaches the graph.
     Unknown(RoomId),
+    /// The shadow stayed in this very room AND the story's own exit table declares this direction
+    /// a fixed exit back into it: a self-loop (a maze room), a real exit that changes no room.
+    SelfLoop,
 }
 
 impl Landing {
     fn room(self) -> RoomId {
         match self {
             Landing::Known(r) | Landing::Unknown(r) => r,
+            Landing::SelfLoop => RoomId::MAX,
         }
     }
 }
@@ -123,6 +136,9 @@ pub struct ExitScan {
     room: RoomId,
     /// The game as it stood when the player was in the room.
     from: crate::probe::ProbeSnapshot,
+    /// Slots the story's own exit table declares a fixed exit back into this room (read from the
+    /// live engine when the scan was queued: the shadow cannot be asked, and the table is static).
+    loops: Vec<Direction>,
     /// Every direction slot this scan decides (a slot may have several words).
     slots: Vec<Direction>,
     /// Words still to ask in the wide stage.
@@ -228,7 +244,12 @@ pub fn arm_exit_scan(state: &mut AppState, mapper: &Mapper, live: &dyn Engine, r
     if !scanned {
         state.scan_attempted.push(here);
     }
-    queue_scan(state, here, from, slots, nautical);
+    let loops: Vec<Direction> = slots
+        .iter()
+        .copied()
+        .filter(|&d| live.declared_exit(here, d) == crate::engine::DeclaredExit::Room(here))
+        .collect();
+    queue_scan(state, here, from, slots, nautical, loops);
 }
 
 /// Queue a scan of `room` over `slots`, from `from`. The words are each slot's compass word,
@@ -239,6 +260,7 @@ pub(crate) fn queue_scan(
     from: crate::probe::ProbeSnapshot,
     slots: Vec<Direction>,
     nautical: Vec<(&'static str, Direction)>,
+    loops: Vec<Direction>,
 ) {
     let mut todo: Vec<(&'static str, Direction)> = slots.iter().map(|&d| (long_label(d), d)).collect();
     todo.extend(nautical.into_iter().filter(|(_, d)| slots.contains(d)));
@@ -247,6 +269,7 @@ pub(crate) fn queue_scan(
     state.scan_queue.push(ExitScan {
         room,
         from,
+        loops,
         slots,
         todo,
         landed: Vec::new(),
@@ -367,10 +390,15 @@ pub fn deliver(state: &mut AppState, mapper: &mut Mapper, answer: &crate::probe:
         Stage::Wide => {
             for (i, &(word, dir, _)) in in_flight.iter().enumerate() {
                 scan.todo.remove(0);
-                let landing = run.steps[controls + i].landing().filter(|&r| r != scan.room);
-                if let Some(r) = landing {
-                    let l = if mapper.graph.room(r).is_some() { Landing::Known(r) } else { Landing::Unknown(r) };
-                    scan.landed.push((word, dir, l));
+                match run.steps[controls + i].landing() {
+                    Some(r) if r != scan.room => {
+                        let l = if mapper.graph.room(r).is_some() { Landing::Known(r) } else { Landing::Unknown(r) };
+                        scan.landed.push((word, dir, l));
+                    }
+                    // No room change is a wall -- unless the story's own table says this
+                    // direction is a fixed exit back into the room. Never the refusal text.
+                    Some(_) if scan.loops.contains(&dir) => scan.landed.push((word, dir, Landing::SelfLoop)),
+                    _ => {}
                 }
             }
             if scan.todo.is_empty() {
@@ -383,7 +411,11 @@ pub fn deliver(state: &mut AppState, mapper: &mut Mapper, answer: &crate::probe:
                 scan.confirm_todo.remove(0);
                 let again = run.steps[i].landing();
                 if let (Some(expect), Some(r)) = (expect, again) {
-                    if r == expect.room() {
+                    let same = match expect {
+                        Landing::SelfLoop => r == scan.room,
+                        other => r == other.room(),
+                    };
+                    if same {
                         scan.confirmed.push((dir, expect));
                     }
                 }
@@ -409,7 +441,10 @@ fn finish(mapper: &mut Mapper, scan: &ExitScan) -> bool {
                 mapper.graph.mark_probed(scan.room, slot);
                 changed |= mapper.record_probed_passage(ProbedPassage { from: scan.room, dir: slot, to });
             }
-            Landing::Unknown(_) => exits.push(slot),
+            // Both are exits with nothing known beyond them. A self-loop is deliberately drawn
+            // like any other unwalked exit (`»`), so a maze stays a puzzle; walking it is what
+            // turns the cell into `↩`.
+            Landing::Unknown(_) | Landing::SelfLoop => exits.push(slot),
         }
     }
     changed |= mapper.graph.record_scan(scan.room, &scan.slots, &exits);
@@ -480,7 +515,7 @@ mod tests {
     /// `look`, `north`, `up`.
     fn state_scanning() -> AppState {
         let mut state = AppState::default();
-        queue_scan(&mut state, 1, snapshot(), vec![Direction::N, Direction::Up], Vec::new());
+        queue_scan(&mut state, 1, snapshot(), vec![Direction::N, Direction::Up], Vec::new(), Vec::new());
         let mut scan = state.scan_queue.remove(0);
         scan.token = Some(7);
         scan.in_flight = vec![("north", Direction::N, None), ("up", Direction::Up, None)];
@@ -586,6 +621,35 @@ mod tests {
         assert_eq!(m.graph.scan_walls(1), vec![Direction::N, Direction::Up]);
     }
 
+    /// A direction that leaves the shadow in the SAME room is a wall -- unless the story's own exit
+    /// table declares it a fixed exit back into the room (a self-loop): then it is an exit, with
+    /// no passage and no hint that it loops, so a maze stays a puzzle.
+    #[test]
+    fn a_declared_self_loop_is_an_exit_and_an_undeclared_stay_is_a_wall() {
+        for declared in [true, false] {
+            let mut state = AppState::default();
+            let loops = if declared { vec![Direction::N] } else { Vec::new() };
+            queue_scan(&mut state, 1, snapshot(), vec![Direction::N, Direction::Up], Vec::new(), loops);
+            let mut scan = state.scan_queue.remove(0);
+            scan.token = Some(7);
+            scan.in_flight = vec![("north", Direction::N, None), ("up", Direction::Up, None)];
+            state.scan_search = Some(scan);
+            let mut m = map(false);
+            // look stays; north stays; up stays: nothing moved anywhere.
+            deliver(&mut state, &mut m, &test_answer(7, wide(Some(1), 1, false)));
+            if declared {
+                ask_confirm(&mut state);
+                deliver(&mut state, &mut m, &test_answer(7, run(vec![step("north", Some(1), false)])));
+            }
+            assert!(state.scan_search.is_none());
+            let want = if declared { vec![Direction::N] } else { Vec::new() };
+            assert_eq!(m.graph.room(1).unwrap().scan_exits, want, "declared={declared}");
+            assert!(m.graph.connections().is_empty(), "never a passage: it must not hint at the loop");
+            assert!(!m.graph.scan_walls(1).contains(&Direction::N) || !declared);
+            assert!(m.graph.scan_walls(1).contains(&Direction::Up), "up is declared nowhere: a wall");
+        }
+    }
+
     /// A rewind took the room away between asking and answering: nothing to record.
     #[test]
     fn a_stale_answer_for_a_room_the_map_lost_is_dropped() {
@@ -622,7 +686,7 @@ mod tests {
             screen: (80, 24),
         });
         let m = map(false);
-        queue_scan(&mut state, 1, snapshot(), vec![Direction::N], Vec::new());
+        queue_scan(&mut state, 1, snapshot(), vec![Direction::N], Vec::new(), Vec::new());
         crate::relocation_probe::queue_search(&mut state, 1, 2, snapshot(), Vec::new(), false);
         assert!(!pump_exit_scan(&mut state, &m), "a relocation search is queued first");
         assert!(state.scan_search.is_none() && state.scan_queue.len() == 1, "and the scan has not started");
@@ -638,11 +702,11 @@ mod tests {
     fn the_queue_is_bounded_and_keeps_the_newest_look_at_a_room() {
         let mut state = AppState::default();
         for room in 0..(MAX_QUEUED as RoomId + 3) {
-            queue_scan(&mut state, room, snapshot(), vec![Direction::N], Vec::new());
+            queue_scan(&mut state, room, snapshot(), vec![Direction::N], Vec::new(), Vec::new());
         }
         assert_eq!(state.scan_queue.len(), MAX_QUEUED);
         assert_eq!(state.scan_queue[0].room, 3, "the oldest went first");
-        queue_scan(&mut state, 5, snapshot(), vec![Direction::S], Vec::new());
+        queue_scan(&mut state, 5, snapshot(), vec![Direction::S], Vec::new(), Vec::new());
         assert_eq!(state.scan_queue.iter().filter(|s| s.room == 5).count(), 1);
         assert_eq!(state.scan_queue.last().unwrap().slots(), &[Direction::S]);
     }

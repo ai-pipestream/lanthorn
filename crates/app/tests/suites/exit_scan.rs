@@ -87,10 +87,29 @@ impl Play {
         Some(p)
     }
 
+    fn adventureland() -> Option<Play> {
+        let bytes = story("adv01.dat")?;
+        let session = app::scott_session::ScottSession::new(bytes.clone(), None).expect("adv01.dat loads");
+        let mut state = AppState::default();
+        state.probe.arm(recipe(&bytes));
+        let mut p = Play {
+            state,
+            mapper: Mapper::default(),
+            session: Box::new(session),
+            death: Default::default(),
+        };
+        p.turn("look");
+        Some(p)
+    }
+
     /// One finished turn, leaving the scan it armed queued (not yet asked).
     fn turn_unsettled(&mut self, cmd: &str) {
-        let r = self.session.submit(cmd);
+        let mut r = self.session.submit(cmd);
         let room_before = self.mapper.graph.current();
+        // As `finish_command_turn` does: what the room being left declares for this move.
+        r.declared_exit = app::random_exit_probe::declared_exit_for_command(cmd, room_before, |o, d| {
+            self.session.declared_exit(o, d)
+        });
         app::session::apply_turn(&mut self.mapper, cmd, &r, &mut self.death);
         let mut save = app::engine::TurnSave::default();
         self.state.random_exit_pre_move_save =
@@ -420,4 +439,98 @@ mod display {
         let accent = st.colors.theme.get("accent").style;
         assert_eq!(exit.fg, accent.fg, "by default it reads as the accent");
     }
+}
+
+// ── Scott Adams, and self-loops ───────────────────────────────────────────────────────────────
+
+/// What the game's own database declares from the start room, in column order: the truth the
+/// scan is held to. NOT "the room changed": Adventureland's forest lists
+/// `Obvious exits: North. South. East. West.` and three of those lead back into the same forest.
+fn scott_declared(bytes: &[u8], room: RoomId) -> Vec<Direction> {
+    let s = app::scott_session::ScottSession::new(bytes.to_vec(), None).unwrap();
+    MATRIX_DIRS
+        .iter()
+        .copied()
+        .filter(|&d| s.declared_exit(room, d) != app::engine::DeclaredExit::Unknown)
+        .collect()
+}
+
+/// The start forest: N, S, E and W are all real exits (the game says so), though only E changes
+/// room. The scan finds all four, shows all four as `»` -- a self-loop is not `↩` until walked, so
+/// the maze stays a puzzle -- records no passage, and nothing else is an exit.
+///
+/// (Fixture: `adv01.dat`; the opening `look` only.)
+#[test]
+fn adventureland_forest_self_loops_are_exits_not_walls() {
+    let Some(bytes) = story("adv01.dat") else { return };
+    let Some(p) = Play::adventureland() else { return };
+    let here = p.here();
+    let want = vec![Direction::N, Direction::S, Direction::E, Direction::W];
+    assert_eq!(scott_declared(&bytes, here), want, "the database's own exit table");
+    assert!(p.mapper.graph.is_scanned(here), "the scan finished on Scott");
+    assert_eq!(p.stubs(here), want);
+    assert_eq!(p.mapper.graph.untried(here), want);
+    for d in &want {
+        assert_eq!(classify(&p.mapper.graph, here, *d), MatrixCell::Exit, "{d:?}");
+    }
+    assert!(p.mapper.graph.connections().is_empty(), "no passage, no hint that any of it loops");
+    assert_eq!(p.mapper.graph.rooms().count(), 1);
+    assert_eq!(classify(&p.mapper.graph, here, Direction::Up), MatrixCell::Probed);
+}
+
+/// Walking a self-loop leaves the cell exactly as it was before Scott answered `declared_exit`
+/// (`×`, tried): a same-room arrival is recorded as a loop only when the game reprints the room
+/// heading, which Scott does not. What changed is only that nothing is marked random -- the table
+/// agrees with where the player lands -- and that the OTHER loops stay `»`.
+#[test]
+fn adventureland_walking_a_self_loop_reads_as_one_and_marks_nothing_random() {
+    let Some(mut p) = Play::adventureland() else { return };
+    let here = p.here();
+    p.turn("north");
+    assert_eq!(p.here(), here, "north leads back into the forest");
+    assert_eq!(classify(&p.mapper.graph, here, Direction::N), MatrixCell::Probed, "today's reading, unchanged");
+    assert!(!p.mapper.graph.is_random_exit(here, Direction::N));
+    assert_eq!(classify(&p.mapper.graph, here, Direction::S), MatrixCell::Exit, "unwalked: still a yes");
+    p.turn("east");
+    assert_ne!(p.here(), here);
+    assert!(p.mapper.graph.rooms().all(|r| r.random_exits.is_empty()), "no random marks");
+}
+
+/// `declared_exit` is only useful to its consumers if it never contradicts a real walk: from every
+/// room reachable by plain direction words, every direction that lands somewhere else lands in
+/// the room the table declares. (A mismatch would read as a suspicion of a random exit.)
+#[test]
+fn adventureland_the_exit_table_agrees_with_every_reachable_plain_walk() {
+    let Some(bytes) = story("adv01.dat") else { return };
+    let mut s = app::scott_session::ScottSession::new(bytes, None).unwrap();
+    let start = s.save_state();
+    let mut seen: Vec<RoomId> = Vec::new();
+    let mut todo: Vec<(RoomId, app::engine::EngineSave)> =
+        vec![(s.current_location().unwrap().number, start)];
+    let mut checked = 0;
+    while let Some((room, save)) = todo.pop() {
+        if seen.contains(&room) {
+            continue;
+        }
+        seen.push(room);
+        for dir in [Direction::N, Direction::S, Direction::E, Direction::W, Direction::Up, Direction::Down] {
+            s.restore_state(&save).unwrap();
+            let r = s.submit(mapper::direction::long_label(dir));
+            if app::session::turn_reports_death(&r.transcript) {
+                continue;
+            }
+            let landed = s.current_location().unwrap().number;
+            let declared = s.declared_exit(room, dir);
+            if landed != room {
+                assert_eq!(
+                    declared,
+                    app::engine::DeclaredExit::Room(landed),
+                    "room {room} {dir:?}: the table disagrees with the walk"
+                );
+                checked += 1;
+                todo.push((landed, s.save_state()));
+            }
+        }
+    }
+    assert!(seen.len() > 5 && checked > 5, "a real stretch of the map was walked ({} rooms)", seen.len());
 }
