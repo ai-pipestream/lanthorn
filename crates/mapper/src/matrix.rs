@@ -60,7 +60,8 @@ pub enum MatrixCell {
     /// Leaves the layer. The destination is footnoted rather than tagged, because it has no row
     /// in this table to point at.
     LeavesLayer { dest: RoomId },
-    /// Tried, and no path was found. A later OBSERVED loop upgrades this to [`MatrixCell::SelfLoop`];
+    /// Tried, and no path was found -- blocked WHEN TRIED, not for ever: a scan-confirmed exit
+    /// ([`MatrixCell::Exit`]) outranks an older typed refusal. A later OBSERVED loop upgrades this to [`MatrixCell::SelfLoop`];
     /// nothing infers one from the probe alone.
     Probed,
     /// Never tried — the exploration frontier.
@@ -206,6 +207,11 @@ fn classify_with(graph: &MapGraph, idx: &ConnIndex<'_>, room: RoomId, dir: Direc
         if graph.self_loops(room).contains(&dir) {
             return MatrixCell::SelfLoop;
         }
+        // A scan-confirmed exit beats an older typed refusal (SQ-1783): a refusal is a fact about
+        // a moment, and a later scan that found the way open is newer than the `tried` mark.
+        if graph.is_scanned(room) && graph.is_scan_exit(room, dir) {
+            return MatrixCell::Exit;
+        }
         // No edge at all: the room's own record of what has been TYPED here is the only thing
         // that separates a wall from unexplored ground.
         if graph.is_tried(room, dir) {
@@ -215,7 +221,7 @@ fn classify_with(graph: &MapGraph, idx: &ConnIndex<'_>, room: RoomId, dir: Direc
         // `Exit`, and a direction the game refused is a wall, not a maybe. Only a room nobody
         // has scanned keeps the old `Untried`.
         return if graph.is_scanned(room) {
-            if graph.is_scan_exit(room, dir) { MatrixCell::Exit } else { MatrixCell::Probed }
+            MatrixCell::Probed
         } else {
             MatrixCell::Untried
         };
@@ -763,6 +769,21 @@ mod tests {
         // The existing OUTBOUND crossing (2 → 9) must never appear as inbound.
         assert!(edges.iter().all(|&(o, _, d)| o != 2 || d != 9));
         assert!(inbound_border_edges(&g, l).iter().all(|&(o, _, _)| g.layer_of(o) != l));
+    }
+
+    /// SQ-1783: a scan-confirmed exit beats an older typed refusal.
+    #[test]
+    fn a_scan_exit_beats_an_older_typed_refusal() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.mark_tried(1, Direction::N);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Probed);
+        g.record_scan(1, &[Direction::N], &[Direction::N]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Exit, "the scan is newer");
+        assert!(g.untried(1).contains(&Direction::N), "offered as unexplored");
+        // It shuts again: the next scan's refusal takes the exit back.
+        g.record_scan(1, &[Direction::N], &[]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Probed);
     }
 
     /// SQ-1773: a scanned room KNOWS. A real exit nobody has walked is `Exit`, a direction the

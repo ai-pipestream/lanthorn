@@ -36,7 +36,7 @@ while any such tag, or this Unreleased section, still exists.*
   If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
 - **The command panel's compass shows what the map knows.** Each way out of the room you are
   standing in is dressed by the map: ways you have explored look as before, exits waiting to be
-  walked stand out in the map's exit colour, and directions that go nowhere are dimmed (they stay
+  walked stand out in the map's exit colour, and directions that were blocked when you tried them are dimmed (they stay
   clickable). The up, down, in and out glyphs follow suit. Restyle them with the
   `command_panel.quick:explored`, `:exit`, `:blocked` and `:untried` selectors.
 

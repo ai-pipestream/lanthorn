@@ -212,13 +212,26 @@ pub fn arm_exit_scan(state: &mut AppState, mapper: &Mapper, live: &dyn Engine, r
     }
     let arrived = room_before != Some(here);
     let scanned = mapper.graph.is_scanned(here);
-    let walls = mapper.graph.scan_walls(here);
+    // What the map shows as blocked here: the scan's walls plus anything typed and refused
+    // (SQ-1783). A scanned room re-asks all of them, never exits or edges.
+    let mut walls = mapper.graph.scan_walls(here);
+    for d in mapper::matrix::MATRIX_DIRS {
+        if !walls.contains(&d) && mapper::matrix::classify(&mapper.graph, here, d) == mapper::matrix::MatrixCell::Probed {
+            walls.push(d);
+        }
+    }
     let wanted = if arrived {
         !scanned || !walls.is_empty()
+    } else if scanned {
+        // Standing still in a scanned room: a turn spent here may have opened a door, so look
+        // again at what is blocked -- unless a look at this room is already queued or in flight.
+        !walls.is_empty()
+            && state.scan_search.as_ref().is_none_or(|s| s.room != here)
+            && !state.scan_queue.iter().any(|s| s.room == here)
     } else {
-        // Standing still: only a room nobody has tried this session (the room the game began in,
-        // a map restored from before scans existed, the setting just switched on).
-        !scanned && !state.scan_attempted.contains(&here)
+        // Standing still, never scanned: only a room nobody has tried this session (the room the
+        // game began in, a map restored from before scans existed, the setting just switched on).
+        !state.scan_attempted.contains(&here)
     };
     if !wanted {
         return;

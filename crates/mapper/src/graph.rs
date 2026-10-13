@@ -1051,7 +1051,9 @@ impl MapGraph {
             return crate::matrix::MATRIX_DIRS
                 .iter()
                 .copied()
-                .filter(|d| room.scan_exits.contains(d) && !self.is_tried(id, *d))
+                .filter(|d| {
+                    room.scan_exits.contains(d) && !self.conns.iter().any(|c| c.origin == id && c.dir == *d)
+                })
                 .collect();
         }
         crate::direction::UNTRIED_DIRS.iter().copied().filter(|d| !self.is_tried(id, *d)).collect()
@@ -1127,7 +1129,10 @@ impl MapGraph {
                 if !r.scan_exits.contains(&d) {
                     r.scan_exits.push(d);
                 }
-            } else if !edges.contains(&d) && !r.scan_exits.contains(&d) {
+            } else if !edges.contains(&d) {
+                // Asked again and refused: a door that closed again stops being an exit.
+                r.scan_exits.retain(|x| *x != d);
+                r.scan_landings.retain(|(x, _)| *x != d);
                 r.scan_walls.push(d);
             }
         }

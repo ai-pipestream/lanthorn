@@ -379,6 +379,41 @@ fn zork1_a_hidden_exit_is_shown_once_it_exists() {
     );
 }
 
+/// SQ-1783: a refusal is a fact about a moment. Standing in the Living Room with the rug moved,
+/// `down` is refused (the trap door is shut); opening the door WITHOUT leaving turns the cell into
+/// an exit, even though the player's own typed `down` is still on record.
+///
+/// (Fixture: `zork1-r88-s840726.z3`; `look`, `north`, `east`, `open window`, `enter window`,
+/// `west`, `move rug`, `down`, `open trap door`.)
+#[test]
+fn zork1_a_door_opened_while_standing_still_flips_a_refused_direction() {
+    let Some(mut p) = Play::zork1(true) else { return };
+    for cmd in ["north", "east", "open window", "enter window", "west", "move rug", "down"] {
+        p.turn(cmd);
+    }
+    let living = p.here();
+    assert_eq!(p.name(living), "Living Room");
+    assert!(p.mapper.graph.room(living).unwrap().tried.contains(&Direction::Down), "the refusal is on record");
+    assert_eq!(classify(&p.mapper.graph, living, Direction::Down), MatrixCell::Probed, "shut: blocked");
+    p.turn("open trap door");
+    assert_eq!(p.here(), living, "never left the room");
+    assert_eq!(classify(&p.mapper.graph, living, Direction::Down), MatrixCell::Exit);
+    assert!(p.mapper.graph.untried(living).contains(&Direction::Down), "and offered as unexplored");
+}
+
+/// What a stationary re-check costs on Zork I (West of House: many walls). Printed.
+#[test]
+fn zork1_stationary_recheck_cost() {
+    let Some(mut p) = Play::zork1(true) else { return };
+    let here = p.here();
+    p.turn_unsettled("look");
+    let t = std::time::Instant::now();
+    let queued = p.state.scan_queue.first().map(|s| s.slots().len());
+    app::scan_probe::settle_exit_scan(&mut p.state, &mut p.mapper);
+    eprintln!("stationary re-check in {} of {queued:?} directions: {:?}", p.name(here), t.elapsed());
+    assert!(queued.is_some(), "a scanned room with walls is re-checked after a turn spent in it");
+}
+
 /// With the setting off nothing is scanned: the room keeps today's reading, every compass
 /// direction nobody typed.
 #[test]
