@@ -35,7 +35,10 @@ one-click quick actions.
 Those quick actions draw as a compass rose when the band is wide enough, with
 the map's own portal glyphs — `↑` `◉` `◎` `↓` for up, in, out and down —
 clustered beside it. Each is a single click that submits at once, no `Enter`
-needed. Typing always wins over the band: letters and Backspace go straight
+needed. The compass also reads the map: from the room you are standing in, a
+way you have already walked looks as normal, an exit the map has found but you
+haven't taken stands out in the map's exit colour, and a direction that goes
+nowhere is dimmed (still clickable, since a door can open later). Typing always wins over the band: letters and Backspace go straight
 to the prompt whether the band is open or not, and the band only claims
 column navigation (`Tab`/`Shift-Tab` to move between columns, `↑`/`↓` to
 highlight a row).

@@ -149,6 +149,10 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # "command_panel.column_header:active" = { parent = "accent", bold = true }
 # "command_panel.quick" = { parent = "text" }
 # "command_panel.quick:hover" = { parent = "command_panel.quick", reversed = true }
+# "command_panel.quick:explored" = { parent = "command_panel.quick" }
+# "command_panel.quick:exit" = { parent = "map.matrix.cell:exit", bold = true }
+# "command_panel.quick:blocked" = { parent = "map.matrix.cell:frontier", dim = true }
+# "command_panel.quick:untried" = { parent = "command_panel.quick" }
 # "command_panel.group_label" = { parent = "heading" }
 # "command_panel.item:seen" = { parent = "muted" }
 # file_browser_cwd = { parent = "alert" }

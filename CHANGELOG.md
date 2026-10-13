@@ -27,6 +27,12 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+- **The command panel's compass shows what the map knows.** Each way out of the room you are
+  standing in is dressed by the map: ways you have explored look as before, exits waiting to be
+  walked stand out in the map's exit colour, and directions that go nowhere are dimmed (they stay
+  clickable). The up, down, in and out glyphs follow suit. Restyle them with the
+  `command_panel.quick:explored`, `:exit`, `:blocked` and `:untried` selectors.
+
 ## v0.9.5 — 2026-10-12
 
 ### Highlights

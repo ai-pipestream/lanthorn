@@ -450,6 +450,29 @@ pub struct CommandBandState {
     /// What the WHAT column's rows actually are, which is what its header may
     /// claim. Recomputed with the lists themselves; see [`HereSource`].
     pub here_source: HereSource,
+    /// What the map knows about each way out of the CURRENT room (SQ-1780), for the
+    /// compass rose and portal cluster to dress. Empty when the current room is not
+    /// on the map, which draws exactly as before. Refreshed by
+    /// [`crate::render::command_band::refresh_dir_states`] only when `dir_states_key`
+    /// changes, never per frame.
+    pub dir_states: Vec<(Direction, QuickDirState)>,
+    /// `(room, struct_gen, tried_gen)` that `dir_states` was computed from.
+    pub dir_states_key: Option<(RoomId, u64, u64)>,
+}
+
+/// How the map sees one direction out of the current room, for the quick block
+/// (SQ-1780). A fold of the mapper's `MatrixCell`, so the compass and the direction
+/// table never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickDirState {
+    /// Walked: an edge, a loop, a layer exit or a random exit is on the map.
+    Explored,
+    /// A real exit an exit scan found, not yet walked.
+    Exit,
+    /// Tried or scanned, and the way is shut.
+    Blocked,
+    /// Never tried.
+    Untried,
 }
 
 /// Where the WHAT column's rows came from, and therefore what its header is

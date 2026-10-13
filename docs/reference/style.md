@@ -230,6 +230,10 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `command_panel.column_header:active` | Elements | Style | `accent` | `bold` | |
 | `command_panel.quick` | Elements | Style | `text` |  | |
 | `command_panel.quick:hover` | Elements | Style | `command_panel.quick` | `reversed` | |
+| `command_panel.quick:explored` | Elements | Style | `command_panel.quick` |  | |
+| `command_panel.quick:exit` | Elements | Style | `map.matrix.cell:exit` | `bold` | |
+| `command_panel.quick:blocked` | Elements | Style | `map.matrix.cell:frontier` | `dim` | |
+| `command_panel.quick:untried` | Elements | Style | `command_panel.quick` |  | |
 | `command_panel.group_label` | Elements | Style | `heading` |  | |
 | `command_panel.item:seen` | Elements | Style | `muted` |  | |
 | `file_browser_cwd` | Elements | Style | `alert` |  | |

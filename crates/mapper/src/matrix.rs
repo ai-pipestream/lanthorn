@@ -141,6 +141,15 @@ pub fn classify(graph: &MapGraph, room: RoomId, dir: Direction) -> MatrixCell {
     classify_with(graph, &ConnIndex::new(graph), room, dir)
 }
 
+/// [`classify`] for every one of [`MATRIX_DIRS`] out of `room`, against ONE connection index --
+/// the whole direction table of a single room, in matrix-column order. For a surface that shows
+/// what the map knows about each way out of the current room (the command band's compass, SQ-1780)
+/// and must agree with the matrix cell for cell, so it asks the same classifier.
+pub fn classify_room(graph: &MapGraph, room: RoomId) -> Vec<(Direction, MatrixCell)> {
+    let idx = ConnIndex::new(graph);
+    MATRIX_DIRS.iter().map(|&d| (d, classify_with(graph, &idx, room, d))).collect()
+}
+
 /// The graph's connections indexed by origin room, built once per [`build`]
 /// call (SQ-1181).
 ///
@@ -461,6 +470,19 @@ pub fn build(graph: &MapGraph, layer: LayerId) -> Matrix {
 mod tests {
     use super::*;
     use crate::layer::MAIN_LAYER;
+
+    #[test]
+    fn classify_room_agrees_with_classify_for_every_matrix_direction() {
+        let (g, _) = maze();
+        for room in [1u16, 2, 3, 4] {
+            let all = classify_room(&g, room.into());
+            assert_eq!(all.len(), MATRIX_DIRS.len());
+            for (i, (d, cell)) in all.into_iter().enumerate() {
+                assert_eq!(d, MATRIX_DIRS[i], "matrix-column order");
+                assert_eq!(cell, classify(&g, room.into(), d), "room {room} {d:?}");
+            }
+        }
+    }
 
     /// A miniature of the reference map: a numbered group, one uniquely-named room, and one edge
     /// out of the layer.
