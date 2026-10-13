@@ -72,6 +72,15 @@ pub(crate) struct LaunchCtx {
     /// story path; this is here only so `boot_story` can raise the keep-it prompt
     /// for the right story.
     pub fetched: Option<app::story_url::FetchedStory>,
+    /// The terminal's own default fg/bg (OSC 10/11), probed ONCE here, before the
+    /// first screen that draws (SQ-1781). The story list and the pre-game prompts
+    /// theme themselves from it, and every `boot_story` reuses it rather than
+    /// asking the terminal again after each trip through the picker.
+    pub term_default_colors: app::term_colors::TermDefaultColors,
+    /// The sweep that finishes that probe's job (SQ-0769): handed to the FIRST boot
+    /// (it carries any type-ahead the drain read, and holds the tty if the terminal
+    /// answered late); later boots get a settled, empty one.
+    pub query_sweep: std::sync::Mutex<Option<app::query_sweep::QuerySweep>>,
 }
 
 /// Resolve the one-time launch context: parse args + config, seed the style
@@ -208,10 +217,24 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // booted and then offered — the offer has to come first, and what the player
     // answers decides whether there is anything to launch at all. See
     // [`unpack_fetched_archive`].
+    // SQ-1781: the terminal's default colours are probed ONCE, here, before the
+    // first screen that draws (the fetch-keep prompt, the font check, the story
+    // list), so all of them theme from the same answer `boot_story` later reuses.
+    // A headless run has no terminal to ask.
+    let (term_default_colors, mut query_sweep) = if cli.fetch.is_none() && cli.import_metadata.is_none() {
+        app::term_colors::query_terminal_default_colors()
+    } else {
+        (app::term_colors::TermDefaultColors::default(), app::query_sweep::QuerySweep::settled(Vec::new()))
+    };
+    // A late terminal is waited for HERE, not left owed: the screens below read the
+    // tty directly, and an answer landing in the story list's search box is the
+    // SQ-0769 leak with a different victim. Type-ahead read meanwhile is kept and
+    // replayed into the first story.
+    query_sweep.settle();
     let (story_path, fetched) = match cli.story.as_deref().and_then(fetch_launch_url) {
         Some(app::story_url::Fetched::Story(f)) => (f.path.clone(), Some(f)),
         Some(app::story_url::Fetched::DiskImages(a)) => {
-            (unpack_fetched_archive(&a, &cfg), None)
+            (unpack_fetched_archive(&a, &cfg, &term_default_colors), None)
         }
         None => (story_path, None),
     };
@@ -261,7 +284,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // `/run-font-check` remain the way to ask for it deliberately.
     let ask_font = should_ask_font_check(cli.font_check, first_run, cfg.font_check_pending);
     if ask_font {
-        match ask_font_check(&cfg) {
+        match ask_font_check(&cfg, &term_default_colors) {
             FontCheckOutcome::Answered { nerdfont, diagonal } => {
                 match app::style::style_write_path_for(&cfg) {
                     Some(path) => {
@@ -315,7 +338,16 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         (None, Some(story_path))
     };
 
-    LaunchCtx { cli, cfg, roots, library_dir, single_file, fetched }
+    LaunchCtx {
+        cli,
+        cfg,
+        roots,
+        library_dir,
+        single_file,
+        fetched,
+        term_default_colors,
+        query_sweep: std::sync::Mutex::new(Some(query_sweep)),
+    }
 }
 
 /// Fetch `arg` when it is a URL, returning the local file the rest of the boot
@@ -372,6 +404,7 @@ fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::Fetched> {
 fn unpack_fetched_archive(
     archive: &app::story_url::FetchedArchive,
     cfg: &Config,
+    term: &app::term_colors::TermDefaultColors,
 ) -> std::path::PathBuf {
     let n = archive.images.len();
     // No library, no offer: `default_story_dir` is the directory the picker
@@ -402,7 +435,7 @@ fn unpack_fetched_archive(
         collision,
         disk_images: archive.names(),
     };
-    let mode = match ask_fetch_keep(prompt, cfg) {
+    let mode = match ask_fetch_keep(prompt, cfg, term) {
         app::render::fetch_keep_dialog::FetchKeepAction::Keep(mode) => mode,
         _ => {
             // DECLINED — and unlike SQ-1086's decline, nothing was booted from
@@ -455,6 +488,7 @@ fn unpack_fetched_archive(
 fn ask_fetch_keep(
     prompt: app::state::FetchKeepPrompt,
     cfg: &Config,
+    term: &app::term_colors::TermDefaultColors,
 ) -> app::render::fetch_keep_dialog::FetchKeepAction {
     use app::render::fetch_keep_dialog::{
         button_count, draw_fetch_keep_dialog, fetch_keep_key_focused, FetchKeepAction,
@@ -463,11 +497,10 @@ fn ask_fetch_keep(
 
     // Themed the way the game and the browser are, so the prompt does not arrive
     // in a palette the player has never seen.
-    let (base, _w1) = app::style::load_style_for(cfg);
     // No story is booted yet, so there is no machine to resolve a colour number
-    // through: §8.3.1's own table (SQ-1393).
-    let (colors, _syms, _w2) =
-        app::style::resolve(&base, cfg.config_root(), zvm::screen::Palette::Standard);
+    // through: §8.3.1's own table (SQ-1393). The registry theme is built where the
+    // game builds it (SQ-1781).
+    let (colors, _base) = app::reload::pre_game_colors(cfg, term);
 
     let mut state = AppState::default();
     state.colors = colors;
@@ -649,7 +682,7 @@ enum FontCheckOutcome {
 /// Nothing is written by any path but [`FontCheckOutcome::Answered`]; the plain
 /// glyphs and the orthogonal fallback stand meanwhile, which are the answers
 /// that work in every font.
-fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
+fn ask_font_check(cfg: &Config, term: &app::term_colors::TermDefaultColors) -> FontCheckOutcome {
     use app::render::font_check_dialog::{
         diagonal_check_key_focused, draw_diagonal_check_always, draw_font_check_always,
         font_check_key_focused, DiagonalCheckAction, FontCheckAction,
@@ -659,11 +692,10 @@ fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
     // Themed the way the game and the browser are, so the question does not
     // arrive in a palette the player has never seen — and so the sample rows are
     // drawn in the colours the map will actually use.
-    let (base, _w1) = app::style::load_style_for(cfg);
     // No story is booted yet, so there is no machine to resolve a colour number
-    // through: §8.3.1's own table (SQ-1393).
-    let (colors, _syms, _w2) =
-        app::style::resolve(&base, cfg.config_root(), zvm::screen::Palette::Standard);
+    // through: §8.3.1's own table (SQ-1393). The registry theme is built where the
+    // game builds it (SQ-1781).
+    let (colors, _base) = app::reload::pre_game_colors(cfg, term);
 
     let mut state = AppState::default();
     state.colors = colors;
@@ -949,7 +981,16 @@ pub(crate) fn boot_story(
     // SQ-0769: the probe hands back a sweep as well as the colours. A terminal
     // busy with the picker's last frame answers after the drain has given up, and
     // the sweep is what keeps those replies out of the story — see `query_sweep`.
-    let (term_default_colors, query_sweep) = app::term_colors::query_terminal_default_colors();
+    // SQ-1781: …but the probe itself now runs once at launch (`resolve_launch`), so
+    // a trip back through the picker does not ask again. The first boot takes the
+    // sweep that probe left; later ones have nothing owed.
+    let term_default_colors = ctx.term_default_colors;
+    let query_sweep = ctx
+        .query_sweep
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .unwrap_or_else(|| app::query_sweep::QuerySweep::settled(Vec::new()));
     let terminal = app::host::TerminalFacts {
         game_picker,
         game_picker_query_answered,

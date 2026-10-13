@@ -1338,6 +1338,7 @@ pub(crate) fn run_story_picker(
     cfg: &app::config::Config,
     roots: &app::data_roots::DataRoots,
     restore: Option<&PickerPosition>,
+    term: &app::term_colors::TermDefaultColors,
 ) -> Option<PickedStory> {
     // The library root, and the folder currently listed. They part company the
     // moment the user descends into a sub-folder (Enter on a folder row) and
@@ -1351,11 +1352,11 @@ pub(crate) fn run_story_picker(
     }
 
     // Resolve themed colors the same way the game does, so the picker matches.
-    let (base, _w1) = app::style::load_style_for(cfg);
     // No story is booted here, so no machine names a colour table: the picker
-    // resolves standard colour numbers through §8.3.1's own (SQ-1393).
-    let (cs, _set, _w2) =
-        app::style::resolve(&base, cfg.config_root(), zvm::screen::Palette::Standard);
+    // resolves standard colour numbers through §8.3.1's own (SQ-1393). The theme
+    // is the game's own, from the same files and the terminal probe taken at
+    // launch, so the list follows style.toml (SQ-1781).
+    let (cs, base) = app::reload::pre_game_colors(cfg, term);
 
     // Row badges: each story's per-game dir under `roots` + one shared hint
     // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
@@ -5693,6 +5694,52 @@ mod tests {
         let cell = buf.cell((area.left() + x, 3)).unwrap();
         assert_eq!(cell.fg, no_metadata_fg.unwrap(), "placeholder must use story_no_metadata's color");
         assert_ne!(no_metadata_fg, author_fg, "sanity: the two styles must actually differ");
+    }
+
+    /// SQ-1781: the story list is drawn from the colours `pre_game_colors` gives
+    /// it, and those must follow the player's style.toml `[roles]`/`[elements]`
+    /// like the game does — they used to be the registry defaults whatever the
+    /// file said.
+    #[test]
+    fn story_list_follows_style_toml_theme() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+        let dir = app::scratch_dir("picker-style-theme");
+        let path = dir.join("style.toml");
+        std::fs::write(
+            &path,
+            "[roles]\naccent = { fg = \"#112233\" }\n[elements]\nstory_author = { fg = \"#445566\" }\n",
+        )
+        .unwrap();
+        let mut cfg = app::config::Config::default();
+        cfg.user_dir = dir.clone();
+        cfg.style = Some(path.to_string_lossy().to_string());
+
+        let (cs, base) = app::reload::pre_game_colors(&cfg, &Default::default());
+        assert_eq!(cs.theme.get("accent").style.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(cs.theme.get("story_author").style.fg, Some(Color::Rgb(0x44, 0x55, 0x66)));
+
+        let sym = app::style::finalize_symbols(&base.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Zork", Some("Marc Blank"), Some("1980")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(2);
+        let area = Rect::new(0, 0, 74, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
+        );
+        // Row 1 is unselected (row 0 holds the selection): its author column is
+        // drawn in the file's story_author colour.
+        let row1 = row_text(&buf, 3, area);
+        let x = char_pos(&row1, "Marc Blank") as u16;
+        let cell = buf.cell((area.left() + x, 3)).unwrap();
+        assert_eq!(cell.fg, Color::Rgb(0x44, 0x55, 0x66), "row: {row1:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

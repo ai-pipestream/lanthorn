@@ -2,7 +2,7 @@
 //! read as keystrokes by the story (SQ-0769).
 //!
 //! WHAT THIS PINS. lanthorn asks the terminal for its default fg/bg (OSC 10 /
-//! OSC 11) just before a story boots, and ends the batch with a DSR so it knows
+//! OSC 11) once at launch (SQ-1781; it was just before each story booted), and ends the batch with a DSR so it knows
 //! when the answers are in. In the field the answers sometimes arrived after the
 //! probe had stopped listening — a picker launch leaves the terminal busy with a
 //! screenful of kitty graphics — and the player got
@@ -168,13 +168,13 @@ mod unix {
         // for, on any machine at any load. A failure here now means the
         // keystroke really was lost.
         spec.keys = vec![
-            Key::Wait(Duration::from_millis(1000)),
-            Key::Bytes(b"\r".to_vec()),
             Key::AwaitQuery {
                 query: "default foreground (OSC 10)",
                 cap: Duration::from_secs(20),
             },
             Key::Bytes(b"open mailbox\r".to_vec()),
+            Key::Wait(Duration::from_millis(1500)),
+            Key::Bytes(b"\r".to_vec()), // launch the selected story from the picker
             Key::Wait(Duration::from_millis(2500)),
         ];
 

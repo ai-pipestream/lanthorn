@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+- **The story list and the prompts before a game now follow your `style.toml`.** The library
+  browser, the download keep-or-not prompt and the first-run font check used to draw in the
+  built-in colours whatever your style file said; they now use your roles, elements and
+  terminal colours exactly as the game does.
 - **The command panel's compass shows what the map knows.** Each way out of the room you are
   standing in is dressed by the map: ways you have explored look as before, exits waiting to be
   walked stand out in the map's exit colour, and directions that go nowhere are dimmed (they stay

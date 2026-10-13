@@ -128,6 +128,22 @@ impl QuerySweep {
         }
     }
 
+    /// Block until nothing is owed: the answer arrives, or [`LATE_WINDOW`] runs out.
+    ///
+    /// For a caller that has no event loop of its own to pump from — the launch
+    /// probe (SQ-1781), which runs before the story list and must hand that
+    /// screen a tty with no replies still in flight. Keystrokes read meanwhile
+    /// stay in the sweep for replay. Returns at once when nothing is owed, which
+    /// is every terminal that answers in time.
+    pub fn settle(&mut self) {
+        while self.owed {
+            self.pump();
+            if self.owed {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
     /// Push read bytes through the classifier.
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
