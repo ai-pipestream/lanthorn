@@ -3424,9 +3424,9 @@ mod tests {
         // is clipped to the pane, not the wider frame.
         assert_eq!(read_row(&buf, 1, 40, 60).trim(), "", "toast is clipped to the story pane, not the map");
         // The notification style — the registry's `notification` selector, which
-        // derives from the `accent` role reversed (blue reverse-video since
-        // SQ-1531, cyan before it) — is applied to the content cells. (SQ-0309:
-        // was a baked black-on-cyan Style; now REVERSED accent fg, same idiom.)
+        // derives from the `accent` role reversed (cyan reverse-video) — is
+        // applied to the content cells. (SQ-0309: was a baked black-on-cyan
+        // Style; now REVERSED cyan fg, same visual result.)
         let cell = buf.cell((30, 1)).expect("content cell exists");
         let themed = state.colors.theme.get("notification").style;
         assert_eq!(Some(cell.fg), themed.fg, "toast uses the themed notification fg");
@@ -5641,10 +5641,10 @@ mod tests {
             .expect("meta gutter '▏' must appear in column 0");
         assert_eq!(buf.cell((2, meta_y)).unwrap().style().fg, Some(Color::DarkGray)); // transcript_meta
 
-        // Input row: no gutter (text at column 0), blue fg (accent, SQ-1531).
+        // Input row: no gutter (text at column 0), cyan fg.
         let input_y = (1u16..9).find(|&y| row_text(y).starts_with("> go north"))
             .expect("input line must render at column 0");
-        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Blue)); // transcript_input
+        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
     }
 
     /// SQ-1045: on screen an assist is identified by its MARK and by nothing
@@ -5765,7 +5765,7 @@ mod tests {
         }).expect("location line must render");
         assert_eq!(
             buf.cell((0, y)).unwrap().style().fg,
-            Some(Color::Blue),
+            Some(Color::Cyan),
             "location header must carry the accent colour"
         );
     }
@@ -8036,9 +8036,9 @@ mod tests {
         fn inline_command_takes_the_transcript_input_colour_and_the_prompt_stays_story_text() {
             for honor in [true, false] {
                 let row = prompt_row(&inline_state(honor), "look");
-                assert_ne!(row[0].1.fg, Some(Color::Blue), "honor={honor}: the `>` is story text, not input");
+                assert_ne!(row[0].1.fg, Some(Color::Cyan), "honor={honor}: the `>` is story text, not input");
                 for (i, (ch, st)) in row.iter().enumerate().skip(1) {
-                    assert_eq!(st.fg, Some(Color::Blue), "honor={honor}: `{ch}` (col {i}) renders as transcript_input, not story text");
+                    assert_eq!(st.fg, Some(Color::Cyan), "honor={honor}: `{ch}` (col {i}) renders as transcript_input, not story text");
                 }
             }
         }
@@ -8058,7 +8058,7 @@ mod tests {
                     .find(|&y| buf.cell((0, y)).unwrap().symbol() == ">")
                     .expect("input line");
                 for x in 0..6 {
-                    assert_eq!(buf.cell((x, y)).unwrap().style().fg, Some(Color::Blue), "honor={honor} col {x}");
+                    assert_eq!(buf.cell((x, y)).unwrap().style().fg, Some(Color::Cyan), "honor={honor} col {x}");
                 }
             }
         }
@@ -8084,8 +8084,8 @@ mod tests {
         fn the_stories_own_input_colour_wins_only_when_game_colours_are_honoured() {
             let green = pack_zcolour(ZColour::True24(0x0000_FF00));
             assert_eq!(drawn(run(0, 0, 0, green), true, None).fg, Some(Color::Rgb(0, 255, 0)));
-            assert_eq!(drawn(run(0, 0, 0, green), false, None).fg, Some(Color::Blue), "false: the theme always applies");
-            assert_eq!(drawn(run(0, 0, 0, 0), true, None).fg, Some(Color::Blue), "no opinion: the theme applies");
+            assert_eq!(drawn(run(0, 0, 0, green), false, None).fg, Some(Color::Cyan), "false: the theme always applies");
+            assert_eq!(drawn(run(0, 0, 0, 0), true, None).fg, Some(Color::Cyan), "no opinion: the theme applies");
         }
 
         #[test]
@@ -8163,7 +8163,7 @@ mod tests {
             assert!(after.transcript_runs[1].iter().any(|r| r.glk_style == GLK_STYLE_TYPED_INPUT), "non-vacuity: the restored run survived the JSON trip");
             let row = prompt_row(&after, "look");
             for (ch, st) in row.iter().skip(1) {
-                assert_eq!(st.fg, Some(Color::Blue), "restored `{ch}` is still input-styled after a further move");
+                assert_eq!(st.fg, Some(Color::Cyan), "restored `{ch}` is still input-styled after a further move");
             }
         }
 

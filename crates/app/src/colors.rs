@@ -199,7 +199,7 @@ pub fn host_default_colours(
 /// Applies ONLY when the scheme is the unconfigured all-`Reset` one: a real
 /// configured scheme (built-in name or file) is the user's explicit choice and
 /// is never second-guessed. The palette is left untouched, so `from_scheme`'s
-/// per-slot fallback still supplies the cyan/blue/yellow/grey accents.
+/// per-slot fallback still supplies the cyan/yellow/grey accents.
 ///
 /// A PARTIAL probe answer (fg without bg, or bg without fg) is skipped whole
 /// rather than mixed, matching the house rule [`host_default_colour_pair`]
@@ -1158,12 +1158,12 @@ mod tests {
         // ride the theme (registry defaults per docs/design/2026-07-14-styling-
         // role-redesign.md §2's element table).
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Blue));
+        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Cyan));
         assert_eq!(cs.theme.get("transcript_meta").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("transcript_warning").style.fg, Some(Color::Yellow));
         // transcript_location = accent (no bold) — a deliberate SQ-0309 redesign
         // change from the old bold-only-white location header.
-        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Blue));
+        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Cyan));
         assert!(!cs.theme.get("transcript_location").style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(cs.theme.get("transcript_system").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("warning_marker").style.fg, Some(Color::Yellow));
@@ -1191,7 +1191,7 @@ mod tests {
         // 2. Built-in location: line equals room name → transcript_location's
         // accent colour patched over the base (SQ-0309: accent, not bold).
         let loc = cs.resolve_story_style(base, "West of House", Some("West of House"), false);
-        assert_eq!(loc.fg, Some(Color::Blue));
+        assert_eq!(loc.fg, Some(Color::Cyan));
         assert!(!loc.add_modifier.contains(Modifier::BOLD));
 
         // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
@@ -1616,7 +1616,7 @@ unknown-key = ignored
         assert_eq!(seeded.foreground, Color::Rgb(0xc5, 0xc8, 0xc6));
         assert_eq!(seeded.background, Color::Rgb(0xfd, 0xf6, 0xe3));
         // The palette is deliberately untouched: `from_scheme`'s per-slot
-        // fallback still supplies the cyan/blue/yellow/grey accents (SQ-0642).
+        // fallback still supplies the cyan/yellow/grey accents (SQ-0642).
         assert_eq!(seeded.palette, [Color::Reset; 16], "accents keep their per-slot fallback");
     }
 

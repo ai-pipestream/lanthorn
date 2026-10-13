@@ -31,6 +31,9 @@ while any such tag, or this Unreleased section, still exists.*
   browser, the download keep-or-not prompt and the first-run font check used to draw in the
   built-in colours whatever your style file said; they now use your roles, elements and
   terminal colours exactly as the game does.
+- **Highlights are cyan again by default.** Links, selections, the current room and the like
+  went blue in an earlier release, which was hard to read on some terminal colour schemes.
+  If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
 - **The command panel's compass shows what the map knows.** Each way out of the room you are
   standing in is dressed by the map: ways you have explored look as before, exits waiting to be
   walked stand out in the map's exit colour, and directions that go nowhere are dimmed (they stay
