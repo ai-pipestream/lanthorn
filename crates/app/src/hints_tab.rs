@@ -780,14 +780,20 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
 
     // Word-wrap each logical transcript line to the width, then show the window of
     // `body_h` rows honouring `session.scroll` (the eased value while animating).
-    let wrapped: Vec<String> = session
-        .transcript
-        .iter()
-        .flat_map(|line| wrap_line(line, body_area.width))
-        .collect();
+    let mut wrapped: Vec<String> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(session.transcript.len());
+    for line in &session.transcript {
+        starts.push(wrapped.len());
+        wrapped.extend(wrap_line(line, body_area.width));
+    }
     let n = wrapped.len();
     let rows = body_h as usize;
-    let max_scroll = n.saturating_sub(rows).min(u16::MAX as usize) as u16;
+    // Top-anchor the post-clear screen exactly as the story pane does (shared
+    // `render::transcript` helpers, SQ-1789): at the bottom, output since the
+    // program's last screen clear sits at the TOP with blanks below, older text
+    // reachable by scrolling up.
+    let anchor_row = crate::render::transcript::anchor_row_at(&starts, n, session.top_anchor);
+    let max_scroll = crate::render::transcript::anchored_max_scroll(n, anchor_row, rows).min(u16::MAX as usize) as u16;
     hits.max_scroll = max_scroll;
     let scroll = (session.effective_scroll() as usize).min(max_scroll as usize);
 
@@ -796,8 +802,7 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
     let text_w = if scrollbar_visible { body_area.width.saturating_sub(1) } else { body_area.width };
     let text_area = Rect::new(body_area.x, body_area.y, text_w, body_area.height);
 
-    let end = n.saturating_sub(scroll);
-    let start = end.saturating_sub(rows);
+    let (start, end) = crate::render::transcript::anchored_window_bounds(n, anchor_row, rows, scroll);
     for (i, line) in wrapped[start..end].iter().enumerate() {
         let row_y = body_top + i as u16;
         if row_y >= text_area.bottom() {
@@ -854,7 +859,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec!["pick a topic".to_string()],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: "3".to_string(),
             label: "Hints: X".to_string(),
@@ -883,6 +888,76 @@ mod tests {
         rows
     }
 
+    /// SQ-1789: after a screen clear the panel's rows start at the post-clear text
+    /// (the intro printed before the FIRST clear is not on screen), and scrolling up
+    /// brings the intro back.
+    #[test]
+    fn the_panel_pins_to_the_text_since_the_programs_last_clear() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        let turn = |text: &str, erase_lower: bool| crate::session::TurnResult {
+            transcript: text.to_string(),
+            erase_lower,
+            ..crate::session::TurnResult::default()
+        };
+        hs.apply_turn(&turn("intro one\nSample Question", false));
+        hs.apply_turn(&turn("menu alpha\nmenu beta", true));
+        let mut state = tab_state(hs);
+
+        let rows = screen_rows(60, 20, &state);
+        assert!(!rows.iter().any(|r| r.contains("intro one") || r.contains("Sample Question")), "{rows:#?}");
+        let alpha = rows.iter().position(|r| r.contains("menu alpha")).expect("menu drawn");
+        assert!(rows[alpha + 1].contains("menu beta"));
+        assert!(rows[alpha + 2].trim_matches(|c: char| !c.is_alphanumeric()).is_empty(), "blank below the pinned text");
+
+        state.overlays.hints.as_mut().unwrap().scroll = 2;
+        let rows = screen_rows(60, 20, &state);
+        let intro = rows.iter().position(|r| r.contains("intro one")).expect("scrollback reachable");
+        let alpha = rows.iter().position(|r| r.contains("menu alpha")).unwrap();
+        assert!(intro < alpha, "scrolling up reveals the intro above the pinned text");
+    }
+
+    /// SQ-1789, real program: hhgginv.z5 prints its introduction and a "Sample Question"
+    /// before its first screen clear. After the clear the visible screen is only what it
+    /// printed since; the intro stays reachable as scrollback. Skips when absent.
+    #[test]
+    fn hhgginv_intro_is_cleared_off_the_screen_but_kept_as_scrollback() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/hhgginv.z5");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: stories/hhgginv.z5 absent");
+            return;
+        };
+        let mut vm = crate::session::GameSession::new(bytes, true, false, None).expect("boot");
+        let opening = vm.take_transcript();
+        let mut hs = HintSession {
+            source: HintSource::Zcode(vm),
+            transcript: opening.split('\n').map(str::to_owned).collect(),
+            scroll: 0,
+            clear_anchor: None,
+            top_anchor: None,
+            scroll_anim: None,
+            input: String::new(),
+            label: "hhgginv.z5".to_string(),
+            builtin_hint: false,
+        };
+        assert!(hs.transcript.iter().any(|l| l.contains("Sample Question")), "premise: intro is up");
+        for _ in 0..3 {
+            let HintSource::Zcode(vm) = &mut hs.source;
+            let result = vm.submit_char(b' ');
+            hs.apply_turn(&result);
+        }
+        let anchor = hs.top_anchor.expect("the program cleared its screen");
+        let screen = &hs.transcript[anchor..];
+        assert!(!screen.iter().any(|l| l.contains("Sample Question") || l.contains("InvisiClues")), "{screen:?}");
+        assert!(screen.iter().any(|l| l.contains("press 'H' for a hint")), "{screen:?}");
+        assert!(hs.transcript[..anchor].iter().any(|l| l.contains("Sample Question")), "intro kept as scrollback");
+
+        let state = tab_state(hs);
+        let rows = screen_rows(80, 24, &state);
+        assert!(!rows.iter().any(|r| r.contains("Sample Question")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("press 'H' for a hint")));
+    }
+
     /// SQ-1753: the panel's drawn size is what a running hint program is told, and a later
     /// resize of the panel is re-declared; before the first draw there is no size to give.
     #[test]
@@ -897,7 +972,7 @@ mod tests {
             source: HintSource::Zcode(vm),
             transcript: Vec::new(),
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: X".to_string(),

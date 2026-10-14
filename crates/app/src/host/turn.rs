@@ -1178,36 +1178,6 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
 }
 
-/// Whether `new_content` looks like the OLD lines (`old_lines`, the ones a
-/// game-driven screen clear is about to discard) redrawing themselves rather
-/// than an entirely different screen taking over. Used to decide whether a
-/// game-driven `erase_lower` should collapse the prior screen via
-/// `truncate_transcript` (a genuine same-screen reprint — Counterfeit
-/// Monkey's arrow-navigated help menu, which reprints the whole menu on every
-/// keypress with only the cursor line differing) or preserve it (a totally
-/// different screen — Anchorhead's intro/quote/game-start sequence, or a
-/// picture click's empty-content clear followed later by unrelated room
-/// text). (SQ-1654)
-///
-/// Compares non-blank, trimmed lines on both sides. If either side has none,
-/// this is never a reprint — there's nothing to compare against, so don't
-/// destroy scrollback on a hunch; this is what keeps a picture click's
-/// empty-content clear from ever being treated as reprint-worthy. Otherwise
-/// counts how many of the new non-blank lines exactly match some old
-/// non-blank line; >=50% overlap counts as a reprint. The threshold sits in
-/// the middle of a wide gap between the two real cases (~0% overlap for
-/// Anchorhead's transitions, ~90%+ for CM's cursor-only-changes menu redraw)
-/// and does not need precise tuning.
-fn is_screen_reprint(old_lines: &[String], new_content: &str) -> bool {
-    let old_nonblank: Vec<&str> = old_lines.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    let new_nonblank: Vec<&str> = new_content.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    if old_nonblank.is_empty() || new_nonblank.is_empty() {
-        return false;
-    }
-    let matches = new_nonblank.iter().filter(|l| old_nonblank.contains(l)).count();
-    (matches as f64 / new_nonblank.len() as f64) >= 0.5
-}
-
 /// Apply a `TurnResult` produced by game-driven input that is not a full player
 /// command submission — a char-mode (`read_char`) keypress or a timed-input
 /// interrupt tick. Pushes transcript output (with style runs), routes
@@ -1271,10 +1241,9 @@ pub fn apply_game_driven_result(
         // behavior back, with no scroll animation on the transition (both
         // `mark_screen_clear` already guarantees by setting `scroll_anim =
         // None` directly).
-        if let Some(anchor) = state.clear_anchor {
-            if is_screen_reprint(&state.transcript[anchor..], &new_content_text) {
-                state.truncate_transcript(anchor);
-            }
+        // The collapse decision is shared with the hint panel (SQ-1789).
+        if let Some(anchor) = crate::screen_clear::collapse_target(state.clear_anchor, &state.transcript, &new_content_text) {
+            state.truncate_transcript(anchor);
         }
         state.mark_screen_clear();
         // No TurnRecord is made for this turn; the next recorded one carries the

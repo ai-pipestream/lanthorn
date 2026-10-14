@@ -200,7 +200,7 @@ pub fn open_with_tuid(
         source: HintSource::Zcode(vm),
         transcript,
         scroll: 0,
-        clear_anchor: None,
+        clear_anchor: None, top_anchor: None,
         scroll_anim: None,
         input: String::new(),
         label,

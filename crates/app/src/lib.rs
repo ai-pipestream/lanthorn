@@ -62,6 +62,7 @@ pub mod slash;
 pub mod colors;
 pub mod typed_input;
 pub mod status_text;
+pub mod screen_clear;
 pub mod screen_reader;
 pub mod complete;
 pub mod config;

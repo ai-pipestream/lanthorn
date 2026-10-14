@@ -36,6 +36,11 @@ pub struct HintSession {
     /// screen for a menu redraw (menu-reprint collapse anchor). `None` until
     /// the first screen clear establishes an anchor.
     pub clear_anchor: Option<usize>,
+    /// The clear boundary the panel top-anchors against (equal to `clear_anchor`
+    /// after every clear, as on `AppState`): lines from here on are the screen the
+    /// program last drew; older lines are scrollback. An embedding host reading
+    /// `transcript` shows `transcript[top_anchor..]` as the cleared view.
+    pub top_anchor: Option<usize>,
     /// Smooth-scroll animation easing the *displayed* offset toward `scroll`.
     /// `None` when settled or animation is disabled (the instant path).
     pub scroll_anim: Option<ScrollAnim>,
@@ -107,9 +112,17 @@ impl HintSession {
     pub fn apply_turn(&mut self, result: &crate::session::TurnResult) {
         let mut changed = false;
         if result.erase_lower {
-            let anchor = self.clear_anchor.unwrap_or(self.transcript.len());
-            self.transcript.truncate(anchor);
-            self.clear_anchor = Some(self.transcript.len());
+            // Same semantics as the story pane (`AppState::mark_screen_clear` and
+            // `apply_game_driven_result`), via the shared `screen_clear` helpers:
+            // a reprint of the screen since the last clear collapses; anything else
+            // stays as scrollback; either way the post-clear output pins to the top.
+            if let Some(anchor) =
+                crate::screen_clear::collapse_target(self.clear_anchor, &self.transcript, &result.transcript)
+            {
+                self.transcript.truncate(anchor);
+            }
+            self.clear_anchor = crate::screen_clear::pin_after_clear(self.transcript.len());
+            self.top_anchor = self.clear_anchor;
             changed = true;
         }
         if !result.transcript.is_empty() {
@@ -5516,7 +5529,7 @@ impl AppState {
     /// rather than an organically-followed reader, and takes the instant-jump
     /// path instead of arming a follow-ease (SQ-1607).
     pub fn mark_screen_clear(&mut self) {
-        self.clear_anchor = Some(self.transcript.len());
+        self.clear_anchor = crate::screen_clear::pin_after_clear(self.transcript.len());
         self.top_anchor = self.clear_anchor;
         self.transcript_scroll = 0;
         self.scroll_anim = None;
@@ -8962,7 +8975,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -9018,7 +9031,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -9062,15 +9075,45 @@ mod tests {
         assert_eq!(hs.transcript.len(), 3);
         assert_eq!(hs.clear_anchor, Some(0));
 
-        // Second menu redraw: must collapse the first reprint, not stack on it.
-        hs.apply_turn(&turn_result("m2a\nm2b", true));
+        // Second menu redraw (same menu, cursor moved): must collapse the first
+        // reprint, not stack on it.
+        hs.apply_turn(&turn_result("m1a\nm1b\nm1c*", true));
         assert_eq!(
             hs.transcript.len(),
-            2,
+            3,
             "second erase_lower collapses the prior reprint back to the anchor"
         );
-        assert_eq!(hs.transcript, vec!["m2a".to_string(), "m2b".to_string()]);
+        assert_eq!(hs.transcript, vec!["m1a".to_string(), "m1b".to_string(), "m1c*".to_string()]);
         assert_eq!(hs.scroll, 0);
+    }
+
+    /// SQ-1789: intro, clear, menu, clear (redraw), menu again, clear, clue. Each
+    /// clear pins the view to the text since it (`top_anchor`), the first clear
+    /// included; the intro stays in scrollback; menu reprints collapse.
+    #[test]
+    fn apply_turn_every_clear_pins_to_the_text_since_it_and_keeps_the_intro_as_scrollback() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        let since = |hs: &HintSession| hs.transcript[hs.top_anchor.unwrap()..].to_vec();
+
+        hs.apply_turn(&turn_result("intro 1\nSample Question", false));
+        assert_eq!(hs.top_anchor, None, "nothing cleared yet");
+
+        hs.apply_turn(&turn_result("menu a\nmenu b", true));
+        assert_eq!(hs.top_anchor, Some(2), "the FIRST clear pins too");
+        assert_eq!(since(&hs), vec!["menu a", "menu b"]);
+        assert_eq!(hs.transcript[0], "intro 1", "the intro is scrollback, not deleted");
+
+        hs.apply_turn(&turn_result("menu a\nmenu b*", true));
+        assert_eq!(hs.transcript.len(), 4, "the redraw collapsed instead of stacking");
+        assert_eq!(hs.top_anchor, Some(2));
+        assert_eq!(hs.clear_anchor, hs.top_anchor);
+        assert_eq!(since(&hs), vec!["menu a", "menu b*"]);
+
+        hs.apply_turn(&turn_result("the clue\nsecond clue line", true));
+        assert_eq!(hs.top_anchor, Some(4), "a different screen is kept as scrollback");
+        assert_eq!(since(&hs), vec!["the clue", "second clue line"]);
+        assert_eq!(hs.transcript.len(), 6);
     }
 
     #[test]
