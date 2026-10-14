@@ -1257,8 +1257,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                     use zvm::error::ZError;
                     let msg = match e {
                         ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
-                        ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
-                        ZError::Truncated => "story file is truncated".to_string(),
+                        ZError::NotAStoryFile => "file is not a valid Z-machine game file".to_string(),
+                        ZError::Truncated => "game file is truncated".to_string(),
                         _ => format!("{e:?}"),
                     };
                     return Err(BootError(msg));
@@ -1328,7 +1328,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 Some(random_seed),
             ) {
                 Ok(s) => Box::new(s),
-                Err(e) => return Err(BootError(format!("cannot load Glulx story: {e:?}"))),
+                Err(e) => return Err(BootError(format!("cannot load Glulx game: {e:?}"))),
             }
         }
         crate::hints::LoadedStory::Scott(bytes) => {
@@ -1355,7 +1355,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 pictures,
             ) {
                 Ok(s) => Box::new(s),
-                Err(e) => return Err(BootError(format!("cannot load Scott Adams story: {e}"))),
+                Err(e) => return Err(BootError(format!("cannot load Scott Adams game: {e}"))),
             }
         }
     };

@@ -363,11 +363,11 @@ pub fn start_game_download_with_tuid(
     if downloader.busy() {
         ALREADY_DOWNLOADING.to_string()
     } else if session_running {
-        "This story already has a hint file".to_string()
+        "This game already has a hint file".to_string()
     } else if launch_download(downloader, ifid, tuid, story_path, disk_entry, title, documents) {
         "Downloading hints…".to_string()
     } else {
-        "No InvisiClues found for this story".to_string()
+        "No InvisiClues found for this game".to_string()
     }
 }
 

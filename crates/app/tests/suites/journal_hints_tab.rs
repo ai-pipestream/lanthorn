@@ -868,13 +868,13 @@ fn start_game_download_decides_running_busy_nohint_and_start() {
     // A running session: the story already has a hint file; nothing started.
     assert_eq!(
         start_game_download(&mut dl, ZORK_IFID, "Zork", &story, None, None, true),
-        "This story already has a hint file"
+        "This game already has a hint file"
     );
     assert!(!dl.busy());
     // No IFDB hint for this IFID.
     assert_eq!(
         start_game_download(&mut dl, "NOPE", "Zork", &story, None, None, false),
-        "No InvisiClues found for this story"
+        "No InvisiClues found for this game"
     );
     // Otherwise it starts, and the result names the story by its title.
     assert_eq!(start_game_download(&mut dl, ZORK_IFID, "Zork", &story, None, None, false), "Downloading hints…");

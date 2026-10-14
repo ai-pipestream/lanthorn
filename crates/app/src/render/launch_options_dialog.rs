@@ -174,7 +174,7 @@ pub fn draw_launch_options(
     // and the user is still the one asserting the pairing — "detected for" says
     // that, where "the archives for" would imply a guarantee the file format
     // cannot give.
-    line(buf, "Artwork — archives detected for this story", header, &mut y);
+    line(buf, "Artwork — archives detected for this game", header, &mut y);
     // Scroll the art window to keep the cursor visible, exactly as a list does.
     // Indices here are the flat cursor indices: 0 is "inherit", 1.. the
     // candidates in the order `discover_art_candidates` sorted them.
@@ -244,7 +244,7 @@ pub fn draw_launch_options(
     // saying "none detected" directly under a row naming one would be a plain
     // contradiction on screen.
     if st.candidates.is_empty() && st.default_art.is_none() {
-        line(buf, "  no picture archives detected for this story", dim, &mut y);
+        line(buf, "  no picture archives detected for this game", dim, &mut y);
     }
     // Selecting "inherit" over a sidecar that names an archive cannot be
     // expressed as a session override — there is no "override with nothing" — so
@@ -275,7 +275,7 @@ pub fn draw_launch_options(
             crate::launch_options::interpreter_name(n),
             src.label()
         ),
-        None => "      this story has no Z-machine header to advertise it in".to_string(),
+        None => "      this game has no Z-machine header to advertise it in".to_string(),
     };
     line(buf, &derived, dim, &mut y);
 
@@ -303,7 +303,7 @@ pub fn draw_launch_options(
     let game_colours_idx = colour_source_idx + 1;
     let gc_note = if st.honor_game_colours_cli_locked { "   (fixed by --game-colours)" } else { "" };
     let gc_label =
-        format!("  {} Game colours (honor the story's own){}", checkbox(st.honor_game_colours), gc_note);
+        format!("  {} Game colours (honor the game's own){}", checkbox(st.honor_game_colours), gc_note);
     option_row(buf, game_colours_idx, &gc_label, &mut rows, &mut y);
 
     let persist_idx = game_colours_idx + 1;
@@ -367,7 +367,7 @@ mod tests {
         // The provenance is not optional — it is the whole reason the number is
         // shown at all.
         assert!(text.contains("header 0x1E = 6"), "derived number: {text:?}");
-        assert!(text.contains("default for this story"), "provenance: {text:?}");
+        assert!(text.contains("default for this game"), "provenance: {text:?}");
         assert!(text.contains("Save as this game's default"));
         assert!(text.contains("[ ]"), "checkbox starts clear");
         assert_eq!(r.rows.len(), st.row_count(), "one hit-rect per selectable row");

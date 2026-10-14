@@ -26,7 +26,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # ═══ TEXT — foreground colour + emphasis (these selectors have no surface of their own) ═══
 
 # ── Elements: app text + host surfaces (status/help bars, upper window,
-# story browser). Every line already equals its default.
+# game browser). Every line already equals its default.
 [elements]
 # transcript = { parent = "text" }
 # status_bar = { parent = "chrome", reversed = true }
@@ -41,10 +41,10 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # scrollbar_track = { parent = "muted" }
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
-# badge_icons = "plain"   # plain | nerdfont   (the story-list badges below; each key overrides one)
-# badge_save = "S"   # story-list badge: the story has a save
-# badge_hint = "H"   # story-list badge: hints are installed
-# badge_hint_available = "h"   # story-list badge: hints exist but aren't downloaded
+# badge_icons = "plain"   # plain | nerdfont   (the game-list badges below; each key overrides one)
+# badge_save = "S"   # game-list badge: the game has a save
+# badge_hint = "H"   # game-list badge: hints are installed
+# badge_hint_available = "h"   # game-list badge: hints exist but aren't downloaded
 # hyperlink = { parent = "accent", underline = true }
 # story_info_label = { parent = "muted" }
 # suggestion = { parent = "muted" }
@@ -258,8 +258,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 
 # ═══ SURFACES — bordered boxes: a background + frame + the text drawn on them ═══
 
-# ── Panel: the tiled panes (story/map/verb/debug frames) — background,
-# border, title, tabs. Story/Glk windows use [glk.*], not this section.
+# ── Panel: the tiled panes (game/map/verb/debug frames) — background,
+# border, title, tabs. Game/Glk windows use [glk.*], not this section.
 [panel]
 # background = {}
 # border = { parent = "line", style = "single" }   # style: none | single | double | thick | rounded
@@ -303,7 +303,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # background = { parent = "dialog.list_selected", bold = false }
 # border = { parent = "line", style = "none" }   # style: none | single | double | thick | rounded
 
-# ── Story-line styling rules: recolour whole transcript lines matching a ────
+# ── Game-line styling rules: recolour whole transcript lines matching a ────
 # ── regex. Rules are tried in order; the first match wins. ──────────────────
 # [[transcript.rule]]
 # match = "^>.*"                 # your echoed command lines → magenta bold

@@ -39,7 +39,7 @@ use crate::state::{AppState, Focus, HintSession, HintSource};
 /// The registry command the tab's button runs.
 pub const CMD_DOWNLOAD: &str = "download-hints";
 const DOWNLOAD_LABEL: &str = " [ Download hints… ] ";
-const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in the story.";
+const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in the game.";
 /// Lines scrolled per PageUp/PageDown while the session has the keyboard.
 const HINT_PAGE_LINES: i32 = 10;
 
@@ -719,7 +719,7 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
     fill(buf, input_rect, input_style);
     let line = if char_mode {
         if focused {
-            "(press a key \u{00b7} \u{2191}/\u{2193}/Enter navigate \u{00b7} Esc back to the story)".to_string()
+            "(press a key \u{00b7} \u{2191}/\u{2193}/Enter navigate \u{00b7} Esc back to the game)".to_string()
         } else {
             "(click here, or Tab, to use the hint menu)".to_string()
         }

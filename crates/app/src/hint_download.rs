@@ -182,7 +182,7 @@ fn finalize_into(bytes: &[u8], dest: HintDest, url: &str, title: &str) -> (HintD
         HintDest::Documents { dir, filename } => {
             let planned = dir.join(&filename);
             if !looks_like_zmachine(bytes) {
-                return (HintDlOutcome::Failed("downloaded file is not a Z-machine story".to_string()), planned);
+                return (HintDlOutcome::Failed("downloaded file is not a Z-machine game".to_string()), planned);
             }
             let stage = std::env::temp_dir().join(format!(
                 "lanthorn-hint-{}-{}",
@@ -217,7 +217,7 @@ fn finalize_into(bytes: &[u8], dest: HintDest, url: &str, title: &str) -> (HintD
 /// truncated file that the next scan would treat as the hint sidecar.
 fn finalize_download(bytes: &[u8], dest: &Path) -> HintDlOutcome {
     if !looks_like_zmachine(bytes) {
-        return HintDlOutcome::Failed("downloaded file is not a Z-machine story".to_string());
+        return HintDlOutcome::Failed("downloaded file is not a Z-machine game".to_string());
     }
     if dest.exists() {
         return HintDlOutcome::Failed(format!("{} already exists", dest.display()));

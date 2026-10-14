@@ -1,6 +1,6 @@
 # Getting started
 
-For anyone installing lanthorn for the first time and opening their first story.
+For anyone installing lanthorn for the first time and opening their first game.
 
 ## Install
 
@@ -15,17 +15,17 @@ On Windows, two things are worth knowing up front. Closing the console
 window (rather than quitting from inside lanthorn) kills the process before
 it can save anything, so if you want to walk away mid-session, save first —
 `Ctrl+S` for a Save State — or quit through the app. And if you change your
-terminal's font size while a story is open, lanthorn won't notice until you
+terminal's font size while a game is open, lanthorn won't notice until you
 restart it; on macOS and Linux it picks the change up on the next resize.
 
-## Where story files go
+## Where game files go
 
-lanthorn doesn't care where your stories live — point it at a single file or
+lanthorn doesn't care where your games live — point it at a single file or
 at a whole folder:
 
 ```bash
 lanthorn zork1.z3           # straight into one game
-lanthorn ~/if-games/        # a directory — opens the story picker
+lanthorn ~/if-games/        # a directory — opens the game picker
 ```
 
 The second form is the one to get used to: hand lanthorn a folder and it
@@ -33,10 +33,10 @@ offers to remember it, so a bare `lanthorn` next time goes straight there. It al
 fetches the file, opens it like anything else, and then offers to keep a
 copy in your library so the next launch doesn't fetch it again.
 
-## The story picker
+## The game picker
 
 Point lanthorn at a folder and you get a browsable library rather than a
-single game. Each row names the story and, in the **TYPE** column, its
+single game. Each row names the game and, in the **TYPE** column, its
 engine and version at a glance — `Z5`, `Z6 (ADF)`, `G3.1.2`, `Scott`,
 `Scott (z80)` for a ZX Spectrum snapshot — plus
 badges for an existing save and an available hint file. Press `g` to flip
@@ -55,22 +55,22 @@ fetch whatever's at the other end of it.
 A big library sorts itself into folders, and the picker follows: `Enter` on
 a folder descends into it, `Backspace` climbs back out. `Ctrl+F` searches
 the *whole* library at once, by title, author, filename or folder, no
-matter how deep a story is buried. `Enter` plays the highlighted story; `o`
+matter how deep a game is buried. `Enter` plays the highlighted game; `o`
 opens its launch options first — which artwork a graphical game draws and
 which machine it plays as — see [graphics and terminals](graphics-and-terminals.md).
 Quit back out of a game and the picker remembers exactly where you were —
-same folder (or the same disk image's shelf of games), same story
+same folder (or the same disk image's shelf of games), same game
 highlighted — rather than dropping you back at the top of the library.
 
-Everything you can do to *one* story lives in one place: press `Space`, or
+Everything you can do to *one* game lives in one place: press `Space`, or
 right-click a row or a cover, and a little menu opens beside it — open the
-story, launch options, fetch its metadata, get its hints, point it at an
+game, launch options, fetch its metadata, get its hints, point it at an
 IFDB page — each with its own key shown alongside, so you learn the key by
 using the menu and then stop needing it. The line along the bottom of the
 screen names only the keys that act on the *library*, and `?` shows the
 full list whenever you want it.
 
-**A folder for each game's manual and maps.** Once a story is linked to its
+**A folder for each game's manual and maps.** Once a game is linked to its
 IFDB page, the info panel shows its *documents folder*: a place to keep the
 manual, the feelies, a map scan, whatever came in the box. It is named
 `<Title> [<IFDB id>]` and lives under `documents/` in your data folder, shared by every
@@ -79,18 +79,18 @@ brackets, so a title that IFDB later corrects never loses your files, and a fold
 you make or rename yourself works as long as it ends in ` [<id>]`. Lanthorn does
 not create these on its own unless you ask it to: until the folder exists the
 panel shows where it would go and a **Create documents folder** button (also `m`,
-or the story menu). Set `create_documents_folders = true` in `config.toml` to have
+or the game menu). Set `create_documents_folders = true` in `config.toml` to have
 lanthorn make each linked game's folder as it finds it, and `documents_dir = "..."`
 to keep them somewhere other than that `documents/` folder. Both are read from the
 shared `config.toml` only, so a named player's file cannot move or switch them.
-A story that is not linked to IFDB has no documents folder; the panel says so.
+A game that is not linked to IFDB has no documents folder; the panel says so.
 Once the folder has files in it, the panel lists them under it (name, kind, size,
 and a *spoiler* mark on walkthroughs); click one to open it, the same way the Documents
 tab does: images and text show right there, anything else goes to your system's viewer.
 
 **Fetching what IFDB lists.** IFDB's page for a game often links its manual, a
 map, a transcript of the original packaging, or a walkthrough. Press `Shift+D`
-on a linked story, or choose **Download documents from IFDB…** from its menu, or
+on a linked game, or choose **Download documents from IFDB…** from its menu, or
 click **Download documents…** in the info panel, to see them in a list. (Inside a
 game, `/download-documents` does the same.) Move with the arrow keys, press
 `Space` to mark the ones you want, and `Enter` to save them into the game's
@@ -129,7 +129,7 @@ documents folder, which is made if it is not there yet. With nothing marked,
 lanthorn at any volume from a set — the seven Apple II floppies of *The Lost
 Treasures of Infocom*, `floppy1.ima` through `floppy5.ima` — and it opens a
 single picker across every game the release holds, sorted, searchable, each
-with its own saves and cover, instead of playing whichever story happened to
+with its own saves and cover, instead of playing whichever game happened to
 sit on the disk you named. A disk or archive holding just one game still
 opens straight into it.
 
@@ -141,7 +141,7 @@ filesystem, finds the game, and presents the machine that disk came from:
 interpreter number, palette and artwork together, exactly as it looked on
 that hardware. A disk image is a specific build of a game, not just another
 copy of one you already have — a floppy's release and serial can genuinely
-differ from the bare story file's — so treat one as its own thing worth
+differ from the bare game file's — so treat one as its own thing worth
 keeping around rather than a redundant format. The mechanics live in
 [the interpreter notes](../internals/interpreter.md).
 
@@ -149,5 +149,5 @@ keeping around rather than a redundant format. The mechanics live in
 
 No terminal you like the look of? See
 [Play in a browser](play-in-a-browser.md) — lanthorn runs in a browser tab
-too. Once a story's open, [Playing](playing.md) covers the keys, the mouse
+too. Once a game's open, [Playing](playing.md) covers the keys, the mouse
 and the aids lanthorn gives you while you play.

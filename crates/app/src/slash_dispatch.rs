@@ -478,7 +478,7 @@ pub(crate) fn dispatch_slash_outcome(
         SlashOutcome::QuitToLibrary => {
             // Only meaningful when launched from a directory (a picker exists).
             if !state.launched_from_library {
-                state.set_status("No story library — launched with a single file");
+                state.set_status("No game library — launched with a single file");
             } else {
                 // Return-to-library mirrors Quit's save handling, but resolves
                 // the loop to the library instead of exiting. The break sites
@@ -774,14 +774,14 @@ pub(crate) fn dispatch_slash_outcome(
                 // speak, because each names the reason nothing lit.
                 Armed::Lit { .. } => {}
                 Armed::Nothing => {
-                    state.set_status("[nothing on screen is a word this story takes]")
+                    state.set_status("[nothing on screen is a word this game takes]")
                 }
                 // A different sentence, because it is a different claim: the one
                 // above is about the ROOM, and this one is about US (SQ-1150).
                 Armed::NoVocabulary => {
-                    state.set_status("[lanthorn cannot read this story's words]")
+                    state.set_status("[lanthorn cannot read this game's words]")
                 }
-                Armed::NoText => state.set_status("[no story text on screen to read]"),
+                Armed::NoText => state.set_status("[no game text on screen to read]"),
                 Armed::GuidanceOff => state.set_status(
                     "[the Guiding Light is out — /set-guidance on to use the reveal]",
                 ),
@@ -913,7 +913,7 @@ pub(crate) fn dispatch_slash_outcome(
         // resolved in the wrong context, and the honest answer is to say so
         // rather than silently swallow the key.
         SlashOutcome::Browser(_) => {
-            state.set_status("[that command belongs to the story browser]".to_string());
+            state.set_status("[that command belongs to the game browser]".to_string());
         }
     }
     false
@@ -1451,7 +1451,7 @@ mod debug_dispatch_tests {
         assert_eq!(state.exit_target, ExitTarget::Exit, "target must stay Exit");
         assert!(!state.overlays.quit_dialog, "no save prompt should open");
         assert!(
-            state.notifications.history().iter().any(|m| m.contains("No story library")),
+            state.notifications.history().iter().any(|m| m.contains("No game library")),
             "a status explaining the missing library should be shown"
         );
     }

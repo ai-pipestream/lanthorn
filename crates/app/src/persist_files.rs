@@ -484,7 +484,7 @@ pub fn is_game_save(path: &Path) -> bool {
 pub fn restore_game(path: &Path, machine: &mut zvm::cpu::exec::Machine) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     machine.complete_restore_success(&bytes).map_err(|e| match e {
-        zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+        zvm::error::ZError::SaveMismatch => "save is for a different game".to_string(),
         other => format!("restore failed: {:?}", other),
     })
 }

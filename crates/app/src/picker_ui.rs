@@ -805,7 +805,7 @@ impl<'a> PickerHeading<'a> {
                 let es = if n == 1 { "" } else { "es" };
                 let progress = if f.done { String::new() } else { format!(" · indexing, {} so far", f.indexed) };
                 format!(
-                    " lanthorn — find a story  ({n} match{es} for “{}” in {}{progress})",
+                    " lanthorn — find a game  ({n} match{es} for “{}” in {}{progress})",
                     f.query,
                     self.root.display()
                 )
@@ -814,7 +814,7 @@ impl<'a> PickerHeading<'a> {
                 let status = self.all_folders.expect("checked");
                 let progress = if status.done { String::new() } else { format!(" · indexing, {} so far", status.indexed) };
                 format!(
-                    " lanthorn — choose a story  ({} in {} and its folders{progress})",
+                    " lanthorn — choose a game  ({} in {} and its folders{progress})",
                     stories.len(),
                     self.dir.display()
                 )
@@ -827,7 +827,7 @@ impl<'a> PickerHeading<'a> {
                     1 => ", 1 folder".to_string(),
                     k => format!(", {k} folders"),
                 };
-                format!(" lanthorn — choose a story  ({n} found{f} in {})", self.dir.display())
+                format!(" lanthorn — choose a game  ({n} found{f} in {})", self.dir.display())
             }
         }
     }
@@ -1347,7 +1347,7 @@ pub(crate) fn run_story_picker(
     let (mut dir, mut stories, restored_idx) =
         resolve_picker_position(&source, &root, roots, restore);
     if stories.is_empty() {
-        eprintln!("lanthorn: no Z-machine story files found in '{}'", dir.display());
+        eprintln!("lanthorn: no Z-machine game files found in '{}'", dir.display());
         std::process::exit(1);
     }
 
@@ -1714,7 +1714,7 @@ pub(crate) fn run_story_picker(
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
             } else if let Some(field) = &url_prompt {
                 let prompt = format!(
-                    "Story URL (Enter to download, Esc to cancel): {}\u{258f}",
+                    "Game URL (Enter to download, Esc to cancel): {}\u{258f}",
                     field.as_str()
                 );
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
@@ -3985,7 +3985,7 @@ fn draw_info_panel(
     // release and serial that do, it invited exactly that misreading.
     let mut size_line = human_size(meta.size_bytes);
     if meta.story_bytes > 0 && meta.story_bytes != meta.size_bytes {
-        size_line.push_str(&format!(" · story {}", human_size(meta.story_bytes)));
+        size_line.push_str(&format!(" · game {}", human_size(meta.story_bytes)));
     }
     lines.push((size_line, story_info_value));
     // format + version · release.
@@ -4156,7 +4156,7 @@ fn draw_info_panel(
     {
         lines.push((String::new(), story_info_value));
         lines.push((
-            format!("Artwork · {} detected for this story", a.art_candidates.len()),
+            format!("Artwork · {} detected for this game", a.art_candidates.len()),
             story_info_label,
         ));
         for c in &a.art_candidates {
@@ -4897,7 +4897,7 @@ fn ifdb_download_landing(
         Some(idx) => (idx, format!("Downloaded {name}")),
         None => (
             previous.unwrap_or(0).min(len.saturating_sub(1)),
-            format!("Downloaded {name}, but it did not scan as a playable story"),
+            format!("Downloaded {name}, but it did not scan as a playable game"),
         ),
     }
 }
@@ -6448,7 +6448,7 @@ mod tests {
         assert!(flat.contains(&expected), "file line must render whole:\n  want {expected:?}\n  got  {flat:?}");
         // …and the sizes, on the line below it, are whole too.
         let sizes = norm(&format!(
-            "{} · story {}",
+            "{} · game {}",
             super::human_size(meta.size_bytes),
             super::human_size(meta.story_bytes),
         ));
@@ -7048,7 +7048,7 @@ mod tests {
         adf.disk_image = Some(app::hints::DiskImage::Adf);
         let text = render(&adf, "Zork I - The Great Underground Empire.adf");
         assert!(text.contains("880 KB"), "the container's own size stays: {text:?}");
-        assert!(text.contains("story 91 KB"), "the mounted story's size is named: {text:?}");
+        assert!(text.contains("game 91 KB"), "the mounted story's size is named: {text:?}");
 
         // A plain story file: one size, no second segment.
         let mut bare = minimal_story_meta();
@@ -7056,7 +7056,7 @@ mod tests {
         bare.story_bytes = 93_766;
         let text = render(&bare, "zork1.z3");
         assert!(text.contains("91 KB"), "the size still renders: {text:?}");
-        assert!(!text.contains("story 91 KB"), "no redundant second size: {text:?}");
+        assert!(!text.contains("game 91 KB"), "no redundant second size: {text:?}");
     }
 
     // ── SQ-0348: author/year/genre + blurb ──────────────────────────────────────

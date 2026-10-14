@@ -2396,12 +2396,12 @@ impl PictureOverride {
             PictureOverride::Loaded { refused, .. } => refused.clone(),
             PictureOverride::Missing { path } => Some(format!(
                 "pictures = \"{}\" names a picture archive that is not there — \
-                 falling back to this story's Blorb art",
+                 falling back to this game's Blorb art",
                 path.display(),
             )),
             PictureOverride::Unusable { path, reason } => Some(format!(
                 "pictures = \"{}\" cannot be used: {reason} — \
-                 falling back to this story's Blorb art",
+                 falling back to this game's Blorb art",
                 path.display(),
             )),
         }

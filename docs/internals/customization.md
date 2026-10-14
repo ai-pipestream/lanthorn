@@ -692,7 +692,7 @@ re-seed the new template, or hand-write the new shape from
   forks your game into a silent throwaway copy, types each suggestion into it
   from exactly where you are standing, keeps only the ones that did something and
   throws every copy away — so the line reads `try instead — light` rather than
-  `this story knows — light`, because it is a recommendation and not a lookup.
+  `this game knows — light`, because it is a recommendation and not a lookup.
   Nothing the copy does reaches your screen, your saves or the game you are
   playing: sound and graphics are off in it, it may READ your game's own stored
   data and never write a byte of it, and a story that reaches for `@save` inside
@@ -712,7 +712,7 @@ re-seed the new template, or hand-write the new shape from
   The **word reveal** is the same light pointed the other way. The offer can only
   help once the parser has already said no; click the `◈` on the story pane's
   bottom border (or run `/reveal-words`) and every noun, name or object *already
-  on screen* that this story knows lights up for a few seconds, over the story's
+  on screen* that this game knows lights up for a few seconds, over the story's
   own prose, without moving a line of it. It goes out on your next keystroke, on
   your next turn, or on its own — one press, one look, and you are back in the
   game. It answers the oldest frustration in the genre: a room description names
@@ -722,7 +722,7 @@ re-seed the new template, or hand-write the new shape from
   heard the word `field` at all, so that one stays dark while the rest light.
   The question it asks is **does one of your OBJECTS answer to this word**,
   asked of the story's own things first, and it says so in the corner every
-  time: *words this story knows — not necessarily things that are here*. A
+  time: *words this game knows — not necessarily things that are here*. A
   description that mentions a sword sitting in the next room lights it, and that
   is the point rather than a leak — every word it touches is one the story has
   already printed on your own screen, so it can reveal nothing you have not been

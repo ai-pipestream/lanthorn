@@ -2097,7 +2097,7 @@ pub fn resolve_entries(path: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
             // taking it from here spares a second mount and, on a crunched
             // Commodore disk, a second 6502 depack (SQ-1691).
             if found.listed == 0 {
-                let (story, image) = stories.into_iter().next().expect("one story");
+                let (story, image) = stories.into_iter().next().expect("one game");
                 let Ok(loaded) = crate::hints::extract_story(story.bytes) else { return Vec::new() };
                 return entry_from_loaded(path, None, loaded, Some(image), roots).into_iter().collect();
             }

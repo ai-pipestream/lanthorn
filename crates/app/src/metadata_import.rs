@@ -113,7 +113,7 @@ pub enum RowOutcome {
 /// own `IfdbClient` in production; a fake in tests).
 pub fn import_row(row: &ImportRow, roots: &crate::data_roots::DataRoots, source: &dyn MetadataSource) -> RowOutcome {
     let Some(entry) = crate::picker::resolve_entry_from(&row.path, row.entry.as_deref(), roots) else {
-        return RowOutcome::Skipped(format!("{} is not a story lanthorn can open", label(row)));
+        return RowOutcome::Skipped(format!("{} is not a game lanthorn can open", label(row)));
     };
     let game_dir = entry.catalogue_dir(roots);
     let ifid = entry.meta.ifid.clone();

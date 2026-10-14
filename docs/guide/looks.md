@@ -30,10 +30,10 @@ fresh one.
 
 **Per-game overrides.** Drop a `style.toml` next to a game's own saves (its
 `.save` folder) to layer a look on top of the global theme for just that
-story — it's reapplied every time that game opens. A `config.toml` can sit
+game — it's reapplied every time that game opens. A `config.toml` can sit
 beside it too, but it's deliberately tiny: at most a handful of keys such as
 `honor_game_colours`, `show_map`, or `v6_render`, written for you the moment
-you toggle one of those for that story. Leave a key out and the story
+you toggle one of those for that game. Leave a key out and the game
 inherits your global setting, so there's no need to copy the whole file —
 only the differences.
 
@@ -45,7 +45,7 @@ own style. Templates take live placeholders — `{location}`, `{score}`,
 
 **Your own keys.** The leader panel (default `Ctrl+P`) shows a reference of
 frequent map-editing verbs, each bound to a mnemonic letter you can reassign
-under `[[hotkeys.group]]`. Direct bindings — including the story picker's own
+under `[[hotkeys.group]]`. Direct bindings — including the game picker's own
 keys — live in `[keymap.global]` and its siblings as `"key" = "command
 args"`; set `use_defaults = false` to clear the built-ins and start over.
 

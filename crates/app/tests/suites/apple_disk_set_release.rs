@@ -240,7 +240,7 @@ fn one_volume_alone_in_a_directory_yields_no_story() {
 
     assert!(mounted.is_none(), "a lone volume offers no story: {mounted:?}");
     let err = err.expect("a lone volume must not open a game");
-    assert!(err.contains("no story file on the disk image"), "{err}");
+    assert!(err.contains("no game file on the disk image"), "{err}");
     // The message names the ProDOS volume, because the mount really did succeed
     // — this is a disk we read, not a disk we could not.
     assert!(err.contains("SHOGUN.3"), "{err}");

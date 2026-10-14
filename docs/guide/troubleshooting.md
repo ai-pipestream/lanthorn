@@ -1,6 +1,6 @@
 # Troubleshooting
 
-For anyone whose screen, sound or story isn't behaving — the things players
+For anyone whose screen, sound or game isn't behaving — the things players
 actually run into, and what to do about each.
 
 ## The map (or a border control) shows boxes or question marks instead of glyphs
@@ -25,9 +25,9 @@ session with no protocol support gets too. `/dump-terminal` shows exactly
 what lanthorn detected versus assumed about the terminal you're on, and is
 the thing to attach to a bug report if art still looks wrong.
 
-## A story seems to have hung
+## A game seems to have hung
 
-It probably hasn't. A Glulx story whose turn runs for ten seconds without ever
+It probably hasn't. A Glulx game whose turn runs for ten seconds without ever
 asking for input is taken to be caught in a runaway loop: lanthorn abandons
 that turn rather than freezing on it, and the map, your scrollback and your
 ability to quit all keep working throughout. A record of what happened lands
@@ -42,9 +42,9 @@ only: changing your terminal's font size mid-session isn't picked up until
 you restart lanthorn, because Windows has no way for lanthorn to re-measure
 the terminal on the fly. macOS and Linux pick the change up immediately.
 
-## My story file disappeared after I opened it in Frotz
+## My game file disappeared after I opened it in Frotz
 
-Frotz relocates the story file it opens rather than leaving it in place. If
+Frotz relocates the game file it opens rather than leaving it in place. If
 a game vanishes from where you expect it, check wherever Frotz moved it to
 — lanthorn didn't touch it.
 
@@ -66,7 +66,7 @@ config can travel with your dotfiles.
 - **Config folder:** `config.toml` and `style.toml`.
 - **Data folder:** saves and per-game sidecars in `saves/<story>.save/`, one
   directory per game (a disk image keys on its release and serial rather than
-  a filename, so different builds of the same story never collide); other
+  a filename, so different builds of the same game never collide); other
   players' trees in `users/`; each game's `documents/` folder; the system disks
   and Kickstart ROMs you drop in.
 - **Logs folder:** `crash.log`, `trace.log`, `stderr.log` and what

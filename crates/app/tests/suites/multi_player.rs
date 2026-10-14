@@ -448,9 +448,9 @@ fn an_invalid_player_name_is_rejected_with_a_clear_error() {
 #[test]
 fn the_flag_beats_the_environment_and_empty_means_the_default_player() {
     let home = app::scratch_dir("mp-flag-env");
-    // With no story, a valid launch gets as far as "no story given"; that is the
+    // With no story, a valid launch gets as far as "no game given"; that is the
     // proof the name was accepted.
-    let accepted = |o: &std::process::Output| stderr(o).contains("no story given");
+    let accepted = |o: &std::process::Output| stderr(o).contains("no game given");
     assert!(accepted(&lanthorn(&home, Some("bob"), Some("../x"))), "a valid flag overrides a bad environment");
     assert!(accepted(&lanthorn(&home, Some(""), Some("../x"))), "an empty flag is the default player, whatever the environment says");
     assert!(accepted(&lanthorn(&home, None, Some(""))), "an empty environment is the default player");

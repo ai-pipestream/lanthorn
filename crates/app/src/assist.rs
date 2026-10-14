@@ -81,7 +81,7 @@
 //! Those same three words come with two different openings, and which one is
 //! used is not a matter of taste (SQ-1041, SQ-1121):
 //!
-//! * `this story knows — light` states a **fact about the dictionary**. It is
+//! * `this game knows — light` states a **fact about the dictionary**. It is
 //!   verifiable from the story file, promises nothing about whether typing the
 //!   word will do anything, and is therefore never wrong.
 //! * `try instead — light` is a **recommendation**, and it is earned by
@@ -105,7 +105,7 @@
 //!   game's voice — the story owns "you" (*"You are standing in an open
 //!   field"*), and a helper borrowing it is the impersonation this register
 //!   exists to prevent. Say what the *story* knows, or instruct in the plain
-//!   imperative, and let the player decide: `this story knows — light · turn on
+//!   imperative, and let the player decide: `this game knows — light · turn on
 //!   · burn`, `try instead — light`. Note what the imperative buys besides the
 //!   register: it reads at one suggestion as well as at four, where "try one of
 //!   these" does not.
@@ -161,7 +161,7 @@ pub const CONT_INDENT: &str = "  ";
 /// line that also says what the mark means. Where to switch the feature off is
 /// the ●/○ control in the pane border's own job. See the module docs.
 pub fn preamble(icon: char) -> String {
-    format!("{FEATURE}: {icon} is mine, not the story's.")
+    format!("{FEATURE}: {icon} is mine, not the game's.")
 }
 
 /// One transcript line as a **saved transcript** should carry it.
@@ -217,7 +217,7 @@ pub enum OfferKind {
     /// The once-per-session introduction (see [`preamble`]).
     Intro,
     /// A vocabulary offer this story's dictionary alone supports — the
-    /// `this story knows — …` line.
+    /// `this game knows — …` line.
     VocabularyOffer,
     /// A vocabulary offer the shadow probe watched work, from where the
     /// player is standing — the `try instead — …` line.
@@ -335,14 +335,14 @@ mod tests {
 
     #[test]
     fn the_first_line_is_the_callers_words_and_nothing_else() {
-        assert_eq!(Assist::help("this story knows — light").lines(), vec!["this story knows — light"]);
+        assert_eq!(Assist::help("this game knows — light").lines(), vec!["this game knows — light"]);
         assert_eq!(Assist::caution("that cannot be undone.").lines(), vec!["that cannot be undone."]);
     }
 
     #[test]
     fn continuations_hang_rather_than_reading_as_story() {
-        let a = Assist::help("this story knows:\nlight · turn on · burn");
-        assert_eq!(a.lines(), vec!["this story knows:", "  light · turn on · burn"]);
+        let a = Assist::help("this game knows:\nlight · turn on · burn");
+        assert_eq!(a.lines(), vec!["this game knows:", "  light · turn on · burn"]);
     }
 
     #[test]
@@ -375,7 +375,7 @@ mod tests {
             word: Some("lanturn".to_string()),
             picks: vec![OfferPick { word: "light".to_string(), command: "light lanturn".to_string() }],
         };
-        let a = Assist::help("this story knows — light").with_offer(offer.clone());
+        let a = Assist::help("this game knows — light").with_offer(offer.clone());
         assert_eq!(a.offer(), offer);
     }
 
@@ -383,7 +383,7 @@ mod tests {
     /// once, and not onto a continuation or onto the introduction.
     #[test]
     fn an_exported_assist_carries_the_words_the_screen_did_not_need() {
-        assert_eq!(export_line("this story knows — light"), "Lanthorn: this story knows — light");
+        assert_eq!(export_line("this game knows — light"), "Lanthorn: this game knows — light");
         assert_eq!(export_line("  light · turn on · burn"), "  light · turn on · burn");
         assert_eq!(export_line(&preamble('●')), preamble('●'));
     }
@@ -397,7 +397,7 @@ mod tests {
         assert!(!p.starts_with('['));
         assert!(p.starts_with(NAME), "the one line that identifies us says the name: {p:?}");
         assert!(p.contains('◈'), "the introduction must show the CONFIGURED mark: {p:?}");
-        assert!(p.contains("story"), "and whose the marked lines are not: {p:?}");
+        assert!(p.contains("game"), "and whose the marked lines are not: {p:?}");
         assert!(!EXPORT_PREFIX.starts_with('['));
     }
 }

@@ -74,7 +74,7 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             buf,
             content.x,
             content.y,
-            "Restart the story from the beginning.",
+            "Restart the game from the beginning.",
             body_style,
             content,
         );

@@ -294,7 +294,7 @@ pub fn describe_payload(bytes: &[u8]) -> String {
     } else if bytes.is_empty() {
         "an empty response"
     } else {
-        "not a story file of any kind lanthorn opens"
+        "not a game file of any kind lanthorn opens"
     };
     format!("the server sent {} ({} bytes)", kind, bytes.len())
 }
@@ -766,7 +766,7 @@ impl UrlDownloader {
                     let n = a.images.len();
                     let _ = std::fs::remove_file(&a.path);
                     Err(format!(
-                        "this download holds {n} disk image{} and no story; lanthorn does not run \
+                        "this download holds {n} disk image{} and no game; lanthorn does not run \
                          disk images from inside a zip — launch `lanthorn <url>` to unpack them \
                          into your library",
                         if n == 1 { "" } else { "s" },

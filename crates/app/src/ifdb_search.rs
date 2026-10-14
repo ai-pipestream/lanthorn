@@ -330,8 +330,8 @@ impl std::fmt::Display for SearchError {
             SearchError::Transport(_) => write!(f, "IFDB unreachable"),
             SearchError::Remote(m) => write!(f, "IFDB: {m}"),
             SearchError::TooLarge { limit } => f.write_str(&too_large_message(*limit)),
-            SearchError::NoFilename => write!(f, "no downloadable story file"),
-            SearchError::NotAStory => write!(f, "downloaded file is not a valid story file"),
+            SearchError::NoFilename => write!(f, "no downloadable game file"),
+            SearchError::NotAStory => write!(f, "downloaded file is not a valid game file"),
             SearchError::Io(m) => write!(f, "could not save file: {m}"),
             SearchError::Archive(m) => write!(f, "{m}"),
         }
@@ -2110,7 +2110,7 @@ mod tests {
 
         // The row the browser builds for the file that just landed.
         let entry = crate::picker::resolve_entry(&path, &crate::data_roots::DataRoots::single(&data_base))
-            .expect("the downloaded blorb scans as a playable story");
+            .expect("the downloaded blorb scans as a playable game");
         assert!(
             entry.meta.ifid.starts_with("GLULX-"),
             "non-vacuity: the row's IFID is the computed Glulx one, neither the \

@@ -297,7 +297,7 @@ The map is a place you can move through, not just a picture.
   will cross again — the way out when you were noticed leaving, the trapdoor itself when
   you were noticed inside. **Not now** re-arms
   the seam for your next crossing, **not this passage** silences that one passage for good,
-  **never for this story** silences the whole prompt — every trigger, every passage — for the
+  **never for this game** silences the whole prompt — every trigger, every passage — for the
   rest of this map, and folding a layer back into another silences every passage it just
   closed — you have already said those rooms belong together. A prompt that comes back on
   the very next step is worse than no prompt at all, because it teaches you to dismiss it

@@ -31,11 +31,11 @@ travels.
 
 Auto-save is on by default: lanthorn snapshots after every turn (into its own
 slot, separate from a manual `Ctrl+S`) and again on the way out; leave
-auto-load on (also the default) and opening a story drops you straight back
+auto-load on (also the default) and opening a game drops you straight back
 where you quit, map included. Switch auto-save off if you'd rather save only
 when you ask; switch auto-load off to start a session fresh while keeping the
 map you've already drawn. That resume only applies when YOU leave — finishing
-the story or typing `quit` from inside the game starts it fresh next time, map
+the game or typing `quit` from inside the game starts it fresh next time, map
 still intact, rather than dropping you back a turn before the ending.
 
 **Rewind further than the game's own `undo`.** Switch on

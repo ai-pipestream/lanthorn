@@ -235,11 +235,11 @@ fn parse_interpreter_version(s: &str) -> Result<u8, String> {
     term_width = cli_host::HELP_WIDTH
 )]
 pub struct Cli {
-    /// Path to a story file (.z3/.z5/.z8 etc.) or a directory to browse. When
+    /// Path to a game file (.z3/.z5/.z8 etc.) or a directory to browse. When
     /// omitted, falls back to the `default_story_dir` config setting.
     ///
     /// An `http://` or `https://` URL works here too: lanthorn downloads it,
-    /// opens it exactly as it would the same file on disk — story files, Blorbs,
+    /// opens it exactly as it would the same file on disk — game files, Blorbs,
     /// release disk images and ZIPs alike — and then offers to keep it in your
     /// library.
     pub story: Option<PathBuf>,
@@ -257,7 +257,7 @@ pub struct Cli {
     /// Play as a named player (also read from the LANTHORN_PLAYER environment
     /// variable; the flag wins). Each player keeps their own saves, settings and
     /// per-game sidecars under `<user-dir>/users/<name>/`, layered over the
-    /// shared config.toml and style.toml, while story info and covers stay
+    /// shared config.toml and style.toml, while game info and covers stay
     /// shared. Absent or empty means the default player (the classic layout).
     /// 1-29 characters from A-Z a-z 0-9 . _ - (no leading dot). Lanthorn never
     /// checks WHO you are: put a login or a picker in front of it.
@@ -279,7 +279,7 @@ pub struct Cli {
 
     /// Sound for this run (bleeps + sampled audio); with it off the border still
     /// flashes as the accessibility cue. Overrides the config's `enable_sound`
-    /// in both directions, so `--sound on` plays a story whose config persisted
+    /// in both directions, so `--sound on` plays a game whose config persisted
     /// `enable_sound = false`.
     //
     // SQ-1082: which is the whole point of the rename. Spelled `--no-sound`, this
@@ -310,17 +310,17 @@ pub struct Cli {
     pub images: Option<OnOff>,
 
     /// Honour the colours the GAME asks for: `set_colour` / true-colour output on
-    /// the Z-machine, Glk stylehints on Glulx. `off` tells the story the
+    /// the Z-machine, Glk stylehints on Glulx. `off` tells the game the
     /// interpreter has none at all (ZMSD §8.3.2) and lets the theme paint
     /// everything.
     ///
     /// Overrides the config's `honor_game_colours` in both directions, and
-    /// outranks a `garglk.ini` beside the story or this game's own sidecar — an
+    /// outranks a `garglk.ini` beside the game or this game's own sidecar — an
     /// instruction for the launch you typed it on, exactly as `--interpreter` is.
     /// Never written back to config.toml; `/set-game-colours` still overrides it
     /// mid-game.
     ///
-    /// A different question from `--colour`: this one is whether the story's own
+    /// A different question from `--colour`: this one is whether the game's own
     /// requests are obeyed, that one is what DEFAULT resolves to.
     #[arg(long = "game-colours", alias = "game-colors", value_enum, value_name = "ON|OFF")]
     pub game_colours: Option<OnOff>,
@@ -382,8 +382,8 @@ pub struct Cli {
     #[arg(long = "font-check", value_enum, value_name = "ON|OFF")]
     pub font_check: Option<OnOff>,
 
-    /// Where the story pane's DEFAULT page and ink come from — the pair reported
-    /// to the story in header `$2C`/`$2D` (SQ-1082).
+    /// Where the game pane's DEFAULT page and ink come from — the pair reported
+    /// to the game in header `$2C`/`$2D` (SQ-1082).
     ///
     /// Three sources. lanthorn already consults them machine-first, falling
     /// through to the theme and then to the terminal; naming one pins it instead
@@ -401,10 +401,10 @@ pub struct Cli {
     #[arg(long = "colour", alias = "color", value_enum, value_name = "SOURCE")]
     pub colour: Option<ColourSource>,
 
-    /// Interpreter number to advertise in the story header (0x1E).
+    /// Interpreter number to advertise in the game header (0x1E).
     ///
     /// Games branch on it: Beyond Zork picks character graphics over colour on
-    /// IBM PC, and several v6 story files were built for one specific machine.
+    /// IBM PC, and several v6 game files were built for one specific machine.
     /// The numbers are ZMSD §11.1.3's table, which `--machines` prints in full
     /// — along with the page and ink each one reports, the palette its colours
     /// resolve through, and the screen its own interpreter drew.
@@ -417,7 +417,7 @@ pub struct Cli {
     #[arg(long = "interpreter", value_name = "N")]
     pub interpreter_number: Option<u8>,
 
-    /// Interpreter VERSION to advertise in the story header (0x1F).
+    /// Interpreter VERSION to advertise in the game header (0x1F).
     ///
     /// A number (`8`) or a single character (`A`, taken as its ASCII code).
     /// Both spellings are accepted because games render this byte both ways:
@@ -427,18 +427,18 @@ pub struct Cli {
     /// nothing is written back. lanthorn's default is `A` (65), which has no
     /// provenance, and the original Amiga wrote 8: on release 295 of Shogun
     /// the credits read "Amiga Interpreter version 6.65" here against the
-    /// real machine's "6.8". Whether any story BRANCHES on the byte rather
+    /// real machine's "6.8". Whether any game BRANCHES on the byte rather
     /// than merely printing it is unknown, and this is how to find out
     /// (SQ-0885).
     #[arg(long = "interpreter-version", value_name = "V",
           value_parser = parse_interpreter_version)]
     pub interpreter_version: Option<u8>,
 
-    /// Native Infocom picture archive to draw this story's art from.
+    /// Native Infocom picture archive to draw this game's art from.
     ///
     /// The path is taken as given if absolute, else resolved beside the STORY
     /// — which is where these archives sit. Naming one is an instruction, not
-    /// a hint: it beats a Blorb next to the story and the `Pic.data` an Amiga
+    /// a hint: it beats a Blorb next to the game and the `Pic.data` an Amiga
     /// `.adf` carries, and it OUTRANKS the `pictures` key in the game's own
     /// config.toml. A file that is absent or will not decode says so and
     /// falls back to the Blorb; it never fails quietly.
@@ -448,7 +448,7 @@ pub struct Cli {
     /// Amiga. So `--pictures zork0.mg1` beside `stories/zork0.z6` draws the MCGA
     /// rendition and reports an IBM PC.
     ///
-    /// Requires a story on the command line: the flag names art FOR a story,
+    /// Requires a game on the command line: the flag names art FOR a game,
     /// so it has no referent when lanthorn opens a library. Pick a rendition
     /// from the browser with Shift-Enter instead.
     ///
@@ -459,12 +459,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", requires = "story")]
     pub pictures: Option<PathBuf>,
 
-    /// Which story to open, on a volume or a library that holds several.
+    /// Which game to open, on a volume or a library that holds several.
     ///
     /// A 1-based position in the list the browser would have shown, or enough
-    /// of a name to pick out one story — matched case-insensitively against
+    /// of a name to pick out one game — matched case-insensitively against
     /// both the name the medium stores it under and the title the browser
-    /// prints. A name that fits two stories is refused with the list rather
+    /// prints. A name that fits two games is refused with the list rather
     /// than guessed at, and one that fits none never falls back to booting
     /// something else.
     ///
@@ -477,9 +477,9 @@ pub struct Cli {
     /// game on one but the first (SQ-1078). `zvm-cli --story` spells it and
     /// matches it the same way.
     ///
-    /// Requires a story on the command line, like --pictures: the flag names
-    /// a story ON something, so it has no referent when lanthorn opens the
-    /// default library. Naming one story goes straight into it and exits when
+    /// Requires a game on the command line, like --pictures: the flag names
+    /// a game ON something, so it has no referent when lanthorn opens the
+    /// default library. Naming one game goes straight into it and exits when
     /// the game does — no browser on the way in, none on the way out.
     #[arg(long = "story", value_name = "N|NAME", requires = "story")]
     pub story_pick: Option<String>,
@@ -487,21 +487,21 @@ pub struct Cli {
     /// Fetch IFDB metadata and cover art for the library, then exit.
     ///
     /// The browser's `r` (missing) or `f` (all) pass, run without a terminal:
-    /// the stories under the directory, sub-folders included, get their
+    /// the games under the directory, sub-folders included, get their
     /// sidecar and cover written where the browser writes them, with one
-    /// printed line per story as it completes. A library on a server gets
+    /// printed line per game as it completes. A library on a server gets
     /// its sidecars built this way, with no one at the picker.
     ///
-    /// `missing` skips a story whose sidecar is current; `all` refetches them
+    /// `missing` skips a game whose sidecar is current; `all` refetches them
     /// all. Exits 0 when nothing failed to fetch.
     #[arg(long, value_enum, value_name = "MISSING|ALL")]
     pub fetch: Option<FetchMode>,
 
-    /// Import curated metadata for stories from a TSV file, then exit.
+    /// Import curated metadata for games from a TSV file, then exit.
     ///
-    /// For stories the IFDB pass could not identify by IFID, or that IFDB has
+    /// For games the IFDB pass could not identify by IFID, or that IFDB has
     /// no cover for. A header row names the columns (any order): `path`, and
-    /// then `ifdb_tuid` (the story is fetched from IFDB by that id), or
+    /// then `ifdb_tuid` (the game is fetched from IFDB by that id), or
     /// `title`, `author`, `year`, `genre`, `language`, `description` (written
     /// as a curated record), and `cover_url` (downloaded as the cover). One
     /// printed line per row; exits 0 unless a row failed.
@@ -527,7 +527,7 @@ pub struct Cli {
     /// about a session already running and have nothing to mean here. Outranks
     /// both `v6_pixel_lock` in config.toml and this game's own sidecar, for the
     /// reason `--interpreter` does: a flag is an instruction for the launch you
-    /// typed it on, and a file beside the story is not.
+    /// typed it on, and a file beside the game is not.
     ///
     /// Inert on the half-blocks backend, which has no device pixels to land on;
     /// `/dump-terminal` says so when it is.
@@ -539,12 +539,12 @@ pub struct Cli {
     /// What every interpreter number carries — the page and ink it reports in
     /// `$2C`/`$2D`, the palette those colour numbers resolve through, the §8.3
     /// screen rules, and the screen its own interpreter drew — followed by the
-    /// rows a story's VERSION moves, because a machine is not a screen: Infocom
+    /// rows a game's VERSION moves, because a machine is not a screen: Infocom
     /// shipped two IBM interpreters and they disagree about white.
     ///
     /// The table `--interpreter` selects a row of, so you can pick a number
     /// knowing what it does. Answered before anything else, exactly as `--help`
-    /// is: it describes the program rather than a story, so it needs none.
+    /// is: it describes the program rather than a game, so it needs none.
     #[arg(long)]
     pub machines: bool,
 

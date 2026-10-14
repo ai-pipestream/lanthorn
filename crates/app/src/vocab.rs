@@ -4,7 +4,7 @@
 //! ```text
 //! > light lanturn
 //! I don't know the word "lanturn".
-//! ● this story knows — lantern
+//! ● this game knows — lantern
 //! ```
 //!
 //! This is the first feature to speak through [`crate::assist`]. Guess-the-verb
@@ -75,7 +75,7 @@
 //!    UNVETTED claim built on it alone is worthless noise (SQ-1644). So a
 //!    candidate from this source is marked vetting-mandatory
 //!    ([`Pick::requires_vetting`]) and [`offer_vocabulary`] never shows one
-//!    through the unvetted "this story knows" fallback — only through a
+//!    through the unvetted "this game knows" fallback — only through a
 //!    vetted "try instead", or not at all.
 //! 7. **A running-together of two of the story's own words — and only ever
 //!    shown once vetted, same as source 6.** Every source above answers
@@ -138,7 +138,7 @@
 //! the front door says nothing for `illuminate lamp`; five rooms later, with the
 //! lantern in sight, it says `try instead — light`.
 //!
-//! That is what earns the wording. `this story knows` is a fact about a table;
+//! That is what earns the wording. `this game knows` is a fact about a table;
 //! `try instead` is a recommendation, and would make this feature's own failure
 //! worse if it were made without evidence. With the probe off, unavailable, or
 //! busy with the previous turn's question, the line drops back to the fact.
@@ -746,7 +746,7 @@ pub struct Pick {
     /// preposition-anchored cousin is exempt from this).
     ///
     /// A pick with this set must never reach the player through the unvetted
-    /// "this story knows" fallback — only through a vetted "try instead", or
+    /// "this game knows" fallback — only through a vetted "try instead", or
     /// not at all. [`offer_vocabulary`] is where that rule is enforced.
     pub requires_vetting: bool,
 }
@@ -1271,7 +1271,7 @@ impl StoryVocabulary {
     /// Everything reached here is marked [`Candidate::tier`] 4, which
     /// [`offer_picks`](Self::offer_picks) carries into
     /// [`Pick::requires_vetting`]: unlike tier 3, a tier 4 candidate may never
-    /// be shown through the unvetted "this story knows" fallback — see that
+    /// be shown through the unvetted "this game knows" fallback — see that
     /// field's own doc, and [`offer_vocabulary`] for where the rule is kept.
     /// The bare shape this source trades on is the single commonest one in the
     /// medium (nearly every verb accepts *some* object with no preposition at
@@ -1537,7 +1537,7 @@ impl StoryVocabulary {
     ///
     /// A Version 3 dictionary keeps six characters, so it holds `leafle` for the
     /// leaflet and `mailbo` for the mailbox. Both are what the parser matches and
-    /// both would be typed back successfully — and `● this story knows — leafle`
+    /// both would be typed back successfully — and `● this game knows — leafle`
     /// reads as our bug, which is exactly the misattribution the register exists
     /// to prevent.
     ///
@@ -1969,7 +1969,7 @@ fn build_offer(
 
 /// What the light says about words it has only LOOKED UP: this story's
 /// dictionary holds them, and nothing more is claimed.
-pub const LEAD_DICTIONARY: &str = "this story knows — ";
+pub const LEAD_DICTIONARY: &str = "this game knows — ";
 
 /// What it says about words it has watched WORK, in a copy of this game, from
 /// where the player is standing (SQ-1121).
@@ -2387,7 +2387,7 @@ enum Outcome {
 ///
 /// With `guidance_probe` on, every candidate is tried in a silent copy of the
 /// game (SQ-1121) and only the ones that did something are shown — which is what
-/// lets the line say `try instead` rather than `this story knows`. The count can
+/// lets the line say `try instead` rather than `this game knows`. The count can
 /// now shrink to nothing for that second reason, and then nothing is said and the
 /// word is NOT recorded as answered: the lamp may be in the next room, and the
 /// same suggestion may be right there.
@@ -3303,7 +3303,7 @@ mod tests {
     /// took without a status line, against a baseline the LIVE engine took with
     /// one.
     ///
-    /// The judge answered `None` (the offer fell back to `this story knows`)
+    /// The judge answered `None` (the offer fell back to `this game knows`)
     /// because `refusal_from(0)` was empty: the print called the nonsense
     /// control a move, so its words could not be read as a refusal. Falsify by
     /// folding `WorldPrint`'s three facts back into one hash — the vetting then
@@ -3635,7 +3635,7 @@ mod tests {
 
     /// The tier-3 counterpart to the assertion above: a preposition-anchored
     /// shape match is NOT vetting-mandatory, exactly as it was before this
-    /// quest — it may still be shown through the unvetted "this story knows"
+    /// quest — it may still be shown through the unvetted "this game knows"
     /// fallback, which is the behaviour SQ-1642 shipped and this quest must
     /// not disturb.
     #[test]

@@ -1336,7 +1336,7 @@ fn read_story_off_disk(
             }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no story named '{want}' on the disk image {}", path.display()),
+                format!("no game named '{want}' on the disk image {}", path.display()),
             )),
         };
     }
@@ -1384,7 +1384,7 @@ fn read_story_off_disk(
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "no story file on the disk image {} ({} files{}; is this the boot disk?)",
+            "no game file on the disk image {} ({} files{}; is this the boot disk?)",
             path.display(),
             disk.file_count(),
             // Only some formats keep a volume name; the message says so
@@ -1430,7 +1430,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
             None if want.is_some() => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no story named '{}' in the zip {}",
+                    "no game named '{}' in the zip {}",
                     want.unwrap_or_default(),
                     path.display(),
                 ),
@@ -1453,7 +1453,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 } else {
                     format!(
                         "; it holds {images} disk image{}, which lanthorn does not run from \
-                         inside a zip — unpack them into your story directory and open one \
+                         inside a zip — unpack them into your game directory and open one \
                          of those",
                         if images == 1 { "" } else { "s" },
                     )
@@ -1461,8 +1461,8 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "no story file inside the zip {} ({} entr{} read; none is a Blorb, \
-                         a Z-machine story, a Glulx image or a Scott Adams database{})",
+                        "no game file inside the zip {} ({} entr{} read; none is a Blorb, \
+                         a Z-machine game, a Glulx image or a Scott Adams database{})",
                         path.display(),
                         scan.examined,
                         if scan.examined == 1 { "y" } else { "ies" },
@@ -2157,11 +2157,11 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
         LoadedStory::ZCode(b) => Ok(b),
         LoadedStory::Glulx(_) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Glulx story files are not supported on this path".to_string(),
+            "Glulx game files are not supported on this path".to_string(),
         )),
         LoadedStory::Scott(_) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Scott Adams story files are not supported on this path".to_string(),
+            "Scott Adams game files are not supported on this path".to_string(),
         )),
     }
 }
@@ -2261,11 +2261,11 @@ fn unrunnable(bytes: &[u8]) -> String {
     let text: String =
         head.iter().map(|b| if (0x20..0x7f).contains(b) { char::from(*b) } else { '.' }).collect();
     let what = match blorb::medium::DiskImage::detect(bytes) {
-        Some(image) => format!("it is a {} disk image — a container, not a story", image.label()),
+        Some(image) => format!("it is a {} disk image — a container, not a game", image.label()),
         None => "no format lanthorn reads claims it".to_string(),
     };
     format!(
-        "not a story file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \
+        "not a game file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \
          not a Glulx image, not a Scott Adams database, and its first 64 bytes are not a \
          Z-machine header (ZMSD §11.1)",
         bytes.len(),
@@ -2991,7 +2991,7 @@ mod tests {
         );
         let err = load_story(&path).expect_err("a save archive is not a game");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("no story file inside the zip"), "{err}");
+        assert!(err.to_string().contains("no game file inside the zip"), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3110,7 +3110,7 @@ mod tests {
         junk[0] = 6;
         let err = extract_story(junk).expect_err("a version byte is not a header");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("not a story file"), "{err}");
+        assert!(err.to_string().contains("not a game file"), "{err}");
 
         // …and every version the Z-machine runs still loads when the header is
         // real, so the gate is on the header and not on the version byte.

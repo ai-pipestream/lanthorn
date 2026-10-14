@@ -175,7 +175,7 @@ pub fn restore_error_msg(e: crate::engine::EngineError) -> String {
             "this save was written by the \"{found}\" engine, but lanthorn is running the \"{expected}\" engine"
         ),
         EngineError::BadSave(msg) if msg.contains("SaveMismatch") => {
-            "save is for a different story".to_string()
+            "save is for a different game".to_string()
         }
         EngineError::BadSave(msg) => format!("restore failed: {msg}"),
     }

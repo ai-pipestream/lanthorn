@@ -18,8 +18,8 @@
 //! Five nouns printed in three lines of prose, and the line the reveal draws
 //! runs between two of the three groups, not three (SQ-1135):
 //!
-//! - **`mailbox`, `house`, `door` — words this story knows.** They light.
-//! - **`window` — a word this story knows, for something elsewhere.** It would
+//! - **`mailbox`, `house`, `door` — words this game knows.** They light.
+//! - **`window` — a word this game knows, for something elsewhere.** It would
 //!   light too, wherever the prose printed it; nothing here does.
 //! - **`field` — not a word at all.** The story has never heard it, so nothing
 //!   lights it. It is also the word the room description leads with, which is

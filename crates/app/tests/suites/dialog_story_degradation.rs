@@ -116,7 +116,7 @@ fn the_band_keeps_the_generic_column_and_labels_it() {
 }
 
 /// The vocabulary offer, on the turn it exists to serve. A misspelling that
-/// would draw `this story knows — …` out of Zork draws **nothing** here, because
+/// would draw `this game knows — …` out of Zork draws **nothing** here, because
 /// there is no vocabulary to draw on — and silence is the right answer, not a
 /// lead with an empty list after it.
 #[test]

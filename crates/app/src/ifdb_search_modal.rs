@@ -849,7 +849,7 @@ fn render_option_row(
     // directory already holds says so outright rather than relying on the glyph
     // alone — downloading it again is allowed, it just lands as a "foo (2).z5".
     put_str(buf, area.x, y, 2, &format!("{glyph} "), if selected { base } else { glyph_style });
-    let fmt = opt.format.as_deref().unwrap_or("story file");
+    let fmt = opt.format.as_deref().unwrap_or("game file");
     let mut line = format!("{}  ({})", opt.filename, fmt);
     if let Some(note) = note {
         line.push_str(" · ");

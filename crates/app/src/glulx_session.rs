@@ -3669,7 +3669,7 @@ impl Engine for GlulxSession {
         // the `IFhd` identity check with the session still intact.
         if !self.machine.complete_restore_quetzal(bytes) {
             return Err(EngineError::BadSave(
-                "not a Glulx save for this story (or the file is corrupt)".into(),
+                "not a Glulx save for this game (or the file is corrupt)".into(),
             ));
         }
         // The one thing the game's own `@restore` never faces: this arrives

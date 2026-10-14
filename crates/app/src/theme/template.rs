@@ -43,7 +43,7 @@ const TEXT_SECTIONS: &[(Section, &str, &str)] = &[
     (
         Section::Elements,
         "[elements]",
-        "Elements: app text + host surfaces (status/help bars, upper window,\n# story browser). Every line already equals its default.",
+        "Elements: app text + host surfaces (status/help bars, upper window,\n# game browser). Every line already equals its default.",
     ),
     (Section::GlkBuffer, "[glk.buffer]", "The 11 Glk styles for text-buffer windows (base: text)."),
     (Section::GlkGrid, "[glk.grid]", "The 11 Glk styles for text-grid windows (base: chrome)."),
@@ -57,7 +57,7 @@ const SURFACE_SECTIONS: &[(Section, &str, &str)] = &[
     (
         Section::Panel,
         "[panel]",
-        "Panel: the tiled panes (story/map/verb/debug frames) — background,\n# border, title, tabs. Story/Glk windows use [glk.*], not this section.",
+        "Panel: the tiled panes (game/map/verb/debug frames) — background,\n# border, title, tabs. Game/Glk windows use [glk.*], not this section.",
     ),
     (Section::Dialog, "[dialog]", "Dialog: modal pop-ups — background, its own border, title, buttons, shadow."),
     (Section::Tooltip, "[tooltip]", "Tooltip: hover pop-ups — background and an optional border."),
@@ -198,10 +198,10 @@ fn enum_hint(row: &RegRow) -> &'static str {
         // three under it are free-form: any string, so a patched font can use a
         // real icon instead of a bare letter, and one set by hand beats the
         // preset.
-        "badge_icons" => "   # plain | nerdfont   (the story-list badges below; each key overrides one)",
-        "badge_save" => "   # story-list badge: the story has a save",
-        "badge_hint" => "   # story-list badge: hints are installed",
-        "badge_hint_available" => "   # story-list badge: hints exist but aren't downloaded",
+        "badge_icons" => "   # plain | nerdfont   (the game-list badges below; each key overrides one)",
+        "badge_save" => "   # game-list badge: the game has a save",
+        "badge_hint" => "   # game-list badge: hints are installed",
+        "badge_hint_available" => "   # game-list badge: hints exist but aren't downloaded",
         // SQ-1105: these three carry a `glyph` that MIRRORS the gutter default so
         // the two spellings sit near each other in the registry — but the renderer
         // draws `symbols.*_gutter`, not this. Without a note the template reads as
@@ -323,7 +323,7 @@ const MAP_OVERRIDES_BLOCK: &str = r#"
 #                            # patched font that is md-numeric_off (U+F19D3) and md-grid_off (U+F02C2).
 "#;
 
-const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────
+const STATIC_EXAMPLES: &str = r#"# ── Game-line styling rules: recolour whole transcript lines matching a ────
 # ── regex. Rules are tried in order; the first match wins. ──────────────────
 # [[transcript.rule]]
 # match = "^>.*"                 # your echoed command lines → magenta bold

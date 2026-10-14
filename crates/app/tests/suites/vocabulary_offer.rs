@@ -164,7 +164,7 @@ fn assists(s: &AppState) -> Vec<String> {
 fn an_unknown_word_is_answered_with_what_the_story_knows() {
     let mut s = after("I don't know the word \"lanturn\".");
     app::vocab::offer_vocabulary(&mut s, &PocketStory, "take lanturn", true);
-    assert_eq!(assists(&s), vec!["this story knows — lanter"]);
+    assert_eq!(assists(&s), vec!["this game knows — lanter"]);
 }
 
 /// SQ-1552: a headless host reads the structured half off `state.assist_offer`
@@ -195,11 +195,11 @@ fn the_offer_is_one_unbracketed_line_that_speaks_of_the_story() {
     assert_eq!(lines.len(), 1, "one line, on a pane that may be forty columns: {lines:?}");
     let line = &lines[0];
     assert!(!line.starts_with('['), "the brackets are the parser's voice: {line:?}");
-    assert!(line.starts_with("this story knows — "), "{line:?}");
+    assert!(line.starts_with("this game knows — "), "{line:?}");
     assert!(!line.contains("You "), "the second person is the story's voice: {line:?}");
-    assert_eq!(line.matches('·').count() + 1, line["this story knows — ".len()..].split(" · ").count());
+    assert_eq!(line.matches('·').count() + 1, line["this game knows — ".len()..].split(" · ").count());
     assert!(
-        line["this story knows — ".len()..].split(" · ").count() <= 3,
+        line["this game knows — ".len()..].split(" · ").count() <= 3,
         "three at most, or the player reads instead of playing: {line:?}"
     );
 }
@@ -258,7 +258,7 @@ fn guidance_off_silences_the_offer_and_forgets_nothing() {
 
     s.config.guidance = true;
     app::vocab::offer_vocabulary(&mut s, &PocketStory, "take lanturn", true);
-    assert_eq!(assists(&s), vec!["this story knows — lanter"]);
+    assert_eq!(assists(&s), vec!["this game knows — lanter"]);
 }
 
 /// The story printed the whole word, so the truncated key is shown whole. The
@@ -268,7 +268,7 @@ fn guidance_off_silences_the_offer_and_forgets_nothing() {
 fn a_truncated_key_is_spelled_out_of_the_storys_own_prose() {
     let mut s = after("A battery-powered brass lantern is on the trophy case.");
     app::vocab::offer_vocabulary(&mut s, &PocketStory, "take lanturn", true);
-    assert_eq!(assists(&s), vec!["this story knows — lantern"]);
+    assert_eq!(assists(&s), vec!["this game knows — lantern"]);
 }
 
 // ── The Scott Adams adapter, on an in-repo database ─────────────────────────
@@ -377,7 +377,7 @@ fn zork1_answers_a_mistyped_lantern_with_the_word_it_printed() {
         &mut s,
         &["north", "east", "open window", "enter window", "west", "take lanturn"],
     );
-    assert_eq!(lines, vec!["this story knows — lantern"]);
+    assert_eq!(lines, vec!["this game knows — lantern"]);
 }
 
 /// Three shapes of miss on one story, and the four kinds of turn that must stay
@@ -401,9 +401,9 @@ fn zork1_answers_the_misses_it_can_and_stays_quiet_otherwise() {
     assert_eq!(
         lines,
         vec![
-            "this story knows — open",
-            "this story knows — smell · sniff",
-            "this story knows — open",
+            "this game knows — open",
+            "this game knows — smell · sniff",
+            "this game knows — open",
         ],
         "three offers and four silences"
     );
@@ -520,14 +520,14 @@ fn anchorhead_answers_a_squished_pickup_through_the_more_general_tier() {
 /// OBJ with OBJ / light OBJ`.
 ///
 /// **It does NOT close `hold in`**, and this is not a hole SQ-1240 leaves —
-/// it is what "this story knows" honestly means. `hold` reaches `carry`
+/// it is what "this game knows" honestly means. `hold` reaches `carry`
 /// (`238. 8 entries, verb = "carry", synonyms = catch, get, grab, hold,
 /// remove, take`), and Zork's own grammar for it includes a bare `carry in
 /// OBJ` line beside `carry OBJ in OBJ` — so `carry in the trophy` truly
 /// parses on this release, exactly the shape `hold in <noun>` would need.
 /// The grammar genuinely pairs `carry` with `in`; it simply pairs it for an
 /// unrelated sense of "carry" than the one `hold in` (conceal) means, which
-/// is precisely the gap "this story knows" (a fact about the dictionary and
+/// is precisely the gap "this game knows" (a fact about the dictionary and
 /// grammar) leaves for `try instead` (a fact about behaviour, from the
 /// shadow probe) to close. `hold back`, by contrast, stays gone: `back` is
 /// nowhere in `carry`'s literal list.
@@ -553,10 +553,10 @@ fn zork1_answers_a_word_it_never_heard_with_what_that_word_means() {
     assert_eq!(
         lines,
         vec![
-            "this story knows — light",
-            "this story knows — examine · describe · see",
-            "this story knows — hold in · hide · place",
-            "this story knows — remove · carry · catch",
+            "this game knows — light",
+            "this game knows — examine · describe · see",
+            "this game knows — hold in · hide · place",
+            "this game knows — remove · carry · catch",
         ]
     );
 }
@@ -587,9 +587,9 @@ fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
     assert_eq!(
         lines,
         vec![
-            "this story knows — take · look · carry",
-            "this story knows — break · block · destroy",
-            "this story knows — catch · carry · get",
+            "this game knows — take · look · carry",
+            "this game knows — break · block · destroy",
+            "this game knows — catch · carry · get",
         ]
     );
 }
@@ -615,7 +615,7 @@ fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
 fn zork1_answers_a_three_letter_irregular_now_that_length_gates_only_the_near_miss() {
     let Some(mut s) = zork1() else { return };
     let (_state, lines) = play(&mut s, &["lit lamp"]);
-    assert_eq!(lines, vec!["this story knows — light"]);
+    assert_eq!(lines, vec!["this game knows — light"]);
 
     assert_eq!(verb_synonyms::irregular_bases("lit"), ["light"], "the table reaches it");
     let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
@@ -640,10 +640,10 @@ fn zork1_answers_the_rest_of_the_three_letter_irregulars() {
     assert_eq!(
         lines,
         vec![
-            "this story knows — eat · bite · consume",
-            "this story knows — see · find · seek",
-            "this story knows — win",
-            "this story knows — get · carry · catch",
+            "this game knows — eat · bite · consume",
+            "this game knows — see · find · seek",
+            "this game knows — win",
+            "this game knows — get · carry · catch",
         ]
     );
 }
@@ -745,7 +745,7 @@ fn zork1_stays_quiet_where_meaning_reaches_nothing_the_story_implements() {
 fn zork1_answers_a_three_letter_synonym_the_story_holds() {
     let Some(mut s) = zork1() else { return };
     let (_state, lines) = play(&mut s, &["don sword"]);
-    assert_eq!(lines, vec!["this story knows — wear · put on"]);
+    assert_eq!(lines, vec!["this game knows — wear · put on"]);
 
     let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
     assert!(v.knows("wear"), "the word the table reaches, and Zork's own");
@@ -785,7 +785,7 @@ fn a_glulx_story_that_rewords_the_refusal_is_answered_all_the_same() {
     );
     assert_eq!(
         lines,
-        vec!["this story knows — open · uncover · unwrap", "this story knows — examine · check · describe"],
+        vec!["this game knows — open · uncover · unwrap", "this game knows — examine · check · describe"],
         "the story's own synonym groups, free, once a verb is identified"
     );
 }
@@ -800,7 +800,7 @@ fn a_scott_story_answers_a_mistyped_verb() {
     let (_state, lines) = play(&mut s, &["quti", "loko"]);
     assert_eq!(
         lines,
-        vec!["this story knows — quit", "this story knows — look"],
+        vec!["this game knows — quit", "this game knows — look"],
         "a fragment (`exam`, `desc`) is fit to be the answer and not fit to be an aside"
     );
 }

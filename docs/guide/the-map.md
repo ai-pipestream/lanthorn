@@ -19,7 +19,7 @@ Glulx, or a classic Scott Adams adventure, one map builder handles all three.
 Working out *where you are* is the part that differs by engine — a v3 game
 states it outright, later Z-machine games hide it in the status line,
 graphical v6 games paint no status line at all so lanthorn reads the band
-above the story window, and Glulx games get it from the bold room heading
+above the game window, and Glulx games get it from the bold room heading
 Inform prints as you enter — but you never configure any of it.
 
 **The Journal.** The panel on the right is the Journal, and it has tabs along
@@ -31,7 +31,7 @@ panel (`Ctrl+P`) has `j`, `k` and `i` for the first three. Your terminal may nee
 the notes, exit card and objects for the room you are standing in — or the one
 you clicked on the map, which pins it (Esc lets go) — and the Inventory tab lists
 what you carry and where everything else was last seen. It remembers which tab you
-left on, per story. Narrow it down far enough and the bar shortens its labels, then
+left on, per game. Narrow it down far enough and the bar shortens its labels, then
 shows only the current tab between `‹` and `›`. `/toggle-map` hides or shows the
 whole Journal, and the splitter beside it drags to any width.
 
@@ -44,42 +44,42 @@ Esc, clicking the room again, or clicking empty map space puts the card away; wi
 nothing selected there is no card.
 
 **The Hints tab.** A game's *InvisiClues* file, if lanthorn finds one in the game's
-documents folder, beside the story (or you have downloaded one), runs here in a
+documents folder, beside the game (or you have downloaded one), runs here in a
 window of its own: its topic menu on top, the clue text below, an input row at the
 bottom. It starts the first time you show the tab and keeps its place while you look
 at other tabs. With no hint file the tab says so, names the game's documents folder
 (or says to link the game to IFDB first, if it is not linked) and offers **Download
-hints…** (`/download-hints`, also `Shift+H` in the story browser). If several hint
+hints…** (`/download-hints`, also `Shift+H` in the game browser). If several hint
 files could be the game's, the tab lists them as rows: click one, or press **Tab** to
 give the tab the keyboard, **Up/Down** and **Enter**, and **Esc** to give it back.
-The pick is remembered for the game. If the story ships its own `HINT` command, the
+The pick is remembered for the game. If the game ships its own `HINT` command, the
 tab points you at that too.
 
-Who is typing? The keyboard stays with the story when you show the tab by clicking
+Who is typing? The keyboard stays with the game when you show the tab by clicking
 its label, pressing **Alt+4** or running `/open-hints`. It moves to the hint window
-when you **click inside it**, or press **Tab** on an empty story prompt while the
+when you **click inside it**, or press **Tab** on an empty game prompt while the
 tab is showing (**Shift+Tab** goes back the other way). While the hint window has
 it, every key goes to the hint file — arrows, Enter and single letters included,
 because InvisiClues menus are driven that way — and **PageUp/PageDown** scroll the
 clues. The mouse wheel scrolls them whoever holds the keyboard. The input that has
 the keyboard shows the cursor and the other one dims, and the **Hints** label gets a
-`▸` in front. **Esc**, **Tab** on an empty hint line, a click on the story, or
-switching to another tab hands the keyboard back to the story.
+`▸` in front. **Esc**, **Tab** on an empty hint line, a click on the game, or
+switching to another tab hands the keyboard back to the game.
 
 **The Documents tab.** The manual, the map, the feelies: whatever sits in this
 game's documents folder (see [getting started](getting-started.md)) is listed in
 the Documents tab with its kind and size, so you can read it without leaving the
-story. The header shows the folder as a link, with **Download documents…** to pull
+game. The header shows the folder as a link, with **Download documents…** to pull
 manuals and maps from IFDB and, when the folder does not exist yet, **Create
 documents folder**. A hint file there (an *InvisiClues* program) is listed as
 "hint program — opens in Hints tab": opening it shows the Hints tab running that
-file, and the keyboard stays in the story. A game that is not linked to IFDB says "Link to IFDB for a
+file, and the keyboard stays in the game. A game that is not linked to IFDB says "Link to IFDB for a
 documents folder"; an empty folder tells you to drop files in or download some.
 
 Click a row to select it and double-click to open it. Text opens in a pager that
 wraps to the pane (and again if you resize it), copes with old Mac and DOS files,
 and says so if it cut off a huge one; pictures are drawn in the pane the same way
-the story picker draws covers; a PDF opens in your system viewer. A file whose
+the game picker draws covers; a PDF opens in your system viewer. A file whose
 name looks like a walkthrough, hint sheet or solution is marked `spoiler` and
 asks before it opens. From the keyboard: **Shift+Up/Down** move the selection (or
 scroll an open document), **Shift+Right** opens the selected row, **Shift+PageUp/
@@ -146,7 +146,7 @@ of times in a game, when a cluster of rooms wants to be its own layer — a
 cellar reachable only through one portal, or a room the game itself names a
 "Maze" — and offers to split it off. It never acts on its own: separate it,
 put it off for now, tell it never to ask about that passage again, or tell
-it never to ask about *anything* for the rest of this story.
+it never to ask about *anything* for the rest of this game.
 
 **Mazes get a table, not a lie.** A compass-drawn maze is a lie told
 carefully — real "all alike" rooms have passages that don't come back the way
@@ -186,13 +186,13 @@ standing, and walks the direction that would bring you back. Land in the room
 you just left and that passage joins the map for real; land anywhere else and
 nothing at all is recorded — not the edge, not even that the room exists, and
 not that the direction was tried, so it can be asked again later once you've
-found what's over there. It's on by default, and the footprint control on the story pane's bottom border
-shows whether it's currently running; toggle it per story with
+found what's over there. It's on by default, and the footprint control on the game pane's bottom border
+shows whether it's currently running; toggle it per game with
 `/set-return-probe`.
 
 **Spotting the exits before you walk them.** The first time you stand in a
 room, lanthorn quietly asks that same throwaway copy of your game which ways
-lead out — north, south, up, in, the ship words if the story has them — and
+lead out — north, south, up, in, the ship words if the game has them — and
 remembers the ones that work. In the matrix view and the room card those show as
 `»`, a real exit you haven't walked yet, instead of the dim `·` of "maybe";
 directions the game refused read as dead ends. (An exit that leads back into the same room, as in a maze, still counts as an exit when the game's own exit table says so, and looks like any other.) It includes exits the room
@@ -204,7 +204,7 @@ behind everything your own moves need, and `scan_exits = false` in `config.toml`
 (or the Settings screen) turns it off, leaving every untyped direction as a maybe.
 
 **Click the compass, walk the map.** A graphical v6 game paints its own
-compass rose into the frame around the story — *Zork Zero*'s sits in the banner
+compass rose into the frame around the game — *Zork Zero*'s sits in the banner
 overhead — and those spokes are live. Click one and you walk that way, exactly
 as you would have on the original machine. The automap comes along for the
 ride: the game echoes the direction it acted on, lanthorn takes that echo as

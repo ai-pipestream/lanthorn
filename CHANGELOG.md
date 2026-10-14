@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+- **Lanthorn says "game", not "story", everywhere you read it.** The browser, dialogs, help,
+  settings comments, command descriptions, error messages and the docs now use the word players
+  and IFDB use. For hosts embedding the library: the Guiding Light assist-line prefix
+  (`LEAD_DICTIONARY`) is now `this game knows — ` rather than `this story knows — `.
 - **Fetching a library asks IFDB once per game, not once per file.** When you have several
   releases or copies of the same game, the first answer already names the others, so they are
   linked without another request; games that are already identified are left alone, and a full

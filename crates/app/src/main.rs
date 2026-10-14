@@ -1164,7 +1164,7 @@ fn draw_frame(
         } else if state.resize_mode {
             use app::state::ResizeTarget;
             let t = match state.resize_target {
-                ResizeTarget::StoryMap => "story/journal",
+                ResizeTarget::StoryMap => "game/journal",
                 ResizeTarget::CommandBand => "command panel",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
@@ -1197,7 +1197,7 @@ fn draw_frame(
                 }
                 // The hint session holds the keyboard (SQ-1685): say so, and how out.
                 Focus::Hints => app::render::hintbar::literal_hint_bar(
-                    &[("Hints", "keys go to the hint window"), ("PgUp/PgDn", "scroll"), ("Esc", "back to the story")],
+                    &[("Hints", "keys go to the hint window"), ("PgUp/PgDn", "scroll"), ("Esc", "back to the game")],
                     w,
                 ),
                 // Unreachable in practice: `Focus::Map` is only ever set while
@@ -1715,10 +1715,10 @@ fn run_headless_fetch(
     let targets = app::picker::fetch_targets(source, roots);
     let total = targets.len();
     if total == 0 {
-        eprintln!("lanthorn: no stories under {}", source.dir().display());
+        eprintln!("lanthorn: no games under {}", source.dir().display());
         return 1;
     }
-    eprintln!("lanthorn: fetching IFDB metadata for {total} stories under {}", source.dir().display());
+    eprintln!("lanthorn: fetching IFDB metadata for {total} games under {}", source.dir().display());
     let fetcher = Fetcher::new(
         Box::new(app::ifdb::IfdbClient::new()),
         roots.clone(),
@@ -1842,7 +1842,7 @@ fn main() {
 
     if let Some(mode) = ctx.cli.fetch {
         let Some(source) = source.as_ref() else {
-            eprintln!("lanthorn: --fetch needs a library directory or a story file");
+            eprintln!("lanthorn: --fetch needs a library directory or a game file");
             std::process::exit(2);
         };
         std::process::exit(run_headless_fetch(source, mode, &ctx.roots));

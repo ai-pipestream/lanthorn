@@ -73,7 +73,7 @@ fn buttons_for(prompt: &RegionPrompt) -> &'static [DialogButton] {
         DialogButton { id: ButtonId::Separate, label: "Separate" },
         DialogButton { id: ButtonId::Later, label: "Not now" },
         DialogButton { id: ButtonId::Never, label: "Not this passage" },
-        DialogButton { id: ButtonId::NeverStory, label: "Never for this story" },
+        DialogButton { id: ButtonId::NeverStory, label: "Never for this game" },
     ];
     const PICK: &[DialogButton] = &[
         DialogButton { id: ButtonId::MoveRegion, label: "Move" },
@@ -385,7 +385,7 @@ mod tests {
         assert!(all.contains("Separate"));
         assert!(all.contains("Not now"));
         assert!(all.contains("Not this passage"), "the renamed per-seam never");
-        assert!(all.contains("Never for this story"), "the new story-wide never");
+        assert!(all.contains("Never for this game"), "the new story-wide never");
     }
 
     /// A pick is an ordinary confirm/cancel: Move and Cancel, no memory buttons.

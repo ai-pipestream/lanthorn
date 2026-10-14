@@ -82,13 +82,13 @@ fn a_name_no_game_on_the_disc_answers_to_is_refused_with_the_menu() {
 
     let err = app::story_pick::pick(Some(&source), &path, &app::data_roots::DataRoots::single(&data_base), "photopia")
         .expect_err("Photopia is not an Infocom game");
-    assert!(err.starts_with("no story on this disk is named 'photopia':"), "{err}");
+    assert!(err.starts_with("no game on this disk is named 'photopia':"), "{err}");
     assert!(err.to_ascii_uppercase().contains("ZORK ZERO"), "the menu rides along: {err}");
 
     // Out of range says the range rather than clamping to an end of the list.
     let err = app::story_pick::pick(Some(&source), &path, &app::data_roots::DataRoots::single(&data_base), "999")
         .expect_err("no 999th game anywhere");
-    assert!(err.starts_with("no story 999 on this disk — pick 1 to "), "{err}");
+    assert!(err.starts_with("no game 999 on this disk — pick 1 to "), "{err}");
 }
 
 /// `STORY.DATA` is the name of nearly every game on a Macintosh compilation, so
@@ -99,7 +99,7 @@ fn a_name_several_games_share_refuses_rather_than_guessing() {
 
     let err = app::story_pick::pick(Some(&source), &path, &app::data_roots::DataRoots::single(&data_base), "story.data")
         .expect_err("this disc stores several games under that name");
-    assert!(err.starts_with("'story.data' matches more than one story on this disk:"), "{err}");
+    assert!(err.starts_with("'story.data' matches more than one game on this disk:"), "{err}");
 }
 
 /// A plain story file offers one row, and the flag is matched against it like
@@ -123,5 +123,5 @@ fn a_lone_story_file_is_a_list_of_one() {
 
     let err = app::story_pick::pick(None, &path, &app::data_roots::DataRoots::single(&data_base), "arthur")
         .expect_err("this file is not Arthur");
-    assert!(err.starts_with("no story on this file is named 'arthur':"), "{err}");
+    assert!(err.starts_with("no game on this file is named 'arthur':"), "{err}");
 }

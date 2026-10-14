@@ -49,7 +49,7 @@ pub(crate) fn exit_clear_resume_save(
     match app::host::persist::exit_clear_resume_save(session, mapper, state, ifid, arc_file) {
         ExitSave::Skipped => {}
         ExitSave::Saved => eprintln!(
-            "lanthorn: map saved to {} (story finished — no resume point)",
+            "lanthorn: map saved to {} (game finished — no resume point)",
             arc_file.display()
         ),
         ExitSave::Failed(e) => {

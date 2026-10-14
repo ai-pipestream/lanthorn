@@ -133,7 +133,7 @@ pub enum SlashOutcome {
     /// global one. Handled in `slash_dispatch` (mutates `state.config.guidance`).
     SetGuidance(GuidanceArg),
     SetReturnProbe(ReturnProbeArg),
-    /// Light the nouns and named things on screen this story knows, for a moment
+    /// Light the nouns and named things on screen this game knows, for a moment
     /// (SQ-1107, SQ-1207).
     ///
     /// **The one outcome in this family that is not a setting.** Everything
@@ -344,7 +344,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "reset-game [map] [data]", description: "restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
         dispatch: |a| SlashOutcome::Reset { map: a.contains(&"map"), data: a.contains(&"data") } },
     CommandSpec { name: "set-transcript", category: Category::Game, context: Context::Global,
-        usage: "set-transcript on|off", description: "start or stop the story's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead)",
+        usage: "set-transcript on|off", description: "start or stop the game's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead)",
         dispatch: |a| match a.first().copied() {
             Some("on")  => SlashOutcome::SetTranscript(true),
             Some("off") => SlashOutcome::SetTranscript(false),
@@ -354,19 +354,19 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "quit", description: "exit lanthorn",
         dispatch: |_| SlashOutcome::Quit },
     CommandSpec { name: "quit-to-library", category: Category::Game, context: Context::Global,
-        usage: "quit-to-library", description: "exit the current story and return to the story library",
+        usage: "quit-to-library", description: "exit the current game and return to the game library",
         dispatch: |_| SlashOutcome::QuitToLibrary },
     CommandSpec { name: "download-documents", category: Category::Game, context: Context::Global,
         usage: "download-documents", description: "choose manuals, feelies and maps listed on IFDB for this game and save them to its documents folder",
         dispatch: |_| SlashOutcome::DownloadDocuments },
     CommandSpec { name: "open-hints", category: Category::Game, context: Context::Global,
-        usage: "open-hints", description: "show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the story)",
+        usage: "open-hints", description: "show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the game)",
         dispatch: |_| SlashOutcome::OpenHints },
     CommandSpec { name: "open-history", category: Category::Game, context: Context::Global,
         usage: "open-history", description: "open the rewind/replay history",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenHistory) },
     CommandSpec { name: "toggle-command-panel", category: Category::Game, context: Context::Global,
-        usage: "toggle-command-panel", description: "open or close the command panel; remembered per story",
+        usage: "toggle-command-panel", description: "open or close the command panel; remembered per game",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenCommandBand) },
     CommandSpec { name: "cycle-panel", category: Category::Game, context: Context::Global,
         usage: "cycle-panel", description: "cycle command panel → none; persisted per-game",
@@ -521,7 +521,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "toggle-focus", description: "switch focus between panes",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleFocus) },
     CommandSpec { name: "journal-tab", category: Category::View, context: Context::Global,
-        usage: "journal-tab <map|room|inventory|hints|documents>", description: "show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per story",
+        usage: "journal-tab <map|room|inventory|hints|documents>", description: "show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per game",
         dispatch: |a| match a.first().copied() {
             None => err("journal-tab: a tab name is required (map | room | inventory | hints | documents)".to_string()),
             Some(name) => match crate::journal::JournalTab::from_name(name) {
@@ -666,7 +666,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     // take. It is the first of its kind among the border controls; see
     // `SlashOutcome::RevealWords` and `crate::reveal`.
     CommandSpec { name: "reveal-words", category: Category::Style, context: Context::Global,
-        usage: "reveal-words", description: "light the nouns and named things on screen this story knows, for a few seconds — under the Guiding Light's switch",
+        usage: "reveal-words", description: "light the nouns and named things on screen this game knows, for a few seconds — under the Guiding Light's switch",
         dispatch: |_| SlashOutcome::RevealWords },
     CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
         usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
@@ -775,7 +775,7 @@ pub static COMMANDS: &[CommandSpec] = &[
             None => err("half-page-selection requires an integer (e.g. half-page-selection -1)"),
         } },
     CommandSpec { name: "select-edge", category: Category::Library, context: Context::Browser,
-        usage: "select-edge first|last", description: "jump the browser's selection to the first or last story",
+        usage: "select-edge first|last", description: "jump the browser's selection to the first or last game",
         dispatch: |a| {
             use crate::browser::{BrowserAction, Edge};
             match a.first().copied() {
@@ -785,43 +785,43 @@ pub static COMMANDS: &[CommandSpec] = &[
             }
         } },
     CommandSpec { name: "play-story", category: Category::Library, context: Context::Browser,
-        usage: "play-story", description: "launch the selected story",
+        usage: "play-story", description: "launch the selected game",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::PlayStory) },
     CommandSpec { name: "open-launch-options", category: Category::Library, context: Context::Browser,
-        usage: "open-launch-options", description: "open the launch-options dialog for the selected story",
+        usage: "open-launch-options", description: "open the launch-options dialog for the selected game",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenLaunchOptions) },
     CommandSpec { name: "open-story-menu", category: Category::Library, context: Context::Browser,
-        usage: "open-story-menu", description: "open the per-story menu beside the selected story",
+        usage: "open-story-menu", description: "open the per-game menu beside the selected game",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenStoryMenu) },
     CommandSpec { name: "show-browser-keys", category: Category::Library, context: Context::Browser,
-        usage: "show-browser-keys", description: "show the story browser's key reference",
+        usage: "show-browser-keys", description: "show the game browser's key reference",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ShowBrowserKeys) },
     CommandSpec { name: "toggle-info-panel", category: Category::Library, context: Context::Browser,
-        usage: "toggle-info-panel", description: "open or close the browser's story info panel",
+        usage: "toggle-info-panel", description: "open or close the browser's game info panel",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ToggleInfoPanel) },
     CommandSpec { name: "toggle-gallery", category: Category::Library, context: Context::Browser,
-        usage: "toggle-gallery", description: "switch the browser between the story list and the cover gallery",
+        usage: "toggle-gallery", description: "switch the browser between the game list and the cover gallery",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ToggleGallery) },
     CommandSpec { name: "fetch-story", category: Category::Library, context: Context::Browser,
-        usage: "fetch-story", description: "re-fetch the selected story's IFDB metadata, ignoring the cache",
+        usage: "fetch-story", description: "re-fetch the selected game's IFDB metadata, ignoring the cache",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::FetchStory) },
     CommandSpec { name: "refresh-library", category: Category::Library, context: Context::Browser,
-        usage: "refresh-library", description: "fetch IFDB metadata for every story that is missing or stale",
+        usage: "refresh-library", description: "fetch IFDB metadata for every game that is missing or stale",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::RefreshLibrary) },
     CommandSpec { name: "set-ifdb-url", category: Category::Library, context: Context::Browser,
-        usage: "set-ifdb-url", description: "point the selected story at an IFDB page by hand",
+        usage: "set-ifdb-url", description: "point the selected game at an IFDB page by hand",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SetIfdbUrl) },
     CommandSpec { name: "create-documents-folder", category: Category::Library, context: Context::Global,
-        usage: "create-documents-folder", description: "create this story's documents folder (manuals, maps) beside its IFDB id",
+        usage: "create-documents-folder", description: "create this game's documents folder (manuals, maps) beside its IFDB id",
         dispatch: |_| SlashOutcome::CreateDocumentsFolder },
     CommandSpec { name: "open-url", category: Category::Library, context: Context::Browser,
-        usage: "open-url", description: "download a story from a URL into this library and open it",
+        usage: "open-url", description: "download a game from a URL into this library and open it",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenUrl) },
     CommandSpec { name: "search-ifdb", category: Category::Library, context: Context::Browser,
-        usage: "search-ifdb", description: "search IFDB by title or author and download a story into this directory",
+        usage: "search-ifdb", description: "search IFDB by title or author and download a game into this directory",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SearchIfdb) },
     CommandSpec { name: "download-hints", category: Category::Library, context: Context::Global,
-        usage: "download-hints", description: "download a matching InvisiClues hint file for this story (the selected one in the browser)",
+        usage: "download-hints", description: "download a matching InvisiClues hint file for this game (the selected one in the browser)",
         dispatch: |_| SlashOutcome::DownloadHints },
     CommandSpec { name: "sort-library", category: Category::Library, context: Context::Browser,
         usage: "sort-library", description: "cycle the browser's sort column, keeping the direction",
@@ -836,7 +836,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "parent-folder", description: "leave the current library folder for the one above it",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ParentFolder) },
     CommandSpec { name: "quit-browser", category: Category::Library, context: Context::Browser,
-        usage: "quit-browser", description: "leave the story browser",
+        usage: "quit-browser", description: "leave the game browser",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::QuitBrowser) },
     CommandSpec { name: "cancel-browser", category: Category::Library, context: Context::Browser,
         usage: "cancel-browser", description: "cancel a running fetch, or leave the browser when nothing is in flight",
@@ -912,10 +912,10 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
     // a game command in the browser has no `AppState` to act on, and would
     // otherwise hand the picker an outcome it cannot apply.
     if spec.context == Context::Browser && ctx != Context::Browser {
-        return SlashOutcome::Error(format!("{} is only available in the story browser", spec.name));
+        return SlashOutcome::Error(format!("{} is only available in the game browser", spec.name));
     }
     if ctx == Context::Browser && spec.context != Context::Browser && !in_both_worlds(spec) {
-        return SlashOutcome::Error(format!("{} is not available in the story browser", spec.name));
+        return SlashOutcome::Error(format!("{} is not available in the game browser", spec.name));
     }
 
     let tokens: Vec<&str> = body.split_whitespace().collect();

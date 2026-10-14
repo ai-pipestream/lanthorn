@@ -132,7 +132,7 @@ pub fn draw_fetch_keep_dialog(state: &AppState, area: Rect, buf: &mut Buffer) ->
     debug_assert_eq!(buttons.len(), button_count(state), "focus ring and button row must agree");
 
     let spec = DialogSpec {
-        title: if archive { "Unpack this download?" } else { "Keep this story?" },
+        title: if archive { "Unpack this download?" } else { "Keep this game?" },
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
@@ -302,7 +302,7 @@ mod tests {
         let r = rects.expect("drawn once the prompt is raised");
         assert!(r.keep.is_some() && r.decline.is_some());
         assert!(r.keep_both.is_none(), "no third answer when nothing collides");
-        assert!(all.contains("Keep this story?"), "title present");
+        assert!(all.contains("Keep this game?"), "title present");
         assert!(all.contains("curses.z5"), "the file is named");
         assert!(all.contains("example.org"), "the address it came from is shown");
         assert!(all.contains("stories"), "and where keeping it would put it");
@@ -413,7 +413,7 @@ mod tests {
         let mut state = AppState::default();
         state.overlays.fetch_keep = Some(prompt(false));
         let (_r, all) = render(&state);
-        assert!(all.contains("Keep this story?") && all.contains("Keep in library"));
+        assert!(all.contains("Keep this game?") && all.contains("Keep in library"));
         assert!(all.contains("Just play it"), "a story IS playing either way");
         assert!(!all.contains("disk image"), "no archive wording in the story shape: {all}");
     }

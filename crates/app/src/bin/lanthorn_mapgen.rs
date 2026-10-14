@@ -22,29 +22,29 @@ const EXIT_NO_SOURCE: u8 = 2;
 #[command(
     name = "lanthorn-mapgen",
     version,
-    about = "Draw an interactive-fiction story's whole map from the story file, without playing it.",
-    long_about = "Draw an interactive-fiction story's whole map from the story file, without \
+    about = "Draw an interactive-fiction game's whole map from the game file, without playing it.",
+    long_about = "Draw an interactive-fiction game's whole map from the game file, without \
 playing it.\n\n\
-Reads the map a story COMPILED — Inform 7's own map table, the Inform 6 library's exit \
+Reads the map a game COMPILED — Inform 7's own map table, the Inform 6 library's exit \
 properties, Infocom's ZIL exit properties, or a Scott Adams database's room table — lays it out \
 with the same automapper the lanthorn interpreter draws with, and writes it out in four formats:\n\n  \
 <stem>.map.txt   an annotated text dump with an ASCII drawing of the map\n  \
 <stem>.svg       the drawn map as vector graphics\n  \
 <stem>.dot       a Graphviz graph, for dot/neato and other graph tools\n  \
 <stem>.map.json  a documented, versioned JSON map for other programs to read\n\n\
-Understands the same files lanthorn does: bare story files (.z3-.z8, .ulx, .dat), Blorbs \
+Understands the same files lanthorn does: bare game files (.z3-.z8, .ulx, .dat), Blorbs \
 (.zblorb, .gblorb, .blb), zips, and release disk images.\n\n\
 LAYERS. A maze room, and a portal-only region big enough to be a floor plan, are split onto \
 their own layer — the same split the interpreter offers a player as a prompt, applied as if \
-every prompt were accepted. The layer holding the room the story STARTS in is the main one, \
-which is why mapgen boots the story for a moment before reading it; --no-boot skips that and \
+every prompt were accepted. The layer holding the room the game STARTS in is the main one, \
+which is why mapgen boots the game for a moment before reading it; --no-boot skips that and \
 keeps the largest region instead. --no-auto-layers turns layers off for one flat map; \
 --layer-min sets how big a portal-only region has to be first (mazes have no floor at any \
 setting of 1 or more) — --layer-min 0 is the exception, and turns layers off entirely, mazes \
 included, the same flat map --no-auto-layers produces.\n\n\
-LIMITS. This is the map as compiled, so a passage a story builds or removes while it runs is \
+LIMITS. This is the map as compiled, so a passage a game builds or removes while it runs is \
 not in it, and neither is one whose destination a routine decides. Conditional exits and doors \
-ARE included, and are marked as such. Some stories declare no map anywhere in the file; \
+ARE included, and are marked as such. Some games declare no map anywhere in the file; \
 mapgen exits with status 2 and says so.\n\n\
 EXIT STATUS\n  \
 0  a map was written\n  \
@@ -52,8 +52,8 @@ EXIT STATUS\n  \
 2  the file was read but declares no map this tool can find"
 )]
 struct Cli {
-    /// The story file to map.
-    #[arg(value_name = "STORY")]
+    /// The game file to map.
+    #[arg(value_name = "GAME")]
     story: PathBuf,
 
     /// Directory to write the artefacts into (created if absent).
@@ -89,9 +89,9 @@ struct Cli {
     #[arg(long)]
     no_auto_layers: bool,
 
-    /// Do not boot the story to learn which room it starts the player in.
+    /// Do not boot the game to learn which room it starts the player in.
     ///
-    /// Mapgen otherwise runs the story headlessly for a moment — no more than
+    /// Mapgen otherwise runs the game headlessly for a moment — no more than
     /// a couple of dozen keypresses and two `look`s — purely to read the
     /// starting room, which is then the room the map highlights and the room
     /// whose layer is called `Main`. Without it the largest region is `Main`

@@ -49,7 +49,7 @@ pub fn find(rows: &[Row], want: &str, subject: &str) -> Result<usize, String> {
             return Ok(n - 1);
         }
         let last = rows.len();
-        return Err(format!("no story {n} on {subject} — pick 1 to {last}:\n{}", menu(rows)));
+        return Err(format!("no game {n} on {subject} — pick 1 to {last}:\n{}", menu(rows)));
     }
     let lower = want.to_ascii_lowercase();
     let hits: Vec<usize> = (0..rows.len())
@@ -61,8 +61,8 @@ pub fn find(rows: &[Row], want: &str, subject: &str) -> Result<usize, String> {
         .collect();
     match hits.as_slice() {
         [i] => Ok(*i),
-        [] => Err(format!("no story on {subject} is named '{want}':\n{}", menu(rows))),
-        _ => Err(format!("'{want}' matches more than one story on {subject}:\n{}", menu(rows))),
+        [] => Err(format!("no game on {subject} is named '{want}':\n{}", menu(rows))),
+        _ => Err(format!("'{want}' matches more than one game on {subject}:\n{}", menu(rows))),
     }
 }
 
@@ -90,7 +90,7 @@ mod tests {
     fn a_number_picks_that_row_and_out_of_range_says_the_range() {
         assert_eq!(find(&rows(), "2", "this disk"), Ok(1));
         let err = find(&rows(), "9", "this disk").unwrap_err();
-        assert!(err.starts_with("no story 9 on this disk — pick 1 to 3:"), "{err}");
+        assert!(err.starts_with("no game 9 on this disk — pick 1 to 3:"), "{err}");
         // …and the menu comes with it, so the next attempt is informed.
         assert!(err.contains("3) PLANETFALL"), "{err}");
     }
@@ -109,12 +109,12 @@ mod tests {
     #[test]
     fn an_ambiguous_name_refuses_rather_than_guessing() {
         let err = find(&rows(), "story.data", "this disk").unwrap_err();
-        assert!(err.starts_with("'story.data' matches more than one story on this disk:"), "{err}");
+        assert!(err.starts_with("'story.data' matches more than one game on this disk:"), "{err}");
     }
 
     #[test]
     fn no_match_says_so_and_the_subject_is_the_callers() {
         let err = find(&rows(), "trinity", "this library").unwrap_err();
-        assert!(err.starts_with("no story on this library is named 'trinity':"), "{err}");
+        assert!(err.starts_with("no game on this library is named 'trinity':"), "{err}");
     }
 }

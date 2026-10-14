@@ -2240,7 +2240,7 @@ fn render_status_content(
     };
     let filter = match state.transcript_filter {
         TranscriptFilter::Both => String::new(),
-        TranscriptFilter::Story => "[filter: story]".to_string(),
+        TranscriptFilter::Story => "[filter: game]".to_string(),
         TranscriptFilter::Meta => "[filter: meta]".to_string(),
     };
     let fields = StatusFields {
@@ -4144,7 +4144,7 @@ mod tests {
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
         // filter indicator pinned right (default bar includes ` {filter}`).
-        assert!(row.contains("[filter: story]"), "default bar must show the filter indicator: {:?}", row);
+        assert!(row.contains("[filter: game]"), "default bar must show the filter indicator: {:?}", row);
         // status row keeps the reversed-video base fill.
         assert!(buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED));
     }

@@ -13,7 +13,7 @@
 //! `tests/suites/vocabulary_vetting.rs` does. One row per story: the file, the
 //! engine and format, the parser family, and every offer the light made with
 //! its vetting verdict (`try instead` = vetted in a silent copy of the game,
-//! `this story knows` = the dictionary claim the offer can still support).
+//! `this game knows` = the dictionary claim the offer can still support).
 //!
 //! **It is bounded on purpose.** Per story: at most 12 keypresses to clear the
 //! opening gate, at most 40 turns, and a 60-second wall clock, after which the

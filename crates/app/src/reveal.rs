@@ -177,7 +177,7 @@ pub const REVEAL_HOLD: Duration = Duration::from_millis(4_000);
 /// Stated in the control's description rather than on every press since
 /// SQ-1214 — a lit reveal itself says nothing, so this is the one wording of
 /// the claim, kept here so the description and the docs cannot drift apart.
-pub const CAVEAT: &str = "words this story knows — not necessarily things that are here";
+pub const CAVEAT: &str = "words this game knows — not necessarily things that are here";
 
 /// A reveal that is currently lit.
 #[derive(Debug, Clone)]

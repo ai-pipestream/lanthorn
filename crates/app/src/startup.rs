@@ -187,7 +187,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         Some(p) => p,
         None => {
             eprintln!(
-                "lanthorn: no story given. Pass a story file or directory, or set \
+                "lanthorn: no game given. Pass a game file or directory, or set \
                  `default_story_dir` in {}.",
                 config_path(&cli).display(),
             );
@@ -247,7 +247,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         && cli.import_metadata.is_none()
         && cli.story.as_deref().map(|p| p.is_dir()).unwrap_or(false)
         && prompt_yes_no(&format!(
-            "Set {} as your default story directory?",
+            "Set {} as your default game directory?",
             story_path.display()
         ))
     {
@@ -258,7 +258,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         let to_store = std::fs::canonicalize(&story_path).unwrap_or_else(|_| story_path.clone());
         cfg.default_story_dir = Some(to_store.clone());
         match app::config::write_config_file(&cfg) {
-            Ok(()) => eprintln!("lanthorn: saved default story directory ({}).", to_store.display()),
+            Ok(()) => eprintln!("lanthorn: saved default game directory ({}).", to_store.display()),
             Err(e) => eprintln!("lanthorn: could not save config: {e}"),
         }
     }
@@ -413,7 +413,7 @@ fn unpack_fetched_archive(
     let Some(library_dir) = cfg.default_story_dir.clone() else {
         let _ = std::fs::remove_file(&archive.path);
         eprintln!(
-            "lanthorn: {} holds {n} disk image{} and no story, and lanthorn does not run disk \
+            "lanthorn: {} holds {n} disk image{} and no game, and lanthorn does not run disk \
              images from inside a zip.",
             archive.filename(),
             if n == 1 { "" } else { "s" },
@@ -1070,7 +1070,7 @@ pub(crate) fn boot_story(
                 state.overlays.dialog_focus = 0;
             }
             None => state.push_notice(
-                "[Downloaded to a temporary folder. Set `default_story_dir` in your config to keep fetched stories.]",
+                "[Downloaded to a temporary folder. Set `default_story_dir` in your config to keep fetched games.]",
             ),
         }
     }
@@ -1083,7 +1083,7 @@ pub(crate) fn boot_story(
         for line in &state.transcript {
             println!("{}", line);
         }
-        eprintln!("lanthorn: story ended without asking for input.");
+        eprintln!("lanthorn: game ended without asking for input.");
         std::process::exit(0);
     }
 

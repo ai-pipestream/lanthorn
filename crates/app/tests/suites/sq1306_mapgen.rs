@@ -578,7 +578,7 @@ fn zork1_static_map_reads_its_zil_exits() {
     assert_eq!(trap_door.kind, EdgeKind::Routine, "the trap door's kind must be `routine`");
     assert_eq!(
         trap_door.note.as_deref(),
-        Some("decided by the story's code; the way back is declared")
+        Some("decided by the game's code; the way back is declared")
     );
 
     // The falsifier this rule guards against: a `Code` exit with NO declared

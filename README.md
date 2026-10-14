@@ -10,7 +10,7 @@
 
 **Lanthorn plays interactive fiction in your terminal and lights the way: a live automap, spoiler-free guidance, and the game's own artwork.**
 
-### Supported story formats:
+### Supported game formats:
 
 * **Z-machine v1–v8**, including graphical v6
 * **Glulx**
@@ -42,15 +42,15 @@ paper.
 |:--|
 | *Zork I, four moves in: the map draws itself from the game's own replies.* |
 
-**Your library at a glance.** The story picker shows it as a list or as a grid of covers. Press `[TAB]` to
-bring up the story info panel.
+**Your library at a glance.** The game picker shows it as a list or as a grid of covers. Press `[TAB]` to
+bring up the game info panel.
 
-| ![The story picker's grid view: covers beside a metadata info panel](docs/cover-gallery.png) |
+| ![The game picker's grid view: covers beside a metadata info panel](docs/cover-gallery.png) |
 |:--|
 | *Grid view with cover art and metadata from IFDB; Tab opens the info panel.* |
 
-**Stuck? The hints sit beside the story.** The Journal's Hints tab runs a game's InvisiClues next to the
-story instead of over it.
+**Stuck? The hints sit beside the game.** The Journal's Hints tab runs a game's InvisiClues next to the
+game instead of over it.
 
 | ![Zork I at the white house on the left; the Journal's Hints tab on the right shows the InvisiClues main menu](docs/journal-hints.png) |
 |:--|
@@ -65,7 +65,7 @@ story instead of over it.
 |:--|
 | *Beyond Zork booted from its Amiga floppy, character creation and all.* |
 
-| ![Anchorhead's opening: a Lovecraft epigraph in a box the story splits for itself, the prologue paging past, and the first turn](docs/anchorhead.gif) |
+| ![Anchorhead's opening: a Lovecraft epigraph in a box the game splits for itself, the prologue paging past, and the first turn](docs/anchorhead.gif) |
 |:--|
 | *Anchorhead splits its own window for the epigraph; lanthorn draws whatever layout the game asks for.* |
 
@@ -101,17 +101,17 @@ story instead of over it.
 |:--|
 | *Scopa: a v6 game whose entire screen, cards and buttons included, is artwork.* |
 
-| ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png) |
+| ![A Glulx game using a multi-window Glk layout with game-set colours](docs/multi-window-layout.png) |
 |:--|
-| *A Glulx game with several Glk windows, each in the colours the story chose.* |
+| *A Glulx game with several Glk windows, each in the colours the game chose.* |
 
-| ![Narcolepsy in its designed Glk frame: the title and blue column down the left, the story's prose inside a thought-bubble window mask](docs/narcolepsy.png) |
+| ![Narcolepsy in its designed Glk frame: the title and blue column down the left, the game's prose inside a thought-bubble window mask](docs/narcolepsy.png) |
 |:--|
 | *Narcolepsy in the frame its author drew: the thought bubble is the game's own window mask.* |
 
 | ![Photopia 2.01 in its designed Glk frame: a metallic title and credit frame around a white text window carrying the opening prose](docs/photopia.png) |
 |:--|
-| *Photopia 2.01 in its designed frame: the author's artwork fills the pane around the story's text.* |
+| *Photopia 2.01 in its designed frame: the author's artwork fills the pane around the game's text.* |
 
 | ![The matrix map view: the map as a direction table — one row per room, every passage's true destination in its cell](docs/maze-grid.png) |
 |:--|
@@ -129,7 +129,7 @@ story instead of over it.
 |:--|
 | *The same adventure off its original C64 disk: the game's own vector art, decoded from the disk image directly.* |
 
-| ![The story picker's list view: a sortable, badged catalogue beside the info panel](docs/story-list.png) |
+| ![The game picker's list view: a sortable, badged catalogue beside the info panel](docs/story-list.png) |
 |:--|
 | *List view: a sortable, badged catalogue beside the info panel.* |
 
@@ -147,7 +147,7 @@ release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 (`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
 ```bash
-lanthorn ~/if-games/        # a directory — opens the story picker. The usual way in.
+lanthorn ~/if-games/        # a directory — opens the game picker. The usual way in.
 lanthorn zork1.z3           # or straight into one game
 ```
 
@@ -165,7 +165,7 @@ lanthorn https://ifarchive.org/if-archive/games/zcode/curses.z5
 ```
 
 A web address works anywhere a path does. lanthorn fetches it, opens it like any
-other file — story, Blorb, disk image, zip — and then offers to keep it in your
+other file — game, Blorb, disk image, zip — and then offers to keep it in your
 library so the next launch finds it without fetching again.
 
 ---
@@ -174,26 +174,26 @@ library so the next launch finds it without fetching again.
 
 A few things worth doing in your first ten minutes. Everything else can wait.
 
-**In the story picker**
+**In the game picker**
 
 | | |
 |---|---|
 | **r** | Fetches titles, blurbs, ratings and cover art from IFDB for everything missing them. Do this first — until you do, there is not much for the grid to show. |
 | **g** | Flips the list view into a grid of covers. |
 | **/** | Searches IFDB by title or author and downloads straight into your library. |
-| **Shift+U** | Downloads a story straight into your library from a web address you paste. |
+| **Shift+U** | Downloads a game straight into your library from a web address you paste. |
 | **Ctrl+F** | Filters your library as you type: title, author, filename or folder. |
 | **Enter** on a folder | A library sorted into folders is listed folder by folder; Enter opens one and **Backspace** returns up. |
-| **Tab** | Shows the info panel for the highlighted story. |
-| **Space** or right-click | Everything you can do to *this* story, in one little menu beside it — open it, launch options, fetch its metadata, get its hints, point it at an IFDB page. |
-| **o** | Launch options for this story — which artwork it draws, which machine it plays as, and where its colours come from (also in the **Space** menu). |
+| **Tab** | Shows the info panel for the highlighted game. |
+| **Space** or right-click | Everything you can do to *this* game, in one little menu beside it — open it, launch options, fetch its metadata, get its hints, point it at an IFDB page. |
+| **o** | Launch options for this game — which artwork it draws, which machine it plays as, and where its colours come from (also in the **Space** menu). |
 | **?** | Every key the picker knows, on one screen. |
 
-**In the story**
+**In the game**
 
 | | |
 |---|---|
-| **Tab** | Completes from the words *this story* actually knows — no more guessing whether it wants `lamp` or `lantern`. |
+| **Tab** | Completes from the words *this game* actually knows — no more guessing whether it wants `lamp` or `lantern`. |
 | **/** on an empty line | A fuzzy palette over every command. The fastest way to find out what there is. |
 | **Ctrl+S** or **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
 | **/open-settings** | The settings worth changing, each with a line saying what it does. |
@@ -229,11 +229,11 @@ itself.**
   for it, and no room is ever drawn twice because the game spelled its name two
   ways.
   → [the map](docs/guide/the-map.md)
-- **The Journal** — the panel beside the story is a tabbed
+- **The Journal** — the panel beside the game is a tabbed
   Journal: **Map**, **Room**, **Inventory**, **Hints** and **Documents**, one click or
-  `Alt+1` to `Alt+5` apart, and it remembers the tab you left on for each story. The
-  inventory is no longer a strip across the bottom, so the story gets its rows
-  back, the Hints tab runs a game's *InvisiClues* file beside the story instead of
+  `Alt+1` to `Alt+5` apart, and it remembers the tab you left on for each game. The
+  inventory is no longer a strip across the bottom, so the game gets its rows
+  back, the Hints tab runs a game's *InvisiClues* file beside the game instead of
   over it, and the Documents tab reads a game's manuals and maps in place: text in a
   pager, pictures drawn in the pane, PDFs in your viewer.
   Every IFDB-linked game gets a documents folder
@@ -242,7 +242,7 @@ itself.**
   and you can fetch them without leaving lanthorn: pick from the files IFDB lists
   for the game (zips can be peeked inside, walkthroughs are flagged as spoilers,
   files you already have are marked), and they land in the folder. The Documents
-  tab and the story info panel list what is there and open it.
+  tab and the game info panel list what is there and open it.
 - **The original disks, as the original machines** — hand it an Amiga, Macintosh,
   Apple II, Atari ST, PC or Commodore floppy and it plays the build on that disk,
   with that machine's artwork, sound, palette and status line. Nine machines,
@@ -253,7 +253,7 @@ itself.**
   the media rather than bundled. Three ways to draw it:
   **hybrid** puts text in real terminal cells and art in real pixels,
   **raster** paints the whole pane as one image in the game's own face, and
-  **extended** keeps raster's face while growing the story downward instead of
+  **extended** keeps raster's face while growing the game downward instead of
   letterboxing it — a tall terminal gets more rows to read, with the side art
   tiled out of its own artwork at the artist's spacing. `/set-v6-render` cycles
   them. → [graphics and terminals](docs/guide/graphics-and-terminals.md)
@@ -264,7 +264,7 @@ itself.**
   `glk_design = false` in the game's `config.toml` turns it off.
   → [graphics and terminals](docs/guide/graphics-and-terminals.md#games-that-ship-their-own-frame)
 - **Saves that remember the whole session** — map, screen and scrollback, not
-  just the game's own state, whether you press Ctrl+S or the story does its own
+  just the game's own state, whether you press Ctrl+S or the game does its own
   `SAVE`. Plus Quetzal import/export and per-turn rewind.
   → [saves and rewind](docs/guide/saves-and-rewind.md)
 - **Transcripts, recording and replay** — A game's own `SCRIPT` command now
@@ -274,21 +274,21 @@ itself.**
   the transcript to a file with `--transcript-file <path>` for a screen reader
   or a second terminal running `tail -f` — engine-neutral and unlike
   `/set-transcript`. → [playing](docs/guide/playing.md)
-- **A real terminal UI** — mouse, resizable panes, a story picker with IFDB
+- **A real terminal UI** — mouse, resizable panes, a game picker with IFDB
   search, command palette, in-game InvisiClues, transcript search, a debug
   disassembler, and a theme every part of which you can restyle.
-  Click the `◈` on the story pane's border and every
-  word already on screen that this story's parser would accept **lights up** for
+  Click the `◈` on the game pane's border and every
+  word already on screen that this game's parser would accept **lights up** for
   a moment — the answer to a room description that names a dozen nouns and
   implements two.
   → [playing](docs/guide/playing.md)
 - **A light held up while you play** — Lanthorn's Guiding Light
-  offers the words this story's parser knows, the noun you were reaching for,
+  offers the words this game's parser knows, the noun you were reaching for,
   and a caution before a move that cannot be taken back. When it suggests a
   word it has already tried it, silently, in a throwaway copy of your own game
   — so it recommends what works where you are standing instead of listing what
   the dictionary holds. It says so once, then marks every later line with one
-  glyph in the margin — never in the story's own voice, and never a spoiler.
+  glyph in the margin — never in the game's own voice, and never a spoiler.
   `--guidance off`, `/set-guidance`, or the settings screen turns it off.
   → [playing](docs/guide/playing.md)
 - **It asks about your font, and sets every icon from the answer** —
@@ -306,23 +306,23 @@ and the internals below — is [**`docs/README.md`**](docs/README.md).
 
 ## Playing aids
 
-The story pane's border carries a few clickable switches — the command panel and
+The game pane's border carries a few clickable switches — the command panel and
 the Guiding Light along the bottom, the Journal at the right, and on a graphical v6
-story the render mode and pixel lock along the top. Each shows its state at a
+game the render mode and pixel lock along the top. Each shows its state at a
 glance, and hovering one names the command it stands for. What you switch there
-is remembered per story; the settings screen sets the defaults.
+is remembered per game; the settings screen sets the defaults.
 
-Press **`◈`** (or `/reveal-words`) and every word on screen that the story
+Press **`◈`** (or `/reveal-words`) and every word on screen that the game
 knows lights up for a few seconds — a quick way to tell the two nouns a room
 actually implements from the dozen it merely mentions. The command panel's
-**WHAT** column keeps a running list of the nouns the story has printed so far,
+**WHAT** column keeps a running list of the nouns the game has printed so far,
 newest first, so something named forty turns ago is still one click away.
 
 → [playing](docs/guide/playing.md)
 
 ## Play the original disks
 
-Hand lanthorn a disk image and it mounts the filesystem, finds the story *and*
+Hand lanthorn a disk image and it mounts the filesystem, finds the game *and*
 everything shipped beside it, and presents the machine that disk came from —
 interpreter number, palette, default colours and screen rules together, so a
 game that asks what it is running on gets one coherent answer.
@@ -358,7 +358,7 @@ those come after.
 Blorb — and where a release shipped more than one rendition (MCGA, EGA, CGA, the
 Macintosh's monochrome plates), you can pick.
 
-| ![The launch-options panel over the story picker: Arthur's five picture archives — Blorb, CGA, EGA, MCGA, Amiga — and the interpreter the story will play as](docs/launch-options.png) |
+| ![The launch-options panel over the game picker: Arthur's five picture archives — Blorb, CGA, EGA, MCGA, Amiga — and the interpreter the game will play as](docs/launch-options.png) |
 |:--|
 | *Arthur ships art for five systems; the launch-options panel picks which one plays.* |
 
@@ -375,7 +375,7 @@ it. Drop your own `Kick12.rom` or a Mac OS System file into your data folder (se
 system faces come too: topaz 8, and Geneva, which lives on no Infocom disk at
 all.
 
-**Zips work too.** Hand lanthorn a zip and it opens whatever is inside — a story
+**Zips work too.** Hand lanthorn a zip and it opens whatever is inside — a game
 file, a Blorb, a set of release floppies — and a zip holding several games lists
 them all, like a compilation disc. A downloaded zip of floppies is offered to
 your library, unpacked, and launched.
@@ -404,7 +404,7 @@ which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
 | **Sixel** | Windows Terminal **1.22+**, foot, xterm (+ others) | Windows 11 · Linux · macOS |
 | *Unicode half-blocks* (automatic fallback) | any terminal, incl. SSH / tmux / plain | everywhere |
 
-Anything without a protocol degrades to half-blocks automatically, so a story is
+Anything without a protocol degrades to half-blocks automatically, so a game is
 always playable and the map always draws. Force a path with `--image-protocol`,
 or turn images off with `--images off`.
 
@@ -450,13 +450,13 @@ colour.
 
 ## The command-line players
 
-`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
+`zvm-cli`, `gvm-cli` and `scott-cli` play any game in a bare terminal — no map,
 no panes, your scrollback intact. Useful over a slow link, for a screen reader
 (`--screen-reader` emits zero escape sequences), or for debugging one engine
 without the TUI around it. They ship in every release archive.
 
 `lanthorn-mapgen` ships alongside them, and it does the opposite
-of playing: hand it a story and it reads the map the game was *built* with —
+of playing: hand it a game and it reads the map the game was *built* with —
 every room, every exit, no walking — and writes it out four ways, as an
 annotated text dump with the map drawn in it, as an SVG, as a Graphviz `.dot`,
 and as a documented JSON file for whatever you want to do with it next. Doors
@@ -465,9 +465,9 @@ honest about its limits: a passage a game conjures up mid-play was never in the
 file to find, and a few games keep their map somewhere nothing can read without
 running them — for those it says so and stops.
 
-| ![Zork I's entire map, generated by lanthorn-mapgen straight from the story file: six layers from the Great Underground Empire down to the maze, rooms, doors and exits all drawn without a single move played](docs/zork1-map.svg) |
+| ![Zork I's entire map, generated by lanthorn-mapgen straight from the game file: six layers from the Great Underground Empire down to the maze, rooms, doors and exits all drawn without a single move played](docs/zork1-map.svg) |
 |:--|
-| *Zork I's whole map, read from the story file alone — no walking — with doors, gated exits and layer links marked.* |
+| *Zork I's whole map, read from the game file alone — no walking — with doors, gated exits and layer links marked.* |
 
 → [**the command line**](docs/guide/command-line.md)
 
@@ -528,7 +528,7 @@ lanthorn is better for the people who send it work. Thank you:
 
 - [**@krickert**](https://github.com/krickert) — the Docker build that put
   lanthorn in a browser tab (#2), then folders, a library-wide find and a
-  recursive cover grid for the story picker, headless `--fetch` and
+  recursive cover grid for the game picker, headless `--fetch` and
   `--import-metadata` for curating a big library, and real game audio in the
   browser (#4).
 - [**@dfabulich**](https://github.com/dfabulich) — the return probe: the map

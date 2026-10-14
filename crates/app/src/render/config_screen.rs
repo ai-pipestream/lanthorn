@@ -34,7 +34,7 @@ use crate::state::AppState;
 /// description — a row that appears to work and does not is worse than an honest
 /// one.
 pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
-    ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn). Takes effect on next launch: the story in front of you keeps the folders it was launched with."),
+    ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn). Takes effect on next launch: the game in front of you keeps the folders it was launched with."),
     ("auto_load",            ConfigRowKind::Bool, "Resume your last session automatically on launch."),
     ("auto_save",            ConfigRowKind::Bool, "Save the archive after every turn, not just on quit or Ctrl+S."),
     ("prompt_save_on_quit",  ConfigRowKind::Bool, "Ask to save when you quit (only matters when auto_save is off)."),
@@ -43,7 +43,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("background_tidy",      ConfigRowKind::Enum, "When to re-tidy the map as rooms appear: off / every_room / on_overlap / debounced."),
     ("aux_storage",          ConfigRowKind::Enum, "Where Z-machine v5 auxiliary save data lives: ask / archive / global."),
     ("honor_game_colours",   ConfigRowKind::Bool, "Let games pick their own colours; off = your theme owns every colour."),
-    ("period_look",          ConfigRowKind::Bool, "Paint a v1-v4 story the way its machine's own interpreter did — its page, ink, status band and cursor (only off a release disk, and only if you have not themed those yourself)."),
+    ("period_look",          ConfigRowKind::Bool, "Paint a v1-v4 game the way its machine's own interpreter did — its page, ink, status band and cursor (only off a release disk, and only if you have not themed those yourself)."),
     ("honor_timed_input",    ConfigRowKind::Bool, "Let real-time games run timed-input interrupts (clocks, countdowns, the bomb in Border Zone)."),
     ("enable_sound",         ConfigRowKind::Bool, "Play sound effects and music."),
     ("volume",               ConfigRowKind::Num,  "Master volume, 0-100. Use ← / → to adjust."),
@@ -53,17 +53,17 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("show_status_bar",      ConfigRowKind::Bool, "Show the top status bar (location, score, moves, time)."),
     ("watch_style",          ConfigRowKind::Bool, "Live-reload style.toml automatically whenever the file changes on disk."),
     ("record_turn_history",  ConfigRowKind::Bool, "Record a per-turn rewind/replay history — enables Rewind, but grows the archive and holds per-turn blobs in memory."),
-    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory snapshots the game's own in-game UNDO command keeps (0 disables undo). Use ← / → to adjust. Takes effect on next launch (or after @restart): the running story keeps the cap it booted with."),
-    ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust. Takes effect on next launch (or after @restart): the header byte is written when the story boots."),
+    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory snapshots the game's own in-game UNDO command keeps (0 disables undo). Use ← / → to adjust. Takes effect on next launch (or after @restart): the running game keeps the cap it booted with."),
+    ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust. Takes effect on next launch (or after @restart): the header byte is written when the game boots."),
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
-    ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
-    ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
-    ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame), raster (whole pane as one pixel image) or extended (raster at a whole magnification, the frame grown downward for more story rows)."),
-    ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
+    ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the game text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
+    ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the game text. Imported from garglk tmarginy. Use ← / → to adjust."),
+    ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal game in a scaled pixel frame), raster (whole pane as one pixel image) or extended (raster at a whole magnification, the frame grown downward for more game rows)."),
+    ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 games (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
     ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin. No effect under half-blocks, which draws cells rather than device pixels and has no rung to snap to."),
-    ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the story's voice."),
+    ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the game's voice."),
     ("guidance_probe",       ConfigRowKind::Bool, "Vet the Guiding Light's word suggestions before showing them: each candidate is tried in a silent throwaway copy of the game and only what actually did something is offered. Nothing it does reaches the screen, your saves, or the game you are playing. Off, the light still offers — it just names what the dictionary holds instead of recommending."),
-    ("hide_adult_words",     ConfigRowKind::Bool, "Keep the strong language out of panels that list a story's whole vocabulary — the command panel's VERB column and its like. Display only: the story still knows every word, typing one works exactly as before, and the Guiding Light still offers it. The words are the `adult_words` line in config.toml, there to be read, shortened or extended."),
+    ("hide_adult_words",     ConfigRowKind::Bool, "Keep the strong language out of panels that list a game's whole vocabulary — the command panel's VERB column and its like. Display only: the game still knows every word, typing one works exactly as before, and the Guiding Light still offers it. The words are the `adult_words` line in config.toml, there to be read, shortened or extended."),
     // Appended rather than filed beside `guidance_probe`, where it reads more
     // naturally: three tables in `input.rs` key off a row's INDEX, so inserting
     // in the middle renumbers every row after it in four places at once. The

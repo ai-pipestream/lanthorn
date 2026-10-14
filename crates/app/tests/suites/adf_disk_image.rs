@@ -177,7 +177,7 @@ fn a_boot_disk_fails_with_a_useful_message() {
 
     let err = app::hints::load_story(&path).expect_err("a boot disk holds no story");
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    assert!(err.to_string().contains("no story file on the disk image"), "{err}");
+    assert!(err.to_string().contains("no game file on the disk image"), "{err}");
 
     let _ = std::fs::remove_file(&path);
 }
