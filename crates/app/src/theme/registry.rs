@@ -642,6 +642,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("documents_spoiler", Section::Elements, Kind::Style, Some("alert"), mods(false, true, false, false)),
     row("documents_title_match", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
     row("documents_preview", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // SQ-1784: a link that is a web page (opens in the browser by default), and an
+    // online game that no longer plays (opens only).
+    row("documents_web_page", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("documents_obsolete", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     // ── saves manager (SQ-0531) — the Type cell's portability tint. A "Game"
     // save carries standard save-instruction-PC bytes any interpreter reads and
     // gets the accent + the ↗ glyph; a host "State" snapshot stays here. ──
@@ -980,6 +984,8 @@ mod tests {
         "documents_spoiler",
         "documents_title_match",
         "documents_preview",
+        "documents_web_page",
+        "documents_obsolete",
         // SQ-0643: hard-coded modal/list styles → themed selectors
         "dialog.list_selected",
         "dialog.list_footer",

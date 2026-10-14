@@ -108,6 +108,15 @@ documents folder, which is made if it is not there yet. With nothing marked,
   starred) and only those are fetched, so you can take *ZorkI.txt* out of a bundle
   of solutions for fifty games. If a server will not hand out part of a file, the
   row says *contents unknown* and the whole zip is all you can take.
+- **Documents, web pages and dead games are told apart.** IFDB links websites as
+  well as files. A manual, map or text file on the IF Archive (or any PDF, text,
+  image or zip) is a document: `Enter` saves it, and `o` opens it in your browser
+  instead. A *web page* (a site such as a wiki or a code repository, or an
+  `.html` on a general site) opens in your browser on `Enter`, and `s` saves a
+  copy if you want one. A link to an online game that needs Flash or Java is kept
+  in the list, labelled *needs Flash — no longer plays*, and only opens. When you
+  preview or save a page, lanthorn reads what it fetched anyway and corrects the
+  row if the page turns out to be a dead Flash or Java game.
 - **Peek at text first.** `p` shows the first twenty lines of a text file, or of
   a text file inside a zip, before you decide.
 - Nothing is fetched until you ask for it, one request at a time, and a file over

@@ -209,6 +209,8 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `documents_spoiler` | Elements | Style | `alert` | `italic` | |
 | `documents_title_match` | Elements | Style | `accent` | `bold` | |
 | `documents_preview` | Elements | Style | `muted` |  | |
+| `documents_web_page` | Elements | Style | `accent` |  | |
+| `documents_obsolete` | Elements | Style | `alert` |  | |
 | `saves_portable` | Elements | Style | `accent` | `glyph="↗"` | |
 | `saves_host_only` | Elements | Style | `muted` |  | |
 | `dialog.list_selected` | Dialog | Style |  | `fg=Black bg=Cyan bold` | |

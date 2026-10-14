@@ -34,6 +34,12 @@ while any such tag, or this Unreleased section, still exists.*
 - **Highlights are cyan again by default.** Links, selections, the current room and the like
   went blue in an earlier release, which was hard to read on some terminal colour schemes.
   If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
+- **The documents list tells files from websites and dead games.** Links on a game's IFDB page
+  that are really web pages (a wiki, a code repository) now open in your browser instead of
+  being saved as a document, and links to online games that need Flash or Java stay in the list
+  labelled *needs Flash — no longer plays*. Real documents still save on Enter; press `o` to
+  open any row in the browser, or `s` to save a web page. Style the new tags with the
+  `documents_web_page` and `documents_obsolete` selectors.
 - **The command panel's compass shows what the map knows.** Each way out of the room you are
   standing in is dressed by the map: ways you have explored look as before, exits waiting to be
   walked stand out in the map's exit colour, and directions that were blocked when you tried them are dimmed (they stay

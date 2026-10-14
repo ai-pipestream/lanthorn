@@ -9,9 +9,36 @@
 //! |---|---|
 //! | `.pdf` | [`LinkKind::Pdf`] |
 //! | `.png .jpg .jpeg .gif` | [`LinkKind::Image`] |
-//! | `.txt .md .rtf .html .htm` | [`LinkKind::Text`] |
+//! | `.txt .md .rtf` | [`LinkKind::Text`] |
+//! | `.html .htm` on a known archive host | [`LinkKind::Text`] |
+//! | `.html .htm` anywhere else; a server-side page; a query string; a trailing `/`; no file name | [`LinkKind::WebPage`] |
 //! | `.zip` | [`LinkKind::Archive`] |
-//! | any other extension (or none), e.g. `.sol` | [`LinkKind::Text`], kept only if the downloaded bytes are text |
+//! | any other extension, e.g. `.sol` | [`LinkKind::Text`], kept only if the downloaded bytes are text |
+//! | no extension | [`LinkKind::Text`] on a known archive host (and only if IFDB calls it text), else [`LinkKind::WebPage`] |
+//!
+//! **Documents, web pages and dead games (SQ-1784).** A link is a document, a web
+//! page or an obsolete online game, and each carries a default action
+//! ([`DocAction`]): a document saves (and can be opened in the browser), a web page
+//! opens in the browser (and can be saved), an obsolete game opens only. The
+//! decision uses what the record already says, before any request:
+//!
+//! * **Host.** [`is_archive_host`]: `ifarchive.org` and its mirrors, `eblong.com`,
+//!   or any URL whose path runs through `/if-archive/` (a mirror under another
+//!   name). Everything else is a general site and leans web page.
+//! * **Shape.** A plain file name with a document extension is a file. A
+//!   server-side page (`.shtml .php .asp .aspx .jsp .cgi` ...), a query string, a
+//!   trailing `/` or no file name is a web page whoever hosts it. PDF, text, image
+//!   and zip are files on any host; an `.html` on an unknown host is a web page,
+//!   though Save is still offered.
+//! * **Wording.** [`obsolete_from_text`] reads the link's title and description for
+//!   Flash, Java, applet, "play online", "no longer playable", "formerly hosted":
+//!   such a web page is an obsolete online game ([`DocumentOption::obsolete`]).
+//!
+//! **Sniffing a page** ([`sniff_page`]) refines that verdict from the 16 KB the
+//! preview already fetches, and never costs a request of its own: an `<applet>`,
+//! or an `<embed>`/`<object>` for a `.swf`, is an obsolete game; little prose
+//! around scripts and off-site links is a web page; long prose, or a contents
+//! list of relative links with its own images, is a document.
 //!
 //! **Allowlist (SQ-1730).** The decision lives in [`crate::documents::name_verdict`]
 //! and [`crate::documents::admitted`] and is shared by link classification, zip
@@ -81,6 +108,8 @@ pub enum LinkKind {
     Image,
     Text,
     Archive,
+    /// A site rather than a file: opened in the browser by default.
+    WebPage,
 }
 
 impl LinkKind {
@@ -90,9 +119,83 @@ impl LinkKind {
             LinkKind::Image => "image",
             LinkKind::Text => "text",
             LinkKind::Archive => "zip",
+            LinkKind::WebPage => "web page",
         }
     }
 }
+
+/// What a link does when the player takes its default, and the other choice
+/// offered beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocAction {
+    /// Download it into the game's documents folder.
+    Save,
+    /// Open its URL in the player's web browser.
+    Open,
+}
+
+/// The technology that makes an online game obsolete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObsoleteGame {
+    Flash,
+    Java,
+    /// IFDB says it no longer plays but not why.
+    Other,
+}
+
+impl ObsoleteGame {
+    /// The row's label: `needs Flash — no longer plays`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ObsoleteGame::Flash => "needs Flash — no longer plays",
+            ObsoleteGame::Java => "needs Java — no longer plays",
+            ObsoleteGame::Other => "no longer plays",
+        }
+    }
+}
+
+/// Whether a link's title or description says the online game it points at is
+/// gone, and which technology killed it. `Flash` and `Java` are whole words
+/// (so `JavaScript` is not Java); `applet` means Java; "play online", "no longer
+/// playable" and "formerly hosted" give [`ObsoleteGame::Other`].
+pub fn obsolete_from_text(text: &str) -> Option<ObsoleteGame> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if words.contains(&"flash") {
+        Some(ObsoleteGame::Flash)
+    } else if words.contains(&"java") || words.contains(&"applet") || words.contains(&"applets") {
+        Some(ObsoleteGame::Java)
+    } else if lower.contains("play online")
+        || lower.contains("no longer playable")
+        || lower.contains("formerly hosted")
+        || lower.contains("no longer plays")
+    {
+        Some(ObsoleteGame::Other)
+    } else {
+        None
+    }
+}
+
+const ARCHIVE_HOSTS: &[&str] = &["ifarchive.org", "eblong.com"];
+
+/// The lower-cased host of a URL: no scheme, userinfo or port.
+fn url_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = auth.rsplit('@').next().unwrap_or(auth);
+    auth.split(':').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// Whether `url` is on a host that keeps documents: IF Archive and its mirrors
+/// (`ifarchive.org` and any subdomain), `eblong.com`, or a mirror that keeps the
+/// archive's own `/if-archive/` path. Every other host leans web page.
+pub fn is_archive_host(url: &str) -> bool {
+    let host = url_host(url);
+    ARCHIVE_HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}"))) || url_path(url).contains("/if-archive/")
+}
+
+const SERVER_EXTS: &[&str] =
+    &["shtml", "php", "php3", "php4", "php5", "phtml", "asp", "aspx", "jsp", "jspx", "cgi", "pl", "cfm"];
 
 /// One non-game link of a game's IFDB record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +211,10 @@ pub struct DocumentOption {
     /// The URL is under `/solutions/` or `/hints/`, or the file name, title or
     /// description says walkthrough/solution/hint ([`looks_like_spoiler`]).
     pub spoiler: bool,
+    /// The link points at an online game that no longer plays (SQ-1784): the
+    /// row is kept, labelled, and opens only. Only ever set on a
+    /// [`LinkKind::WebPage`].
+    pub obsolete: Option<ObsoleteGame>,
 }
 
 /// Whether `text` (a file name, path, title or description) names a spoiler:
@@ -129,6 +236,51 @@ pub fn looks_like_spoiler(text: &str) -> bool {
 }
 
 impl DocumentOption {
+    /// What Enter does on this row: a document saves, a web page or a dead game opens.
+    pub fn default_action(&self) -> DocAction {
+        if self.obsolete.is_some() || self.kind == LinkKind::WebPage {
+            DocAction::Open
+        } else {
+            DocAction::Save
+        }
+    }
+
+    /// Every action this row offers, the default first. A dead game opens only.
+    pub fn actions(&self) -> Vec<DocAction> {
+        if self.obsolete.is_some() {
+            return vec![DocAction::Open];
+        }
+        match self.default_action() {
+            DocAction::Open => vec![DocAction::Open, DocAction::Save],
+            DocAction::Save => vec![DocAction::Save, DocAction::Open],
+        }
+    }
+
+    /// The text of the Kind column: `needs Flash — no longer plays` for a dead
+    /// game, else the kind's own label.
+    pub fn kind_label(&self) -> &'static str {
+        self.obsolete.map_or(self.kind.label(), ObsoleteGame::label)
+    }
+
+    /// Apply what a page sniff found ([`sniff_page`]). Only refines: a dead game
+    /// stays a dead game, and a page is only promoted to a document when its URL
+    /// named a plain `.html`/`.htm` file.
+    pub fn apply_sniff(&mut self, sniff: PageSniff) {
+        match sniff {
+            PageSniff::ObsoleteGame(g) => {
+                self.kind = LinkKind::WebPage;
+                self.obsolete = Some(g);
+            }
+            PageSniff::WebPage if self.kind == LinkKind::Text => self.kind = LinkKind::WebPage,
+            PageSniff::Document
+                if self.kind == LinkKind::WebPage && self.obsolete.is_none() && is_plain_html_url(&self.url) =>
+            {
+                self.kind = LinkKind::Text
+            }
+            _ => {}
+        }
+    }
+
     /// The one-line description under the filename — the story chooser's rule.
     pub fn subtitle(&self) -> Option<String> {
         subtitle_of(&self.filename, self.title.as_deref(), self.desc.as_deref())
@@ -145,39 +297,98 @@ fn url_path(url: &str) -> String {
     path.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase()
 }
 
-/// Decide whether a link is a document and which kind. `None` for everything
-/// the module docs list as left out.
-fn classify(url: &str, format: Option<&str>) -> Option<LinkKind> {
-    let name = basename_from_url(url)?;
+/// The file name a URL ends in; `None` for a bare address or a trailing `/`.
+fn url_file_name(url: &str) -> Option<String> {
+    let path = url_path(url);
+    if path.is_empty() || path.ends_with('/') {
+        return None;
+    }
+    basename_from_url(url)
+}
+
+fn url_ext(url: &str) -> Option<String> {
+    let name = url_file_name(url)?;
+    Path::new(&name).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
+}
+
+fn is_plain_html_url(url: &str) -> bool {
+    !url.contains('?') && matches!(url_ext(url).as_deref(), Some("html" | "htm"))
+}
+
+/// Decide whether a link is a document, a web page or a dead online game, and
+/// which. `None` for everything the module docs list as left out.
+fn classify(
+    url: &str,
+    format: Option<&str>,
+    title: Option<&str>,
+    desc: Option<&str>,
+) -> Option<(LinkKind, Option<ObsoleteGame>)> {
     let format = format.map(str::to_ascii_lowercase);
     if matches!(format.as_deref(), Some("setup" | "executable")) {
         return None;
     }
     use crate::documents::{name_verdict, NameVerdict};
-    if name_verdict(&name) == NameVerdict::Refused {
+    let name = url_file_name(url);
+    if name.as_deref().is_some_and(|n| name_verdict(n) == NameVerdict::Refused) {
         return None;
     }
-    let ext = Path::new(&name).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    let ext = url_ext(url);
     let ext = ext.as_deref().unwrap_or("");
+    let archive = is_archive_host(url);
+    let dead = || title.and_then(obsolete_from_text).or_else(|| desc.and_then(obsolete_from_text));
+    let web = || Some((LinkKind::WebPage, dead()));
+    // The shapes of a site rather than a file: a server-side page, a query
+    // string, a trailing slash, or nothing after the host.
+    let site_shape =
+        SERVER_EXTS.contains(&ext) || url.split('#').next().unwrap_or(url).contains('?') || name.is_none();
+    if site_shape {
+        return web();
+    }
+    // From here there is a file name.
     if ext == "pdf" {
-        return Some(LinkKind::Pdf);
+        return Some((LinkKind::Pdf, None));
     }
     if IMAGE_EXTS.contains(&ext) {
-        return Some(LinkKind::Image);
-    }
-    if TEXT_EXTS.contains(&ext) {
-        return Some(LinkKind::Text);
+        return Some((LinkKind::Image, None));
     }
     if ext == "zip" {
-        return Some(LinkKind::Archive);
+        return Some((LinkKind::Archive, None));
+    }
+    if matches!(ext, "html" | "htm") {
+        return if archive { Some((LinkKind::Text, None)) } else { web() };
+    }
+    if TEXT_EXTS.contains(&ext) {
+        return Some((LinkKind::Text, None));
     }
     // No extension, or one that names nothing we know (`zorkI.step1`,
     // `Walkthrough.sol`): listed as text and judged by its bytes after download.
     // A `/games/` path is source code, and a story file is not a document.
-    // With no extension at all, IFDB's own word still has to say it is text.
-    let not_texty = ext.is_empty() && !matches!(format.as_deref(), Some("text" | "document"));
-    (!not_texty && !crate::picker::has_story_ext(Path::new(&name)) && !url_path(url).contains("/games/"))
-        .then_some(LinkKind::Text)
+    // With no extension at all, only a known archive host can make it a file;
+    // elsewhere it is a page (`github.com/user/repo`), and even there IFDB's own
+    // word still has to say it is text.
+    if ext.is_empty() {
+        if !archive {
+            return web();
+        }
+        if !matches!(format.as_deref(), Some("text" | "document")) {
+            return None;
+        }
+    }
+    let name = name?;
+    (!crate::picker::has_story_ext(Path::new(&name)) && !url_path(url).contains("/games/"))
+        .then_some((LinkKind::Text, None))
+}
+
+/// The file name a web page is saved under: its own when already an HTML name,
+/// else the stem with `.html` (`game.shtml` -> `game.html`), or the host's name
+/// for a bare address.
+fn web_page_filename(url: &str) -> String {
+    let stem = match url_file_name(url) {
+        Some(n) if is_plain_html_url(url) => return n,
+        Some(n) => Path::new(&n).file_stem().and_then(|s| s.to_str()).unwrap_or(&n).to_string(),
+        None => url_host(url).trim_start_matches("www.").to_string(),
+    };
+    format!("{}.html", if stem.is_empty() { "page" } else { &stem })
 }
 
 /// The documents among a viewgame iFiction record's download links, in record
@@ -193,14 +404,19 @@ pub fn parse_document_options(xml: &[u8]) -> Vec<DocumentOption> {
                 return None;
             }
             let format = child_text(link, "format");
-            let kind = classify(&url, format.as_deref())?;
-            let filename = crate::documents::sanitise_filename(&basename_from_url(&url)?)?;
-            let path = url_path(&url);
             let title = child_text(link, "title").and_then(|t| one_line(&t));
             let desc = child_text(link, "desc").and_then(|d| one_line(&d));
+            let (kind, obsolete) = classify(&url, format.as_deref(), title.as_deref(), desc.as_deref())?;
+            let filename = if kind == LinkKind::WebPage {
+                crate::documents::sanitise_filename(&web_page_filename(&url))?
+            } else {
+                crate::documents::sanitise_filename(&basename_from_url(&url)?)?
+            };
+            let path = url_path(&url);
             Some(DocumentOption {
                 url,
                 kind,
+                obsolete,
                 format,
                 spoiler: path.contains("/solutions/")
                     || path.contains("/hints/")
@@ -557,9 +773,143 @@ pub fn preview_text(bytes: &[u8]) -> String {
         .join("\n")
 }
 
+/// What the first bytes of a page say it is (SQ-1784).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSniff {
+    /// An `<applet>`, or an `<embed>`/`<object>` for a `.swf`: a game that no
+    /// longer runs.
+    ObsoleteGame(ObsoleteGame),
+    /// Little prose among scripts and off-site links: a site.
+    WebPage,
+    /// Long prose, or a contents list of relative links with its own images.
+    Document,
+    /// Not HTML, or no clear lean.
+    Unclear,
+}
+
+/// Prose of at least this many words reads as a document.
+const DOCUMENT_WORDS: usize = 300;
+/// Fewer prose words than this, among scripts or off-site links, reads as a site.
+const SITE_WORDS: usize = 150;
+
+/// Whether `bytes` look like an HTML page (so a preview strips tags).
+pub fn looks_like_html(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_ascii_lowercase();
+    ["<!doctype html", "<html", "<head", "<body", "<title"].iter().any(|t| head.contains(t))
+}
+
+/// The attribute values named `attr` in the tags `<tag ...>` of lower-cased `html`.
+fn tag_attrs(html: &str, tag: &str, attr: &str) -> Vec<String> {
+    let open = format!("<{tag}");
+    let key = format!("{attr}=");
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find(&open) {
+        rest = &rest[i + open.len()..];
+        // Only a real tag name: `<a ` or `<a>`, not `<abbr`.
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '>') {
+            continue;
+        }
+        let end = rest.find('>').unwrap_or(rest.len());
+        let inside = &rest[..end];
+        if let Some(k) = inside.find(&key) {
+            let v = inside[k + key.len()..].trim_start_matches(['"', '\'']);
+            out.push(v.split(['"', '\'', ' ']).next().unwrap_or("").to_string());
+        }
+    }
+    out
+}
+
+/// The visible text of `html`: scripts, styles and tags dropped, entities left
+/// alone, whitespace squeezed.
+pub fn html_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Skip a whole script or style element.
+            let skip = ["script", "style"].iter().find(|t| lower[i..].starts_with(&format!("<{t}"))).copied();
+            if let Some(t) = skip {
+                let close = format!("</{t}");
+                i = lower[i..].find(&close).map_or(bytes.len(), |j| i + j);
+            }
+            i = html[i..].find('>').map_or(bytes.len(), |j| i + j + 1);
+            out.push(' ');
+        } else {
+            // Copy up to the next tag, on a char boundary.
+            let next = html[i..].find('<').map_or(bytes.len(), |j| i + j);
+            out.push_str(&html[i..next]);
+            i = next;
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Judge a page from its first bytes (the preview's 16 KB; never a request of
+/// its own). In order: an `<applet>`, or an `<embed>`/`<object>` for a `.swf`,
+/// is an obsolete game; long prose ([`DOCUMENT_WORDS`] words) or a contents list
+/// (three or more relative links) with a relative image is a document; short
+/// prose ([`SITE_WORDS`]) among three or more scripts, or among more off-site
+/// links than relative ones, is a web page. Anything else is unclear.
+pub fn sniff_page(bytes: &[u8]) -> PageSniff {
+    if !looks_like_html(bytes) {
+        return PageSniff::Unclear;
+    }
+    let html = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if html.contains("<applet") {
+        return PageSniff::ObsoleteGame(ObsoleteGame::Java);
+    }
+    let embeds = ["embed", "object"].iter().flat_map(|t| {
+        let mut v = tag_attrs(&html, t, "src");
+        v.extend(tag_attrs(&html, t, "data"));
+        v.extend(tag_attrs(&html, t, "type"));
+        v
+    });
+    if embeds.into_iter().any(|v| v.contains(".swf") || v.contains("shockwave-flash")) {
+        return PageSniff::ObsoleteGame(ObsoleteGame::Flash);
+    }
+    let words = html_text(&html).split_whitespace().count();
+    let hrefs = tag_attrs(&html, "a", "href");
+    let is_off = |h: &String| h.starts_with("http://") || h.starts_with("https://") || h.starts_with("//");
+    let off = hrefs.iter().filter(|h| is_off(h)).count();
+    let rel = hrefs.iter().filter(|h| !is_off(h) && !h.starts_with(['#', '?']) && !h.starts_with("javascript:") && !h.starts_with("mailto:")).count();
+    let rel_img = tag_attrs(&html, "img", "src").iter().any(|h| !is_off(h) && !h.starts_with("data:"));
+    let scripts = html.matches("<script").count();
+    if words >= DOCUMENT_WORDS || (rel >= 3 && rel_img) {
+        PageSniff::Document
+    } else if words < SITE_WORDS && (scripts >= 3 || off > rel) {
+        PageSniff::WebPage
+    } else {
+        PageSniff::Unclear
+    }
+}
+
+/// [`fetch_preview`] and, for a top-level HTML page, what its bytes say it is.
+/// An HTML preview shows the page's visible text rather than its markup.
+pub fn fetch_preview_sniffed(
+    source: &dyn SearchSource,
+    url: &str,
+    entry: Option<usize>,
+) -> Result<(String, Option<PageSniff>), SearchError> {
+    let bytes = fetch_preview_bytes(source, url, entry)?;
+    if entry.is_none() && looks_like_html(&bytes) {
+        let text = html_text(&String::from_utf8_lossy(&bytes));
+        let chars: Vec<char> = text.chars().collect();
+        let wrapped = chars.chunks(100).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("\n");
+        return Ok((preview_text(wrapped.as_bytes()), Some(sniff_page(&bytes))));
+    }
+    Ok((preview_text(&bytes), None))
+}
+
 /// Fetch the preview of a top-level link (`entry` `None`) or of one entry of the
 /// zip at `url`.
 pub fn fetch_preview(source: &dyn SearchSource, url: &str, entry: Option<usize>) -> Result<String, SearchError> {
+    Ok(preview_text(&fetch_preview_bytes(source, url, entry)?))
+}
+
+fn fetch_preview_bytes(source: &dyn SearchSource, url: &str, entry: Option<usize>) -> Result<Vec<u8>, SearchError> {
     let bytes = match entry {
         None => source.fetch_range(url, 0, PREVIEW_BYTES)?,
         Some(i) => match RemoteZip::open(source, url)? {
@@ -567,7 +917,7 @@ pub fn fetch_preview(source: &dyn SearchSource, url: &str, entry: Option<usize>)
             None => return Err(SearchError::Archive("this server cannot show inside a zip".into())),
         },
     };
-    Ok(preview_text(&bytes))
+    Ok(bytes)
 }
 
 // ── Saving ───────────────────────────────────────────────────────────────────
@@ -709,7 +1059,8 @@ pub enum DocEvent {
     Resolved(Result<Vec<DocumentOption>, String>),
     Probed { link: usize, size: Option<u64>, ranges: bool },
     Listed { link: usize, result: Result<ZipListing, String> },
-    Previewed { key: RowKey, result: Result<String, String> },
+    /// `sniff` is what a top-level HTML page's bytes say it is (SQ-1784).
+    Previewed { key: RowKey, result: Result<String, String>, sniff: Option<PageSniff> },
     Progress { done: usize, total: usize, name: String },
     /// What the documents folder holds now, answering [`DocJob::Scan`].
     Scanned(Vec<crate::documents::DocEntry>),
@@ -762,8 +1113,11 @@ fn run_job_capped(
             send(DocEvent::Listed { link, result: list_zip(source, &url).map_err(|e| e.to_string()) })
         }
         DocJob::Preview { key, url, entry } => {
-            let result = fetch_preview(source, &url, entry).map_err(|e| e.to_string());
-            send(DocEvent::Previewed { key, result })
+            let (result, sniff) = match fetch_preview_sniffed(source, &url, entry) {
+                Ok((text, sniff)) => (Ok(text), sniff),
+                Err(e) => (Err(e.to_string()), None),
+            };
+            send(DocEvent::Previewed { key, result, sniff })
         }
         DocJob::Scan { tuid, title } => {
             let docs = crate::documents::documents_dir(roots, &tuid, &title)
@@ -815,6 +1169,9 @@ fn run_job_capped(
                         info.spoiler,
                     );
                     meta.zip_entry = info.entry.clone();
+                    if let PageSniff::ObsoleteGame(g) = sniff_page(&bytes) {
+                        return Err(SearchError::Archive(format!("{} (not saved)", g.label())));
+                    }
                     save_document(&dir, &name, &bytes, Some(meta)).map_err(|e| SearchError::Io(e.to_string()))
                 }) {
                     Ok(Imported::Added(d)) => saved.push(d.id),
@@ -854,7 +1211,7 @@ pub(crate) mod tests {
         let got: Vec<(String, LinkKind, bool)> =
             parse_document_options(ZORK).into_iter().map(|d| (d.filename, d.kind, d.spoiler)).collect();
         let want: Vec<(&str, LinkKind, bool)> = vec![
-            ("zork-i-the-great-underground-empire.html", LinkKind::Text, true),
+            ("zork-i-the-great-underground-empire.html", LinkKind::WebPage, true),
             ("Zork_Trilogy.zip", LinkKind::Archive, false),
             ("zork1.zip", LinkKind::Archive, true),
             ("Sols3.zip", LinkKind::Archive, true),
@@ -867,7 +1224,7 @@ pub(crate) mod tests {
             ("zork1.txt", LinkKind::Text, false),
             ("sample.from.zork", LinkKind::Text, false),
             ("zorkI.txt", LinkKind::Text, true),
-            ("intfic_clubfloyd_20160401.html", LinkKind::Text, false),
+            ("intfic_clubfloyd_20160401.html", LinkKind::WebPage, false),
         ];
         let want: Vec<(String, LinkKind, bool)> = want.into_iter().map(|(n, k, s)| (n.to_string(), k, s)).collect();
         assert_eq!(got, want);
@@ -875,18 +1232,22 @@ pub(crate) mod tests {
 
     #[test]
     fn classification_follows_the_extension_not_the_format_alone() {
-        let k = |url: &str, fmt: Option<&str>| classify(url, fmt);
+        let k = |url: &str, fmt: Option<&str>| classify(url, fmt, None, None).map(|c| c.0);
         assert_eq!(k("https://x/a/Manual.PDF", Some("document")), Some(LinkKind::Pdf));
         for e in ["png", "jpg", "jpeg", "gif"] {
             assert_eq!(k(&format!("https://x/map.{e}"), None), Some(LinkKind::Image), "{e}");
         }
-        for e in ["txt", "rtf", "md", "html", "htm"] {
+        for e in ["txt", "rtf", "md"] {
             assert_eq!(k(&format!("https://x/n.{e}"), None), Some(LinkKind::Text), "{e}");
+        }
+        for e in ["html", "htm"] {
+            assert_eq!(k(&format!("https://x/n.{e}"), None), Some(LinkKind::WebPage), "{e} on an unknown host");
+            assert_eq!(k(&format!("https://ifarchive.org/if-archive/n.{e}"), None), Some(LinkKind::Text), "{e} on the archive");
         }
         assert_eq!(k("https://x/if-archive/x/feelie", Some("document")), Some(LinkKind::Text), "extensionless");
         assert_eq!(k("https://x/if-archive/x/feelie", Some("zcode")), None, "extensionless, not texty");
         assert_eq!(k("https://x/a/b.mp3", Some("document")), None, "audio");
-        assert_eq!(k("https://x/a/b.html", Some("html")), Some(LinkKind::Text), "html is on the allowlist");
+        assert_eq!(k("https://x/a/b.html", Some("html")), Some(LinkKind::WebPage), "html off the archive is a page");
         for e in ["webp", "tif", "tiff", "doc"] {
             assert_eq!(k(&format!("https://x/a/b.{e}"), None), None, "{e} is a known non-text format");
         }
@@ -903,7 +1264,141 @@ pub(crate) mod tests {
         assert_eq!(k("https://x/a/B.inv", Some("document")), None, "Shift-H owns .inv");
         assert_eq!(k("https://x/games/source/hugo/g.hug", Some("document")), None, "source under /games/");
         assert_eq!(k("https://x/games/g.z5", Some("document")), None, "a story file");
-        assert_eq!(k("https://x/", Some("document")), None, "no file name");
+        assert_eq!(k("https://x/", Some("document")), Some(LinkKind::WebPage), "no file name: a site, not a file");
+    }
+
+    // ── documents, web pages and dead games (SQ-1784) ────────────────────────
+
+    /// The four non-game links of the Hitchhiker's Guide record (ifdb
+    /// ouv80gvsl32xlion), as the quest recorded them.
+    pub(crate) const HHGG: &str = r#"<ifindex><story><ifdb><downloads><links>
+<link><url>https://www.bbc.co.uk/radio4/hitchhikers/game.shtml</url><title>BBC Radio 4 game</title><desc>Requires Flash, so in effect no longer playable</desc><format>html</format></link>
+<link><url>https://tvtropes.org/pmwiki/pmwiki.php/VideoGame/TheHitchhikersGuideToTheGalaxy</url><title>TV Tropes</title><format>html</format></link>
+<link><url>https://www.douglasadams.com/creations/infocomjava.html</url><title>Java version</title><desc>online Java version</desc><format>html</format></link>
+<link><url>https://github.com/historicalsource/hitchhikersguide</url><title>Source</title><format>text</format></link>
+<link><url>https://ifarchive.org/if-archive/infocom/shipped-documentation/hhgg.pdf</url><title>Manual</title><format>document</format></link>
+<link><url>https://ifarchive.org/if-archive/infocom/shipped-documentation/hhgg.txt</url><title>Notes</title><format>text</format></link>
+<link><url>https://ifarchive.org/if-archive/infocom/shipped-documentation/hhgg.html</url><title>Notes</title><format>html</format></link>
+</links></downloads></ifdb></story></ifindex>"#;
+
+    #[test]
+    fn the_hitchhikers_record_tells_documents_from_pages_and_dead_games() {
+        let got: Vec<_> = parse_document_options(HHGG.as_bytes())
+            .into_iter()
+            .map(|o| (o.filename.clone(), o.kind, o.obsolete, o.default_action(), o.actions(), o.kind_label()))
+            .collect();
+        use DocAction::{Open, Save};
+        let want = vec![
+            ("game.html", LinkKind::WebPage, Some(ObsoleteGame::Flash), Open, vec![Open], "needs Flash — no longer plays"),
+            ("TheHitchhikersGuideToTheGalaxy.html", LinkKind::WebPage, None, Open, vec![Open, Save], "web page"),
+            ("infocomjava.html", LinkKind::WebPage, Some(ObsoleteGame::Java), Open, vec![Open], "needs Java — no longer plays"),
+            ("hitchhikersguide.html", LinkKind::WebPage, None, Open, vec![Open, Save], "web page"),
+            ("hhgg.pdf", LinkKind::Pdf, None, Save, vec![Save, Open], "pdf"),
+            ("hhgg.txt", LinkKind::Text, None, Save, vec![Save, Open], "text"),
+            ("hhgg.html", LinkKind::Text, None, Save, vec![Save, Open], "text"),
+        ];
+        let want: Vec<_> = want.into_iter().map(|(n, k, o, d, a, l)| (n.to_string(), k, o, d, a, l)).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn host_and_shape_decide_before_wording_does() {
+        let k = |url: &str| classify(url, Some("html"), None, None).map(|c| c.0);
+        // A pdf or a text file is a file anywhere.
+        assert_eq!(k("https://example.com/m.pdf"), Some(LinkKind::Pdf));
+        assert_eq!(k("https://example.com/m.txt"), Some(LinkKind::Text));
+        // A site shape is a page even on the archive; bare addresses and slashes too.
+        assert_eq!(k("https://ifarchive.org/cgi-bin/x.cgi"), Some(LinkKind::WebPage));
+        assert_eq!(k("https://ifarchive.org/page?id=3"), Some(LinkKind::WebPage));
+        assert_eq!(k("https://eblong.com/zarf/"), Some(LinkKind::WebPage));
+        assert_eq!(k("https://example.com"), Some(LinkKind::WebPage));
+        // Mirrors count: a subdomain, or the archive's own path under another name.
+        assert_eq!(k("https://mirror.ifarchive.org/m.html"), Some(LinkKind::Text));
+        assert_eq!(k("https://eblong.com/m.html"), Some(LinkKind::Text));
+        assert_eq!(k("https://mirror.example.net/if-archive/m.html"), Some(LinkKind::Text));
+        assert_eq!(k("https://notifarchive.org/m.html"), Some(LinkKind::WebPage), "a look-alike host is not the archive");
+    }
+
+    #[test]
+    fn dead_game_wording_is_whole_words() {
+        assert_eq!(obsolete_from_text("Requires Flash"), Some(ObsoleteGame::Flash));
+        assert_eq!(obsolete_from_text("a Java applet"), Some(ObsoleteGame::Java));
+        assert_eq!(obsolete_from_text("online applet"), Some(ObsoleteGame::Java));
+        for t in ["Play online here", "no longer playable", "formerly hosted at AOL"] {
+            assert_eq!(obsolete_from_text(t), Some(ObsoleteGame::Other), "{t}");
+        }
+        assert_eq!(obsolete_from_text("JavaScript port with a flashlight"), None);
+        assert_eq!(obsolete_from_text("The original manual"), None);
+        assert_eq!(ObsoleteGame::Other.label(), "no longer plays");
+    }
+
+    #[test]
+    fn wording_marks_only_pages_never_files() {
+        // A manual that mentions Flash is still a manual.
+        let c = classify("https://ifarchive.org/if-archive/m.pdf", None, Some("Flash Gordon manual"), None);
+        assert_eq!(c, Some((LinkKind::Pdf, None)));
+    }
+
+    fn page(body: &str) -> Vec<u8> {
+        format!("<!DOCTYPE html><html><head><title>t</title></head><body>{body}</body></html>").into_bytes()
+    }
+
+    #[test]
+    fn a_page_sniff_reads_embeds_prose_and_links() {
+        assert_eq!(sniff_page(&page("<applet code=Game.class></applet>")), PageSniff::ObsoleteGame(ObsoleteGame::Java));
+        assert_eq!(
+            sniff_page(&page(r#"<embed src="game.swf" type="application/x-shockwave-flash">"#)),
+            PageSniff::ObsoleteGame(ObsoleteGame::Flash)
+        );
+        assert_eq!(
+            sniff_page(&page(r#"<object data="x.swf"></object>"#)),
+            PageSniff::ObsoleteGame(ObsoleteGame::Flash)
+        );
+        // An <embed> of a PDF is not a dead game.
+        assert_eq!(sniff_page(&page(r#"<embed src="m.pdf">"#)), PageSniff::Unclear);
+        // Scripts and off-site links around a sentence: a site.
+        let site = page(
+            r#"<script src=a.js></script><script src=b.js></script><script>x()</script>
+               <a href="https://a.example/1">a</a><a href="https://b.example/2">b</a> Welcome."#,
+        );
+        assert_eq!(sniff_page(&site), PageSniff::WebPage);
+        // Long prose: a document, scripts or not.
+        let prose = "word ".repeat(400);
+        assert_eq!(sniff_page(&page(&format!("<script>x()</script><p>{prose}</p>"))), PageSniff::Document);
+        // A contents list of relative links with its own image.
+        let toc = page(r#"<img src="map.png"><a href="ch1.html">1</a><a href="ch2.html">2</a><a href="ch3.html">3</a>"#);
+        assert_eq!(sniff_page(&toc), PageSniff::Document);
+        // Not HTML at all.
+        assert_eq!(sniff_page(b"Plain text, no markup"), PageSniff::Unclear);
+    }
+
+    #[test]
+    fn a_sniff_refines_the_verdict_but_only_promotes_a_plain_html_page() {
+        let mut o = parse_document_options(HHGG.as_bytes()).remove(2); // infocomjava.html, obsolete
+        o.apply_sniff(PageSniff::Document);
+        assert_eq!((o.kind, o.obsolete.is_some()), (LinkKind::WebPage, true), "a dead game stays dead");
+        let mut tropes = parse_document_options(HHGG.as_bytes()).remove(1); // pmwiki.php
+        tropes.apply_sniff(PageSniff::Document);
+        assert_eq!(tropes.kind, LinkKind::WebPage, "a server-side page is not promoted by its prose");
+        let mut manual = DocumentOption { kind: LinkKind::WebPage, url: "https://example.com/manual.html".into(), ..tropes.clone() };
+        manual.apply_sniff(PageSniff::Document);
+        assert_eq!(manual.kind, LinkKind::Text);
+        manual.apply_sniff(PageSniff::WebPage);
+        assert_eq!(manual.kind, LinkKind::WebPage);
+        manual.apply_sniff(PageSniff::ObsoleteGame(ObsoleteGame::Flash));
+        assert_eq!(manual.default_action(), DocAction::Open);
+        assert_eq!(manual.actions(), vec![DocAction::Open]);
+    }
+
+    #[test]
+    fn an_html_preview_shows_the_text_not_the_markup() {
+        let h = Host::new(true).with(
+            "https://example.com/p.html",
+            page(r#"<style>p{}</style><p>Hello <b>there</b></p><applet code=G></applet>"#),
+        );
+        let (text, sniff) = fetch_preview_sniffed(&h, "https://example.com/p.html", None).unwrap();
+        assert_eq!(text, "t Hello there");
+        assert_eq!(sniff, Some(PageSniff::ObsoleteGame(ObsoleteGame::Java)));
     }
 
     #[test]
@@ -1332,6 +1827,7 @@ pub(crate) mod tests {
             title: None,
             desc: Some("Solutions".into()),
             spoiler: false,
+            obsolete: None,
         };
         let entry = ZipEntry { index: 0, path: "a/b.txt".into(), name: "b.txt".into(), size: 1, spoiler: true };
         let info = LinkInfo::of_entry(&zip, &entry);
@@ -1414,7 +1910,7 @@ pub(crate) mod tests {
         assert!(matches!(&evs[0], DocEvent::Resolved(Ok(d)) if d.len() == 14));
         assert!(matches!(&evs[1], DocEvent::Probed { link: 4, size: Some(_), ranges: true }));
         assert!(matches!(&evs[2], DocEvent::Listed { link: 4, result: Ok(ZipListing::Entries(e)) } if e.len() == 2));
-        assert_eq!(evs[3], DocEvent::Previewed { key: (7, None), result: Ok("hello\nworld".into()) });
+        assert_eq!(evs[3], DocEvent::Previewed { key: (7, None), result: Ok("hello\nworld".into()), sniff: None });
         let _ = std::fs::remove_dir_all(home);
     }
 

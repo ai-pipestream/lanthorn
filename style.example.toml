@@ -143,6 +143,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # documents_spoiler = { parent = "alert", italic = true }
 # documents_title_match = { parent = "accent", bold = true }
 # documents_preview = { parent = "muted" }
+# documents_web_page = { parent = "accent" }
+# documents_obsolete = { parent = "alert" }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }
 # "command_panel.column_header" = { parent = "muted" }
