@@ -19,20 +19,6 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
-
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
-
-- Word completion offers every match and puts the likely word first: `lo` now
-  offers `look` before `lobby`, and Tab walks the whole list instead of
-  stopping at six. The first word of a command favours common verbs and
-  directions, then words you have typed before; later words still favour what
-  is in front of you.
-
 ## v0.9.6 — 2026-10-14
 
 ### Highlights
@@ -42,10 +28,16 @@ while any such tag, or this Unreleased section, still exists.*
 - **Fetching your library from IFDB asks once per game, not once per file**, and links your
   other copies of a game without another request.
 - **The documents list tells real documents from web pages and dead Flash or Java games.**
+- **Word completion puts the likely word first** — `lo` offers `look`, not `lobby` — and
+  Tab now reaches every match.
 - **Lanthorn says "game", not "story", everywhere you read it.**
 
 ### Added
 
+- **Word completion offers every match and puts the likely word first.** `lo` now offers
+  `look` before `lobby`, and Tab walks the whole list instead of stopping at six. The first
+  word of a command favours common verbs and directions, then words you have typed before;
+  later words still favour what is in front of you.
 - **The command panel's compass shows what the map knows.** Each way out of the room you are
   standing in is dressed by the map: ways you have explored look as before, exits waiting to be
   walked stand out in the map's exit colour, and directions that were blocked when you tried them
