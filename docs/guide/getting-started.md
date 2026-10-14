@@ -47,7 +47,8 @@ resources, saves.
 Nothing has a cover or a blurb until you fetch one. Press `r` to sweep the
 whole library and pull titles, authors, ratings and cover art from IFDB in
 one pass — worth doing before anything else, since there's not much for the
-grid to show until you do. Press `/` to search IFDB directly and download a
+grid to show until you do. Games already identified are left alone, and several
+copies or releases of one game cost IFDB a single request. Press `/` to search IFDB directly and download a
 game straight into your library, or `Shift+U` to paste a web address and
 fetch whatever's at the other end of it.
 

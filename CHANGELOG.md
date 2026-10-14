@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+- **Fetching a library asks IFDB once per game, not once per file.** When you have several
+  releases or copies of the same game, the first answer already names the others, so they are
+  linked without another request; games that are already identified are left alone, and a full
+  refresh asks once per game. The progress line says how many were linked without asking.
 - **The story list and the prompts before a game now follow your `style.toml`.** The library
   browser, the download keep-or-not prompt and the first-run font check used to draw in the
   built-in colours whatever your style file said; they now use your roles, elements and

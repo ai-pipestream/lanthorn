@@ -1731,6 +1731,7 @@ fn run_headless_fetch(
         done: usize,
         fetched: usize,
         skipped: usize,
+        linked: usize,
         not_found: usize,
         failed: usize,
     }
@@ -1745,6 +1746,10 @@ fn run_headless_fetch(
                 Outcome::Skipped => {
                     self.skipped += 1;
                     "skipped (current)".to_string()
+                }
+                Outcome::Linked => {
+                    self.linked += 1;
+                    "linked (no request)".to_string()
                 }
                 Outcome::NotFound => {
                     self.not_found += 1;
@@ -1788,8 +1793,8 @@ fn run_headless_fetch(
             }
         }
     }
-    let Tally { fetched, skipped, not_found, failed, .. } = tally;
-    println!("lanthorn: {fetched} fetched, {skipped} skipped, {not_found} not on IFDB, {failed} failed");
+    let Tally { fetched, skipped, linked, not_found, failed, .. } = tally;
+    println!("lanthorn: {fetched} fetched, {linked} linked, {skipped} skipped, {not_found} not on IFDB, {failed} failed");
     if failed > 0 { 1 } else { 0 }
 }
 

@@ -273,6 +273,64 @@ pub fn adopt_catalogue(catalogue: &Path) -> usize {
     adopted
 }
 
+/// The IFID map (SQ-1786): which IFDB entries list each IFID, so a copy whose
+/// IFID a fetched record already named can be linked without a request.
+///
+/// `<catalogue>/ifdb/ifids.json` -- `{"format_version":1,"ifids":{"<IFID>":["<tuid>",..]}}`,
+/// IFIDs upper-cased, tuids sorted. It follows what IFDB's records list and
+/// nothing else: a manual relink never touches it. Two entries listing one IFID
+/// (IFDB duplicates) are both kept, and [`tuid_for_ifid`] then answers nothing.
+const IFID_MAP: &str = "ifids.json";
+const IFID_MAP_FORMAT_VERSION: u32 = 1;
+
+#[derive(Default, Serialize, Deserialize)]
+struct IfidMap {
+    format_version: u32,
+    ifids: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+fn read_ifid_map(catalogue: &Path) -> IfidMap {
+    std::fs::read(store_dir(catalogue).join(IFID_MAP))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<IfidMap>(&raw).ok())
+        .filter(|m| m.format_version == IFID_MAP_FORMAT_VERSION)
+        .unwrap_or_else(|| IfidMap { format_version: IFID_MAP_FORMAT_VERSION, ifids: Default::default() })
+}
+
+/// Record that `tuid`'s IFDB record lists exactly `ifids`: the entry is dropped
+/// from every IFID it no longer lists and added to those it does.
+pub fn record_ifids(catalogue: &Path, tuid: &str, ifids: &[String]) -> io::Result<()> {
+    if !is_valid_tuid(tuid) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an IFDB id"));
+    }
+    let mut map = read_ifid_map(catalogue);
+    let before = serde_json::to_vec(&map.ifids)?;
+    for tuids in map.ifids.values_mut() {
+        tuids.retain(|t| t != tuid);
+    }
+    for ifid in ifids.iter().map(|i| i.trim().to_ascii_uppercase()).filter(|i| !i.is_empty()) {
+        let tuids = map.ifids.entry(ifid).or_default();
+        tuids.push(tuid.to_string());
+        tuids.sort();
+        tuids.dedup();
+    }
+    map.ifids.retain(|_, t| !t.is_empty());
+    if serde_json::to_vec(&map.ifids)? == before {
+        return Ok(());
+    }
+    crate::storage::atomic_write(&store_dir(catalogue).join(IFID_MAP), &serde_json::to_vec_pretty(&map)?)
+}
+
+/// The one IFDB entry that lists `ifid`, or `None` when none does or more than
+/// one does (IFDB duplicates: the map must not guess).
+pub fn tuid_for_ifid(catalogue: &Path, ifid: &str) -> Option<String> {
+    let map = read_ifid_map(catalogue);
+    match map.ifids.get(&ifid.trim().to_ascii_uppercase())?.as_slice() {
+        [only] if is_valid_tuid(only) => Some(only.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(all(test, feature = "t-picker"))]
 mod tests {
     use super::*;

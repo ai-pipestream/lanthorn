@@ -905,7 +905,7 @@ fn reread_after_fetch(
 ) -> bool {
     use app::fetch_worker::Outcome;
     match outcome {
-        Outcome::Fetched | Outcome::NotFound => {
+        Outcome::Fetched | Outcome::NotFound | Outcome::Linked => {
             if let Some(k) = key {
                 touched.insert(k.to_string());
             }
@@ -1470,6 +1470,8 @@ pub(crate) fn run_story_picker(
     // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
     let mut fetch_is_single = false;
     let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
+    // Stories linked to an IFDB record already held, with no request (SQ-1786).
+    let mut sweep_linked = 0u32;
     // Game-folder keys a fetch wrote into (SQ-1769); see `reread_after_fetch`.
     let mut fetch_touched_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Manual IFDB-page entry (SQ-0371): `Some` while the user is typing an IFDB
@@ -1960,6 +1962,7 @@ pub(crate) fn run_story_picker(
             match &p.outcome {
                 app::fetch_worker::Outcome::Fetched => sweep_fetched += 1,
                 app::fetch_worker::Outcome::Skipped => sweep_skipped += 1,
+                app::fetch_worker::Outcome::Linked => sweep_linked += 1,
                 app::fetch_worker::Outcome::NotFound => sweep_not_found += 1,
                 app::fetch_worker::Outcome::Failed(_) => sweep_failed += 1,
             }
@@ -1986,7 +1989,7 @@ pub(crate) fn run_story_picker(
                 // A fetch may have just written a cover; drop any cached
                 // "coverless" decode so the panel re-reads and shows it now,
                 // rather than only after the picker is reopened.
-                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched) {
+                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::Linked) {
                     if let Some(key) = stories
                         .iter()
                         .find(|e| e.is(&p.path, disk_entry))
@@ -2001,6 +2004,7 @@ pub(crate) fn run_story_picker(
                 match &p.outcome {
                     app::fetch_worker::Outcome::Fetched => format!("Fetched {}", p.title),
                     app::fetch_worker::Outcome::Skipped => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::Linked => format!("Linked {}", p.title),
                     app::fetch_worker::Outcome::NotFound => format!("No IFDB record for {}", p.title),
                     app::fetch_worker::Outcome::Failed(reason) => format!("Fetch failed: {reason}"),
                 }
@@ -2011,6 +2015,9 @@ pub(crate) fn run_story_picker(
                     "Fetched {}, skipped {}, not found {}",
                     sweep_fetched, sweep_skipped, sweep_not_found
                 );
+                if sweep_linked > 0 {
+                    msg.push_str(&format!(", linked {sweep_linked} without asking"));
+                }
                 if sweep_failed > 0 {
                     msg.push_str(&format!(", failed {sweep_failed}"));
                 }
@@ -2473,6 +2480,7 @@ pub(crate) fn run_story_picker(
                                         fetch_is_single = true;
                                         sweep_fetched = 0;
                                         sweep_skipped = 0;
+                                        sweep_linked = 0;
                                         sweep_not_found = 0;
                                         sweep_failed = 0;
                                         progress_line = Some(format!("Fetching {} from IFDB…", entry.title));
@@ -3067,6 +3075,7 @@ pub(crate) fn run_story_picker(
                     fetch_is_single = true;
                     sweep_fetched = 0;
                     sweep_skipped = 0;
+                    sweep_linked = 0;
                     sweep_not_found = 0;
                     sweep_failed = 0;
                     progress_line = Some(format!("Fetching {}…", entry.title));
@@ -3097,6 +3106,7 @@ pub(crate) fn run_story_picker(
                     fetch_is_single = false;
                     sweep_fetched = 0;
                     sweep_skipped = 0;
+                    sweep_linked = 0;
                     sweep_not_found = 0;
                     sweep_failed = 0;
                     progress_line = Some(format!("Fetching 0/{total}"));
