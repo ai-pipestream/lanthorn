@@ -762,6 +762,22 @@ fn shorthand_expansion(typed: &str) -> Option<&'static str> {
     SHORTHANDS.iter().find(|(s, _)| *s == typed).map(|&(_, full)| full)
 }
 
+/// The verbs nearly every parser game needs, in the order a player reaches for
+/// them — the curated half of the command band's `VerbTier::Core` (SQ-1554) and the
+/// first tier of verb-position word completion ([`crate::complete`], SQ-1790) —
+/// one list, so the two cannot drift.
+///
+/// Only ever INTERSECTED with a story's grammar: a word here that the story
+/// does not hold contributes nothing, and one it does hold is shown as spelled
+/// here — `examine`, not the `examin` a Version 3 dictionary stores — which the
+/// parser truncates back to the same entry. Two of them reaching one verb
+/// (`talk` and `tell` in a story that files them together) make one row, under
+/// whichever comes first.
+pub const CORE_VERBS: &[&str] = &[
+    "look", "examine", "take", "drop", "inventory", "open", "close", "put", "go", "enter",
+    "wait", "read", "push", "pull", "turn", "give", "talk", "ask", "tell",
+];
+
 /// The most an offer may name. Three, and it is a limit rather than a target:
 /// the whole verb list is useless (Zork I knows hundreds) and a list long enough
 /// to scan is a list the player reads instead of playing.

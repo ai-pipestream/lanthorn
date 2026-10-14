@@ -9,11 +9,10 @@
 //!       scraped by [`split_prose`] + [`story_words`], which ask the story rather
 //!       than guessing at English.
 //!
-//! Ranking (highest priority first):
-//!   1. Room words that share the prefix (most contextually relevant).
-//!   2. Dictionary words that share the prefix.
-//!      Within each group, words are sorted alphabetically.
-//!      Duplicates across groups are deduplicated (room-word wins).
+//! [`suggest`] ranks room words before dictionary words, alphabetically within
+//! each; the game-input line uses [`completion_candidates`], which adds the
+//! common-verb and typed-history tiers (SQ-1790).
+use std::collections::HashSet;
 
 /// Return up to `limit` completions for `partial` drawn from `dictionary` and
 /// `room_words`.
@@ -93,15 +92,52 @@ pub fn partial_word(line: &str, caret: usize) -> &str {
     }
 }
 
-/// Completion candidates for `line` with the caret at `caret` — the same
-/// ranking and cap [`crate::input::recompute_suggestions`] applies for the
-/// TUI (SQ-1549).
+/// The most a slash-command name list offers. The cap that used to apply to
+/// story words as well (SQ-1790 lifted it there): the command-name bar is a
+/// one-line strip a player scans, not a word list they cycle to the end of.
+const SLASH_SUGGESTION_LIMIT: usize = 6;
+
+/// Compass directions a player types as a first word, spelled out and
+/// abbreviated — verb-position completion treats them as common verbs.
+const COMPASS_WORDS: &[&str] = &[
+    "north", "n", "south", "s", "east", "e", "west", "w", "northeast", "ne", "northwest", "nw",
+    "southeast", "se", "southwest", "sw", "up", "u", "down", "d", "in", "out",
+];
+
+/// The other first words everyone types: the `x` shorthand and `again`.
+const SHORT_VERBS: &[&str] = &["x", "again"];
+
+/// Z-machine dictionaries store words cut to 6 (Versions 1-3) or 9 (4+)
+/// Z-characters; this is how a full spelling like `examine` appears in a raw
+/// dictionary (`examin`). The command band reaches the same entry through
+/// `StoryVocabulary::spell`, which turns the cut back into the whole word.
+const DICT_KEY_LENS: [usize; 2] = [6, 9];
+
+/// Completion candidates for `line` with the caret at `caret`: EVERY match, best
+/// first — the same ranking [`crate::input::recompute_suggestions`] applies for
+/// the TUI (SQ-1549, SQ-1790), so a host's list and the TUI's cannot drift. A
+/// host that only wants the top few calls [`completion_candidates_limited`].
 ///
 /// Inside a slash command's name (the line starts with `prefix` and the body
 /// has no space yet) this offers matching command names from `slash_names`
-/// instead of story vocabulary. Otherwise: scope words first (what's
-/// actually here), then a merge of the story's flat dictionary and its
-/// recently-printed words, deduplicated against the scope hits, capped at 6.
+/// instead (at most six: that list is a one-line strip, not a word list).
+///
+/// Otherwise the story's words, in tiers — a word appears once, in the first
+/// tier that has it, and the partial itself is never offered:
+///
+/// - **verb position** (the first word of the line, or the first word after `.`,
+///   `,` or `then`): the common verbs ([`crate::vocab::CORE_VERBS`], the
+///   compass, `x`, `again`) the story's dictionary holds; then the words in
+///   `history`, most-often-typed first; then scope, recently-seen and
+///   dictionary words.
+/// - **object position** (anywhere else): `scope_words` (what is here); then
+///   `seen_words` and the words typed in `history`; then the dictionary.
+///
+/// `history` is the player's earlier command lines (slash commands are
+/// ignored); a typed word only counts when the dictionary holds it. Within a
+/// tier shorter words come first, then alphabetical — `lo` offers `look`
+/// before `lobby`. A common verb counts when the dictionary holds it or its
+/// 6/9-character cut (`examin`), and is offered spelled out.
 pub fn completion_candidates(
     line: &str,
     caret: usize,
@@ -110,32 +146,149 @@ pub fn completion_candidates(
     dict_words: &[String],
     seen_words: &[String],
     scope_words: &[String],
+    history: &[String],
 ) -> Vec<String> {
-    const SUGGESTION_LIMIT: usize = 6;
+    completion_candidates_limited(
+        line, caret, prefix, slash_names, dict_words, seen_words, scope_words, history, None,
+    )
+}
+
+/// [`completion_candidates`] cut to the best `limit` (`None` = all of them).
+#[allow(clippy::too_many_arguments)]
+pub fn completion_candidates_limited(
+    line: &str,
+    caret: usize,
+    prefix: char,
+    slash_names: &[String],
+    dict_words: &[String],
+    seen_words: &[String],
+    scope_words: &[String],
+    history: &[String],
+    limit: Option<usize>,
+) -> Vec<String> {
+    let mut hits = ranked_candidates(
+        line, caret, prefix, slash_names, dict_words, seen_words, scope_words, history,
+    );
+    if let Some(n) = limit {
+        hits.truncate(n);
+    }
+    hits
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ranked_candidates(
+    line: &str,
+    caret: usize,
+    prefix: char,
+    slash_names: &[String],
+    dict_words: &[String],
+    seen_words: &[String],
+    scope_words: &[String],
+    history: &[String],
+) -> Vec<String> {
     if line.starts_with(prefix) {
         let body = &line[prefix.len_utf8()..];
         let first_token = body.split_whitespace().next().unwrap_or("");
         if body.contains(' ') {
             return Vec::new(); // command name already chosen
         }
-        return crate::input::slash_suggestions(first_token, slash_names, SUGGESTION_LIMIT);
+        return crate::input::slash_suggestions(first_token, slash_names, SLASH_SUGGESTION_LIMIT);
     }
     let partial = partial_word(line, caret);
     if partial.is_empty() {
         return Vec::new();
     }
-    let mut hits = suggest(&[], scope_words, partial, SUGGESTION_LIMIT);
-    if hits.len() < SUGGESTION_LIMIT {
-        for w in suggest(dict_words, seen_words, partial, SUGGESTION_LIMIT) {
-            if !hits.iter().any(|h| h.eq_ignore_ascii_case(&w)) {
-                hits.push(w);
+    let lower = partial.to_lowercase();
+    let dict: HashSet<String> = dict_words.iter().map(|w| w.to_lowercase()).collect();
+    let typed = typed_words(history, prefix, &dict);
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    if at_verb_position(line, caret, partial) {
+        let mut common: Vec<String> = Vec::new();
+        for &c in crate::vocab::CORE_VERBS.iter().chain(COMPASS_WORDS).chain(SHORT_VERBS) {
+            if dict.contains(c) {
+                common.push(c.to_string());
+            } else if let Some(cut) = DICT_KEY_LENS
+                .iter()
+                .filter(|&&n| c.chars().count() > n)
+                .map(|&n| c.chars().take(n).collect::<String>())
+                .find(|k| dict.contains(k))
+            {
+                // The story stores the cut. Offer the whole word the player
+                // types, and keep the stub from turning up again as a
+                // dictionary word.
+                taken.insert(cut);
+                common.push(c.to_string());
             }
-            if hits.len() == SUGGESTION_LIMIT {
-                break;
+        }
+        push_tier(&common, &lower, &mut taken, &mut out);
+        // Typed words: most often typed first, then shorter, then alphabetical.
+        let mut typed_tier: Vec<&(String, usize)> = typed.iter().collect();
+        typed_tier.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.chars().count().cmp(&b.0.chars().count()))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let typed_tier: Vec<String> = typed_tier.into_iter().map(|(w, _)| w.clone()).collect();
+        push_ordered(&typed_tier, &lower, &mut taken, &mut out);
+        push_tier(scope_words, &lower, &mut taken, &mut out);
+        push_tier(seen_words, &lower, &mut taken, &mut out);
+        push_tier(dict_words, &lower, &mut taken, &mut out);
+    } else {
+        push_tier(scope_words, &lower, &mut taken, &mut out);
+        let mut recent: Vec<String> = seen_words.to_vec();
+        recent.extend(typed.into_iter().map(|(w, _)| w));
+        push_tier(&recent, &lower, &mut taken, &mut out);
+        push_tier(dict_words, &lower, &mut taken, &mut out);
+    }
+    out
+}
+
+/// Append the words of `words` that complete `lower`, in the given order,
+/// skipping any an earlier tier already took.
+fn push_ordered(words: &[String], lower: &str, taken: &mut HashSet<String>, out: &mut Vec<String>) {
+    for w in words {
+        let w = w.to_lowercase();
+        if w.starts_with(lower) && w != lower && taken.insert(w.clone()) {
+            out.push(w);
+        }
+    }
+}
+
+/// One tier: [`push_ordered`] after sorting shorter first, then alphabetical.
+fn push_tier(words: &[String], lower: &str, taken: &mut HashSet<String>, out: &mut Vec<String>) {
+    let mut sorted: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    sorted.sort_by(|a, b| (a.chars().count(), a).cmp(&(b.chars().count(), b)));
+    push_ordered(&sorted, lower, taken, out);
+}
+
+/// The words of the player's earlier command lines that the story's dictionary
+/// holds, each with how often it was typed. Slash commands are not game input.
+fn typed_words(history: &[String], prefix: char, dict: &HashSet<String>) -> Vec<(String, usize)> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in history.iter().filter(|l| !l.starts_with(prefix)) {
+        for w in line.split(|c: char| c.is_whitespace() || c == '.' || c == ',') {
+            let w = w.to_lowercase();
+            if !w.is_empty() && dict.contains(&w) {
+                *counts.entry(w).or_insert(0) += 1;
             }
         }
     }
-    hits
+    counts.into_iter().collect()
+}
+
+/// Is `partial` (the trailing word of `line[..caret]`) the first word of a
+/// command: at the start of the line, or after `.`, `,` or the word `then`?
+fn at_verb_position(line: &str, caret: usize, partial: &str) -> bool {
+    let head: String = line.chars().take(caret).collect();
+    let before = head.strip_suffix(partial).unwrap_or(&head).trim_end();
+    match before.rsplit(' ').next() {
+        None | Some("") => true,
+        Some(last) => {
+            last.ends_with('.') || last.ends_with(',') || last.eq_ignore_ascii_case("then")
+        }
+    }
 }
 
 /// The line that results from applying `completion` to `line` — the pure
@@ -658,5 +811,134 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── completion_candidates ranking (SQ-1790) ────────────────────────────────
+
+    fn sv(ws: &[&str]) -> Vec<String> {
+        ws.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// Candidates for `line` (caret at the end) with no slash names.
+    fn cands(line: &str, dict: &[&str], seen: &[&str], scope: &[&str], hist: &[&str]) -> Vec<String> {
+        completion_candidates(
+            line,
+            line.chars().count(),
+            '/',
+            &[],
+            &sv(dict),
+            &sv(seen),
+            &sv(scope),
+            &sv(hist),
+        )
+    }
+
+    const LO_DICT: &[&str] = &["lobby", "lock", "long", "look", "loose", "lounge"];
+
+    #[test]
+    fn a_common_verb_comes_first_at_the_start_of_the_line() {
+        // z3-like dictionary; alphabetical-only ranking buried `look` behind `lobby`/`lock`/`long`.
+        let got = cands("lo", LO_DICT, &[], &[], &[]);
+        assert_eq!(got[0], "look", "{got:?}");
+        assert_eq!(got.len(), 6, "every match, in a stable order: {got:?}");
+        assert_eq!(got[1..], ["lock", "long", "lobby", "loose", "lounge"]);
+    }
+
+    #[test]
+    fn cycling_reaches_every_match_past_six() {
+        let dict: Vec<String> = (0..20).map(|i| format!("zz{i:02}")).collect();
+        let dict_refs: Vec<&str> = dict.iter().map(String::as_str).collect();
+        let got = cands("zz", &dict_refs, &[], &[], &[]);
+        assert_eq!(got.len(), 20, "no cap of six: {got:?}");
+        let top = completion_candidates_limited(
+            "zz", 2, '/', &[], &dict, &[], &[], &[], Some(3),
+        );
+        assert_eq!(top, got[..3], "the limit keeps the best, in order");
+    }
+
+    #[test]
+    fn object_position_still_puts_scope_words_first() {
+        let got = cands("take lo", LO_DICT, &["lounge"], &["loose"], &[]);
+        assert_eq!(got[0], "loose", "scope first: {got:?}");
+        assert_eq!(got[1], "lounge", "then seen: {got:?}");
+        // `look` is no more special mid-command than any dictionary word.
+        assert_eq!(got[2..], ["lock", "long", "look", "lobby"]);
+    }
+
+    #[test]
+    fn verb_position_after_then_period_and_comma() {
+        for line in ["take lamp then lo", "take lamp. lo", "take lamp, lo", "take lamp, THEN lo"] {
+            let got = cands(line, LO_DICT, &[], &["loose"], &[]);
+            assert_eq!(got[0], "look", "{line:?}: {got:?}");
+        }
+        let got = cands("take lo", LO_DICT, &[], &["loose"], &[]);
+        assert_eq!(got[0], "loose", "a plain object position is not a verb position");
+    }
+
+    #[test]
+    fn a_previously_typed_word_beats_an_unseen_dictionary_word() {
+        // Object position: typed `lounge` jumps `lock`/`long`.
+        let got = cands("take lo", LO_DICT, &[], &[], &["x lounge"]);
+        assert_eq!(got[0], "lounge", "{got:?}");
+        // Verb position: after the common verbs, typed words come before the rest.
+        let got = cands("lo", &["lobby", "lock", "look", "lounge"], &[], &[], &["open lounge"]);
+        assert_eq!(got[..2], ["look", "lounge"], "{got:?}");
+    }
+
+    #[test]
+    fn typed_words_rank_by_how_often_they_were_typed() {
+        let hist = ["sw", "burn leaflet", "burn leaflet", "burn lock", "burn lock", "burn lock"];
+        let got = cands("ab", &["abode", "ably"], &[], &[], &hist);
+        assert_eq!(got, ["ably", "abode"], "nothing typed: shorter first");
+        let got = cands("burn le", &["leaflet", "lever", "burn"], &[], &[], &hist);
+        assert_eq!(got[0], "leaflet", "typed beats untyped: {got:?}");
+        let dict = ["lockout", "lockjaw", "lock", "leash"];
+        let got = cands("burn lo", &dict, &[], &[], &hist);
+        assert_eq!(got[0], "lock", "most-often-typed word first: {got:?}");
+    }
+
+    #[test]
+    fn typed_words_the_dictionary_does_not_hold_are_ignored() {
+        let got = cands("lo", &["look", "lobby"], &[], &[], &["lorem ipsum"]);
+        assert_eq!(got, ["look", "lobby"]);
+    }
+
+    #[test]
+    fn slash_commands_in_history_are_not_story_words() {
+        let got = cands("lo", &["lobby", "look"], &[], &[], &["/lobby"]);
+        assert_eq!(got, ["look", "lobby"]);
+    }
+
+    #[test]
+    fn dedup_across_tiers_is_case_insensitive_and_skips_the_partial() {
+        let got = cands("Lo", &["LOOK", "look", "lo"], &["Look"], &["look"], &[]);
+        assert_eq!(got, ["look"], "{got:?}");
+    }
+
+    #[test]
+    fn a_z3_six_letter_examine_still_completes() {
+        // A raw Version 3 dictionary holds `examin`, not `examine`.
+        let got = cands("exa", &["examin", "exit", "exorcise"], &[], &[], &[]);
+        assert_eq!(got, ["examine"], "offered spelled out, the stub not repeated: {got:?}");
+        let got = cands("e", &["examin", "exit"], &[], &[], &[]);
+        assert_eq!(got, ["examine", "exit"], "common verb first, stub not repeated: {got:?}");
+        // A story that already spells it out is unchanged.
+        assert_eq!(cands("exa", &["examine"], &[], &[], &[]), ["examine"]);
+        // A common verb the dictionary does not hold is not invented.
+        assert!(cands("exa", &["exit"], &[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn compass_words_and_shorthands_count_as_common_verbs() {
+        let got = cands("no", &["nonsense", "north", "northeast"], &[], &[], &[]);
+        assert_eq!(got, ["north", "northeast", "nonsense"]);
+        assert_eq!(cands("ag", &["again", "agony"], &[], &[], &[])[0], "again");
+    }
+
+    #[test]
+    fn slash_command_names_keep_their_cap() {
+        let names: Vec<String> = (0..10).map(|i| format!("pan{i}")).collect();
+        let got = completion_candidates("/pan", 4, '/', &names, &[], &[], &[], &[]);
+        assert_eq!(got.len(), 6);
     }
 }

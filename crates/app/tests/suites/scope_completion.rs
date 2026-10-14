@@ -546,6 +546,7 @@ fn completion_candidates_matches_the_tuis_own_ranking() {
         &state.dict_words,
         &state.seen_words,
         &state.scope_words,
+        &state.command_history,
     );
     assert_eq!(host, tui, "a host asking directly gets exactly what the TUI's own Tab would offer");
 }
@@ -599,4 +600,29 @@ fn zork1s_carried_sack_reads_the_same_way() {
     for w in ["lunch", "garlic"] {
         assert!(open.scope_words.contains(&w.to_string()), "{:?}", open.scope_words);
     }
+}
+
+/// **SQ-1790**: `lo` at the start of a line offers `look` FIRST in Hitchhiker's
+/// Guide r59/s851108 (z3, turn 0), and every other `lo` word is still
+/// reachable. Alphabetical ranking behind a six-word cap buried `look` under
+/// the dictionary's other `lo` words. Skips vacuously without `stories/`.
+#[test]
+fn hitchhikers_lo_offers_look_first_and_every_match() {
+    let Some(session) = story("hitchhiker-r59-s851108.z3") else { return };
+    let dict = session.introspect().map(|i| i.vocabulary()).expect("a v3 story has a dictionary");
+    let lo: Vec<&String> = dict.iter().filter(|w| w.starts_with("lo")).collect();
+    // Non-vacuity: the dictionary holds more than six `lo` words and `look`
+    // is not the alphabetical first (the old ranking's answer).
+    assert!(lo.len() > 6, "specimen has more than six `lo` words: {lo:?}");
+    let mut alpha: Vec<&String> = lo.clone();
+    alpha.sort();
+    assert_ne!(alpha[0], "look", "old ranking would not have led with look: {alpha:?}");
+
+    let got = app::complete::completion_candidates("lo", 2, '/', &[], &dict, &[], &[], &[]);
+    assert_eq!(got[0], "look", "{got:?}");
+    assert_eq!(got.len(), lo.len(), "every match is a candidate: {got:?}");
+    let limited = app::complete::completion_candidates_limited(
+        "lo", 2, '/', &[], &dict, &[], &[], &[], Some(3),
+    );
+    assert_eq!(limited, got[..3]);
 }

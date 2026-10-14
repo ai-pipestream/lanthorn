@@ -671,7 +671,16 @@ know which side you're on).
   clips the word rows it has no room for; resize the band taller to see them
   all.
 - **Tab autocomplete** from **the things that are actually in front of you**,
-  then the words the story has just been using, then its whole dictionary —
+  then the words the story has just been using and the player has typed, then
+  its whole dictionary (SQ-1790: at the FIRST word of a command — line start, or
+  after `.`, `,` or `then` — the common verbs, `vocab::CORE_VERBS` plus the
+  compass, `x` and `again`, lead, then words typed in earlier commands; within a
+  tier shorter words come first, so `lo` offers `look` before `lobby`. There is
+  no cap: Tab cycles every match, and the ranking is
+  `complete::completion_candidates`, the one function the TUI and hosts share —
+  hosts pass their command history as `history` and may cut the list with
+  `completion_candidates_limited(.., Some(n))`. Slash-command names stay capped
+  at six) —
   every one of them checked against that dictionary, through the story's own
   tokeniser, so what you are offered is what the parser will accept and nothing
   else. The first tier is the one that fixes what ages these games worst: the

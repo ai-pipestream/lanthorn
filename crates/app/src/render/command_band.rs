@@ -70,6 +70,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use crate::state::AppState;
+use crate::vocab::CORE_VERBS;
 
 // ── Grammar: the story's own syntax, narrowed to what the band can compose ───
 
@@ -548,20 +549,6 @@ pub fn default_verbs() -> VerbTable {
         .collect();
     VerbTable::new(entries, VerbSource::Builtin)
 }
-
-/// The verbs nearly every parser game needs, in the order a player reaches for
-/// them — the curated half of [`VerbTier::Core`] (SQ-1554).
-///
-/// Only ever INTERSECTED with a story's grammar: a word here that the story
-/// does not hold contributes nothing, and one it does hold is shown as spelled
-/// here — `examine`, not the `examin` a Version 3 dictionary stores — which the
-/// parser truncates back to the same entry. Two of them reaching one verb
-/// (`talk` and `tell` in a story that files them together) make one row, under
-/// whichever comes first.
-pub const CORE_VERBS: &[&str] = &[
-    "look", "examine", "take", "drop", "inventory", "open", "close", "put", "go", "enter",
-    "wait", "read", "push", "pull", "turn", "give", "talk", "ask", "tell",
-];
 
 /// The story's own verb column: one row per VERB of its grammar, tiered for a
 /// player and not for a parser (SQ-1554).

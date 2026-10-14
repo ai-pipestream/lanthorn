@@ -4031,6 +4031,7 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
         &state.dict_words,
         &state.seen_words,
         &state.scope_words,
+        &state.command_history,
     );
 }
 
@@ -6511,6 +6512,46 @@ mod tests {
         assert_eq!(s.suggestion_idx, 0);
         // Suggestions should now match "nor".
         assert!(s.suggestions.iter().any(|w| w.starts_with("nor")));
+    }
+
+    /// SQ-1790: Tab walks EVERY match, not the first six, and the TUI ranks with the
+    /// command history the way a host handed the same slice would.
+    #[test]
+    fn tab_cycles_through_every_match_and_ranks_common_verbs_first() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.dict_words = vec!["look".to_string()];
+        s.dict_words.extend((0..10).map(|i| format!("lo{i}x")));
+        type_text(&mut s, &mut m, "lo");
+        assert_eq!(s.suggestions.len(), 11, "nothing cut off at six: {:?}", s.suggestions);
+        assert_eq!(s.suggestions[0], "look", "the common verb leads: {:?}", s.suggestions);
+        let mut reached = Vec::new();
+        for _ in 0..11 {
+            apply_action(Action::Autocomplete, &mut s, &mut m);
+            reached.push(s.input.value.clone());
+        }
+        reached.sort();
+        reached.dedup();
+        assert_eq!(reached.len(), 11, "Tab reached every candidate: {reached:?}");
+        // Shift-Tab walks them too, wrapping.
+        s.input.set("lo", true);
+        recompute_suggestions(&mut s);
+        s.suggestion_idx = 0;
+        s.suggestion_active = false;
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        assert_eq!(s.input.value, s.suggestions[10], "Shift-Tab wraps to the last candidate");
+    }
+
+    /// SQ-1790: the TUI hands `command_history` to the shared ranking.
+    #[test]
+    fn the_tuis_suggestions_use_the_command_history() {
+        let mut s = AppState::default();
+        s.dict_words = vec!["lantern".to_string(), "lamp".to_string()];
+        s.command_history = vec!["take lantern".to_string()];
+        s.input.set("drop la", true);
+        recompute_suggestions(&mut s);
+        assert_eq!(s.suggestions, ["lantern", "lamp"], "typed before beats shorter");
     }
 
     // ── Leader-letter 'i' toggle tests ────────────────────────────────────────

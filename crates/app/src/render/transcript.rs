@@ -6620,6 +6620,18 @@ mod tests {
     }
 
     #[test]
+    fn visible_suggestion_line_keeps_every_selection_visible_in_a_long_list() {
+        // SQ-1790: a list well past six entries, in a narrow strip, shows a
+        // window of it and scrolls so the selected entry never leaves it.
+        let sug: Vec<String> = (0..12).map(|i| format!("word{i:02}")).collect();
+        for idx in 0..sug.len() {
+            let out = visible_suggestion_line(&sug, idx, 24);
+            assert_eq!(out.chars().count(), 24, "idx {idx}: {out:?}");
+            assert!(out.contains(&format!("[word{idx:02}]")), "idx {idx} on screen: {out:?}");
+        }
+    }
+
+    #[test]
     fn visible_suggestion_line_entry_wider_than_window_shows_opening_bracket() {
         let sug = vec!["xx".to_string(), "supercalifragilistic".to_string()];
         // The highlighted entry alone exceeds the window; anchor on its start so

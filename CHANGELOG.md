@@ -27,6 +27,12 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+- Word completion offers every match and puts the likely word first: `lo` now
+  offers `look` before `lobby`, and Tab walks the whole list instead of
+  stopping at six. The first word of a command favours common verbs and
+  directions, then words you have typed before; later words still favour what
+  is in front of you.
+
 ## v0.9.6 — 2026-10-14
 
 ### Highlights

@@ -9,8 +9,11 @@ The prompt is the game's own — type a command and press `Enter`, exactly as
 in any interpreter. What lanthorn adds sits *around* that line and never
 steals it: **Tab** completes from the things actually in front of you first
 (standing in the Living Room, `lan` offers `lantern`), then words the game
-has just used, then its whole dictionary — checked against the game's own
-parser, so you're never offered a word it would refuse. The rest of the
+has just used and words you've typed before, then its whole dictionary —
+checked against the game's own parser, so you're never offered a word it would
+refuse. The first word of a command gets the common verbs first, so `lo`
+offers `look` before `lobby`. Every match is on offer: keep pressing Tab and
+it walks the lot. The rest of the
 match ghosts in dim text right after the caret; `Tab`/`Shift-Tab` cycle
 candidates, `→` at the end of the line takes the one on offer — and so does a
 click anywhere in the game pane, if you'd rather reach for the mouse.

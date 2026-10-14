@@ -72,6 +72,7 @@ fn complete(b: &BootedStory, line: &str) -> Vec<String> {
         &b.state.dict_words,
         &[],
         &[],
+        &[],
     )
 }
 
