@@ -31,6 +31,8 @@ while any such tag, or this Unreleased section, still exists.*
   releases or copies of the same game, the first answer already names the others, so they are
   linked without another request; games that are already identified are left alone, and a full
   refresh asks once per game. The progress line says how many were linked without asking.
+  Fetching just one game (`f`) now does the same for its other copies in the list: if the answer
+  names them, they are linked on the spot, still without another request.
 - **The story list and the prompts before a game now follow your `style.toml`.** The library
   browser, the download keep-or-not prompt and the first-run font check used to draw in the
   built-in colours whatever your style file said; they now use your roles, elements and

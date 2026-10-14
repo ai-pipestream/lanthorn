@@ -2000,6 +2000,22 @@ pub(crate) fn run_story_picker(
                     }
                 }
             }
+            // A one-story fetch landed an entry in the shared store: link the
+            // other copies it lists, with no request (SQ-1787). The same call
+            // an embedding host makes.
+            if fetch_is_single {
+                if let Some(done) = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(app::fetch_worker::FetchTarget::row) {
+                    let all: Vec<app::fetch_worker::FetchTarget> =
+                        stories.iter().filter(|e| !e.is_folder()).map(app::fetch_worker::FetchTarget::row).collect();
+                    for t in app::fetch_worker::link_listed_copies_after(roots, &all, &done, &p.outcome) {
+                        if let Some(fresh) = app::picker::resolve_entry_from(&t.path, t.disk_entry.as_deref(), roots) {
+                            if let Some(slot) = stories.iter_mut().find(|e| e.is(&t.path, t.disk_entry.as_deref())) {
+                                *slot = fresh;
+                            }
+                        }
+                    }
+                }
+            }
             progress_line = Some(if fetch_is_single {
                 match &p.outcome {
                     app::fetch_worker::Outcome::Fetched => format!("Fetched {}", p.title),

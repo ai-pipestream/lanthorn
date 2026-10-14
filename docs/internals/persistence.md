@@ -346,6 +346,15 @@ only that copy's link. The store is in the **catalogue**, so every player sees i
 (SQ-1676). A blorb's own frontispiece still outranks a fetched cover. A copy with
 no tuid keeps any cover of its own as `cover.png`.
 
+**One-story fetches link the rest** (SQ-1787). A whole-library order links listed
+copies as it goes (`Outcome::Linked`, SQ-1786), but a single-story fetch (`f`) used
+to leave other copies of the game unlinked until a library refresh.
+`fetch_worker::link_listed_copies(roots, targets, tuid)` links every target whose
+IFID the stored entry lists (uniquely) and that has no link yet, with no request,
+and returns the targets it linked; `link_listed_copies_after` is the same call
+keyed off a worker `Outcome` (only `Fetched`/`Linked` link anything). The TUI's `f`
+and an embedding host's one-story refresh both call it.
+
 `story_info::load`/`save` keep returning one assembled `StoryInfo`, so callers
 and embedding hosts are unchanged. **Adoption:** a copy whose `info.json` still
 holds its own record (every build before SQ-1723) is read as before, and the first

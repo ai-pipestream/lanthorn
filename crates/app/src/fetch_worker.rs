@@ -332,6 +332,55 @@ fn link_from_store(
     Some(meta)
 }
 
+/// After a one-story fetch landed IFDB entry `tuid` in the shared store, link
+/// every OTHER copy in `targets` whose IFID that entry's record lists and that
+/// has no IFDB link yet, exactly as [`Outcome::Linked`] does inside an order
+/// (SQ-1787). No request, no delay. A copy already linked (to this entry or any
+/// other) is untouched, as is one whose IFID the entry does not list uniquely.
+///
+/// Returns the targets it linked, so a host can refresh those rows (or undo
+/// them). The TUI's `f` and an embedding host's one-story refresh both call
+/// this, so the two cannot drift.
+pub fn link_listed_copies(roots: &crate::data_roots::DataRoots, targets: &[FetchTarget], tuid: &str) -> Vec<FetchTarget> {
+    let cat = roots.catalogue();
+    let Some(meta) = crate::ifdb_store::read_record(cat, tuid).filter(|m| !m.not_found) else {
+        return Vec::new();
+    };
+    let mut linked = Vec::new();
+    for t in targets {
+        let key = t.key.clone().unwrap_or_else(|| crate::storage::story_key_at_from(&t.path, t.disk_entry.as_deref()));
+        let game_dir = crate::storage::game_dir(cat, &key);
+        if story_info::linked_tuid(&game_dir).is_some()
+            || crate::ifdb_store::tuid_for_ifid(cat, &t.ifid).as_deref() != Some(tuid)
+        {
+            continue;
+        }
+        write_fetched(roots, &game_dir, &t.ifid, meta.clone());
+        linked.push(FetchTarget { key: Some(key), ..t.clone() });
+    }
+    linked
+}
+
+/// [`link_listed_copies`] for a worker result: only a `Fetched` or `Linked`
+/// outcome wrote an entry, so `NotFound` and `Failed` (and `Skipped`) link
+/// nothing. `done` is the target that outcome was for; its entry is the one
+/// its game folder now links to.
+pub fn link_listed_copies_after(
+    roots: &crate::data_roots::DataRoots,
+    targets: &[FetchTarget],
+    done: &FetchTarget,
+    outcome: &Outcome,
+) -> Vec<FetchTarget> {
+    if !matches!(outcome, Outcome::Fetched | Outcome::Linked) {
+        return Vec::new();
+    }
+    let key = done.key.clone().unwrap_or_else(|| crate::storage::story_key_at_from(&done.path, done.disk_entry.as_deref()));
+    let Some(tuid) = story_info::linked_tuid(&crate::storage::game_dir(roots.catalogue(), &key)) else {
+        return Vec::new();
+    };
+    link_listed_copies(roots, targets, &tuid)
+}
+
 /// Load the sidecar (or start a fresh one), set `.fetched`, and save —
 /// preserving any existing `.probe` block (SQ-0276's slot).
 ///
@@ -1397,6 +1446,62 @@ mod tests {
         let (progress, calls) = run(&dir, r, stories, false);
         assert_eq!(calls.len(), 2);
         assert!(progress.iter().all(|p| p.outcome == Outcome::Fetched));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SQ-1787: one-story fetch links the other listed copies ------------
+
+    fn linked_tuid_of(dir: &Path, name: &str) -> Option<String> {
+        story_info::linked_tuid(&dir_of(dir, name))
+    }
+
+    #[test]
+    fn a_one_story_fetch_links_the_other_listed_copy_without_a_request() {
+        let dir = crate::scratch_dir("one-story-links");
+        let roots = crate::data_roots::DataRoots::single(&dir);
+        let mut r = HashMap::new();
+        r.insert("ZCODE-1-A".to_string(), entry_record("tuidaaaa", "Game", &["ZCODE-1-A", "ZCODE-2-B"]));
+        let (a, b) = (target(&dir, "game-r1.z5", "ZCODE-1-A"), target(&dir, "game-r2.z5", "ZCODE-2-B"));
+        let (progress, calls) = run(&dir, r, vec![a.clone()], true);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(linked_tuid_of(&dir, "game-r2.z5"), None, "unlinked before");
+
+        let all = vec![a.clone(), b.clone()];
+        let linked = link_listed_copies_after(&roots, &all, &a, &progress[0].outcome);
+        assert_eq!(linked.iter().map(|t| t.ifid.as_str()).collect::<Vec<_>>(), vec!["ZCODE-2-B"]);
+        assert_eq!(linked_tuid_of(&dir, "game-r2.z5").as_deref(), Some("tuidaaaa"));
+        assert_eq!(calls.len(), 1, "no extra request");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_already_linked_elsewhere_is_left_alone() {
+        let dir = crate::scratch_dir("one-story-keeps");
+        let roots = crate::data_roots::DataRoots::single(&dir);
+        let mut r = HashMap::new();
+        r.insert("ZCODE-2-B".to_string(), entry_record("tuidbbbb", "Elsewhere", &["ZCODE-2-B"]));
+        r.insert("ZCODE-1-A".to_string(), entry_record("tuidaaaa", "Game", &["ZCODE-1-A", "ZCODE-2-B"]));
+        let (a, b) = (target(&dir, "game-r1.z5", "ZCODE-1-A"), target(&dir, "game-r2.z5", "ZCODE-2-B"));
+        // B is fetched first and linked to its own entry.
+        let _ = run(&dir, r.clone(), vec![b.clone()], true);
+        assert_eq!(linked_tuid_of(&dir, "game-r2.z5").as_deref(), Some("tuidbbbb"));
+        let (progress, _) = run(&dir, r, vec![a.clone()], true);
+        let linked = link_listed_copies_after(&roots, &[a.clone(), b], &a, &progress[0].outcome);
+        assert!(linked.is_empty());
+        assert_eq!(linked_tuid_of(&dir, "game-r2.z5").as_deref(), Some("tuidbbbb"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn not_found_and_failed_link_nothing() {
+        let dir = crate::scratch_dir("one-story-nothing");
+        let roots = crate::data_roots::DataRoots::single(&dir);
+        let (a, b) = (target(&dir, "game-r1.z5", "ZCODE-1-A"), target(&dir, "game-r2.z5", "ZCODE-2-B"));
+        let all = vec![a.clone(), b];
+        for outcome in [Outcome::NotFound, Outcome::Failed("down".into()), Outcome::Skipped] {
+            assert!(link_listed_copies_after(&roots, &all, &a, &outcome).is_empty());
+        }
+        assert_eq!(linked_tuid_of(&dir, "game-r2.z5"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
