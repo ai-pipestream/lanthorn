@@ -92,7 +92,7 @@ stderr naming both. Passing `--user-dir <folder>` skips all of this. To keep it
 all in one folder of your choosing, pass `--user-dir <folder>`: config, saves,
 documents and cache all go inside it. `--data-dir` moves just the saves.
 
-*Next release:* if you would rather have the old folder in your platform's
+If you would rather have the old folder in your platform's
 standard places, run `lanthorn --migrate-user-dir`. It shows you every file it
 will move and where to, asks before doing anything, and then quits without
 opening the game. It will not overwrite or merge: if something is already in the

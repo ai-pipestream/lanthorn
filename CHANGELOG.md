@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.9.5`) versions every crate and every
+version in `Cargo.toml` (currently `0.9.6`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -19,42 +19,65 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
+## v0.9.6 — 2026-10-14
 
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
+### Highlights
 
-- **Lanthorn says "game", not "story", everywhere you read it.** The browser, dialogs, help,
-  settings comments, command descriptions, error messages and the docs now use the word players
-  and IFDB use. For hosts embedding the library: the Guiding Light assist-line prefix
-  (`LEAD_DICTIONARY`) is now `this game knows — ` rather than `this story knows — `.
-- **Fetching a library asks IFDB once per game, not once per file.** When you have several
-  releases or copies of the same game, the first answer already names the others, so they are
-  linked without another request; games that are already identified are left alone, and a full
-  refresh asks once per game. The progress line says how many were linked without asking.
-  Fetching just one game (`f`) now does the same for its other copies in the list: if the answer
-  names them, they are linked on the spot, still without another request.
-- **The story list and the prompts before a game now follow your `style.toml`.** The library
-  browser, the download keep-or-not prompt and the first-run font check used to draw in the
-  built-in colours whatever your style file said; they now use your roles, elements and
-  terminal colours exactly as the game does.
-- **Highlights are cyan again by default.** Links, selections, the current room and the like
-  went blue in an earlier release, which was hard to read on some terminal colour schemes.
-  If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
+- **The command panel's compass shows what the map knows** — explored ways, exits waiting
+  to be walked, and directions that were blocked when you tried them each look different.
+- **Fetching your library from IFDB asks once per game, not once per file**, and links your
+  other copies of a game without another request.
+- **The documents list tells real documents from web pages and dead Flash or Java games.**
+- **Lanthorn says "game", not "story", everywhere you read it.**
+
+### Added
+
+- **The command panel's compass shows what the map knows.** Each way out of the room you are
+  standing in is dressed by the map: ways you have explored look as before, exits waiting to be
+  walked stand out in the map's exit colour, and directions that were blocked when you tried them
+  are dimmed (they stay clickable). The up, down, in and out glyphs follow suit. Restyle them with
+  the `command_panel.quick:explored`, `:exit`, `:blocked` and `:untried` selectors.
 - **The documents list tells files from websites and dead games.** Links on a game's IFDB page
   that are really web pages (a wiki, a code repository) now open in your browser instead of
   being saved as a document, and links to online games that need Flash or Java stay in the list
   labelled *needs Flash — no longer plays*. Real documents still save on Enter; press `o` to
   open any row in the browser, or `s` to save a web page. Style the new tags with the
   `documents_web_page` and `documents_obsolete` selectors.
-- **The command panel's compass shows what the map knows.** Each way out of the room you are
-  standing in is dressed by the map: ways you have explored look as before, exits waiting to be
-  walked stand out in the map's exit colour, and directions that were blocked when you tried them are dimmed (they stay
-  clickable). The up, down, in and out glyphs follow suit. Restyle them with the
-  `command_panel.quick:explored`, `:exit`, `:blocked` and `:untried` selectors.
+- **Fetching a library asks IFDB once per game, not once per file.** When you have several
+  releases or copies of the same game, the first answer already names the others, so they are
+  linked without another request; games that are already identified are left alone, and a full
+  refresh asks once per game. The progress line says how many were linked without asking.
+  Fetching just one game (`f`) now does the same for its other copies in the list: if the answer
+  names them, they are linked on the spot, still without another request.
+
+### Changed
+
+- **Lanthorn says "game", not "story", everywhere you read it.** The browser, dialogs, help,
+  settings comments, command descriptions, error messages and the docs now use the word players
+  and IFDB use. For hosts embedding the library: the Guiding Light assist-line prefix
+  (`LEAD_DICTIONARY`) is now `this game knows — ` rather than `this story knows — `.
+- **Highlights are cyan again by default.** Links, selections, the current room and the like
+  went blue in an earlier release, which was hard to read on some terminal colour schemes.
+  If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
+
+### Fixed
+
+- **The game list and the prompts before a game now follow your `style.toml`.** The library
+  browser, the download keep-or-not prompt and the first-run font check used to draw in the
+  built-in colours whatever your style file said; they now use your roles, elements and
+  terminal colours exactly as the game does.
+- **The map is honest about blocked exits.** The room card now says a direction was
+  *blocked when tried*, rather than implying it is blocked for good. If a blocked way later opens
+  (a door unlocked, a bridge lowered), the map shows it as an exit again, even if you never left
+  the room.
+- **The Solid Gold edition of *The Hitchhiker's Guide to the Galaxy* now knows who you are.**
+  The inventory panel used to lose track of you in that edition, so the gown you start the
+  game wearing was not shown as carried; it now is, as in the original release.
+- **A hint program's screen clear now clears the hint panel.** Text a hint program printed
+  before it first cleared the screen (the introduction and sample question of a typed-in
+  InvisiClues booklet, for example) used to stay above every clue for the rest of the session.
+  The panel now starts afresh at each clear, exactly as the game window does, with earlier text
+  a scroll away.
 
 ## v0.9.5 — 2026-10-12
 
