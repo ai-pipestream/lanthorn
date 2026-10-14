@@ -1608,3 +1608,46 @@ fn shreds_ink_ball_is_named_by_its_function_in_the_panel_and_in_what_carried() {
     let ball = s.introspect().unwrap().contents(player).into_iter().find(|o| o.refers_to("ink")).expect("the ink ball");
     assert_eq!(ball.printed_name, "ink ball", "the function's text is the name");
 }
+
+/// SQ-1785: the gown in Hitchhiker's opening is carried once picked up, in BOTH editions. The
+/// v3 avatar prints "it" and answers to "protag"; Solid Gold r31's (v5) answers to "protagoni"
+/// (the 9-character dictionary), while a global "yourself" (#19, under the globals object)
+/// used to be locked as the player instead, so every carried item read as Vanished.
+fn hhgg_gown_is_carried(file: &str) {
+    let Some(bytes) = story(file) else {
+        eprintln!("SKIP: gitignored stories/{file} missing");
+        return;
+    };
+    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)))
+        .expect("boots without a ZError");
+    let _ = s.submit("");
+    let mut mapper = mapper::mapper::Mapper::default();
+    let mut turn = 0u32;
+    let mut last = None;
+    for cmd in ["turn on light", "get up", "get gown"] {
+        let r = s.submit(cmd);
+        turn += 1;
+        app::session::apply_turn(&mut mapper, cmd, &r, &mut Default::default());
+        app::session::apply_item_observations(&mut mapper, turn, &r);
+        last = Some(r);
+    }
+    let r = last.unwrap();
+    let gown = r.items.iter().find(|o| o.name.contains("gown")).unwrap_or_else(|| {
+        panic!("{file}: the gown is observed after picking it up; items: {:?}", r.items)
+    });
+    assert_eq!(
+        mapper.graph.item(gown.key).unwrap().last_seen,
+        mapper::graph::ItemLocation::Carried,
+        "{file}: the gown is carried"
+    );
+}
+
+#[test]
+fn hhgg_solid_gold_v5_gown_is_carried() {
+    hhgg_gown_is_carried("hitchhiker-invclues-r31-s871119.z5");
+}
+
+#[test]
+fn hhgg_v3_gown_is_carried() {
+    hhgg_gown_is_carried("hitchhiker-r59-s851108.z3");
+}
