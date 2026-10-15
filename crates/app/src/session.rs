@@ -6759,7 +6759,11 @@ impl GameSession {
     /// see [`parse_names`](Self::parse_names) the field.
     pub fn parse_names(&self) -> Option<&zvm::objects::ParseNames> {
         self.parse_names
-            .get_or_init(|| zvm::objects::ParseNames::detect(&self.machine.mem))
+            .get_or_init(|| {
+                // `detect` infers Infocom's openness bit from the memory it is handed, which is
+                // live here; the boot-image model is the stable answer (SQ-1792).
+                zvm::objects::ParseNames::detect(&self.machine.mem).map(|p| p.with_world_model(self.world_model()))
+            })
             .as_ref()
     }
 

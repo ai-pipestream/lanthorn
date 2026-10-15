@@ -27,6 +27,8 @@ fn an_item_answers_with_its_noun_and_the_synonyms_that_follow_it() {
     // No property table exists to have read this out of, and saying so is
     // better than inventing a number.
     assert_eq!(lamp.property, None);
+    // Nor is there any container or supporter notion to report (SQ-1792).
+    assert_eq!(lamp.holds, None);
     // Scott truncates its vocabulary to the header's word length, so the
     // player's whole word still matches the three letters the file holds.
     assert_eq!(lamp.truncated_at, Some(3));

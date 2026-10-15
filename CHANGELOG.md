@@ -27,6 +27,14 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Added
+
+- **For embedding hosts: each in-scope object now says whether it is a container or a
+  supporter, and whether it is open.** `ObjectWords::holds` lets a host choose between "put X
+  in Y" and "put X on Y" without guessing. Inform 6 and Inform 7 games (Z-code and Glulx)
+  answer from the game's own data; Infocom games report only whether a thing is open; Scott
+  Adams games and games that do not say answer "unknown".
+
 ### Fixed
 
 - **Scott Adams games you have more than one copy of are looked up on IFDB once.** A

@@ -111,7 +111,7 @@ use crate::grammar::{self, GrammarError, Tables};
 use crate::memory::Memory;
 /// The shared answer type, re-exported so `gvm::objects::ObjectWords` names it
 /// — as `gvm::grammar` re-exports the rest of `grammar-model`.
-pub use grammar_model::ObjectWords;
+pub use grammar_model::{Holds, ObjectWords};
 
 /// Inform's `name` property, on every Inform story and both back-ends.
 pub const NAME_PROPERTY: u32 = 1;
@@ -426,6 +426,12 @@ pub struct ParseNames {
     /// [`NAME_PROPERTY`] is, so these must be read per-image, never assumed from another story.
     scenery_attr: Option<u16>,
     door_attr: Option<u16>,
+    /// Inform's `container`, `supporter` and `open` attribute numbers, resolved from the same
+    /// directory scan for [`ObjectWords::holds`] (SQ-1792). `None` where the image names no such
+    /// attribute or carries no identifier-names table.
+    container_attr: Option<u16>,
+    supporter_attr: Option<u16>,
+    open_attr: Option<u16>,
 }
 
 impl ParseNames {
@@ -457,6 +463,9 @@ impl ParseNames {
                     short_name_prop: None,
                     scenery_attr: None,
                     door_attr: None,
+                    container_attr: None,
+                    supporter_attr: None,
+                    open_attr: None,
                 };
                 if candidate.readable_name_arrays(mem) >= MIN_OBJECTS {
                     // Only now: the symbol-table scan reads the whole of RAM,
@@ -467,7 +476,18 @@ impl ParseNames {
                     let short_name_prop = dir.and_then(|d| short_name_property_in(mem, d));
                     let scenery_attr = dir.and_then(|d| attribute_number_in(mem, d, "scenery"));
                     let door_attr = dir.and_then(|d| attribute_number_in(mem, d, "door"));
-                    return Ok(ParseNames { short_name_prop, scenery_attr, door_attr, ..candidate });
+                    let container_attr = dir.and_then(|d| attribute_number_in(mem, d, "container"));
+                    let supporter_attr = dir.and_then(|d| attribute_number_in(mem, d, "supporter"));
+                    let open_attr = dir.and_then(|d| attribute_number_in(mem, d, "open"));
+                    return Ok(ParseNames {
+                        short_name_prop,
+                        scenery_attr,
+                        door_attr,
+                        container_attr,
+                        supporter_attr,
+                        open_attr,
+                        ..candidate
+                    });
                 }
             }
         }
@@ -543,7 +563,16 @@ impl ParseNames {
             words,
             Some(NAME_PROPERTY),
             Some(self.tables.dict_word_size as usize),
-        ))
+        )
+        .with_holds(self.holds(mem, addr)))
+    }
+
+    /// What the story says about the object at `addr` holding things, read LIVE from the
+    /// `container`, `supporter` and `open` attributes this image's identifier-names table names
+    /// (SQ-1792). Each field is `None` where the image names no such attribute.
+    fn holds(&self, mem: &Memory, addr: u32) -> Holds {
+        let bit = |attr: Option<u16>| attr.map(|b| test_attr(mem, addr, self.attr_bytes, b));
+        Holds::new(bit(self.container_attr), bit(self.supporter_attr), bit(self.open_attr))
     }
 
     /// Every object that answers, in list order.
@@ -1126,6 +1155,10 @@ mod tests {
     const DOOR_ATTR: u16 = 3;
     const SCENERY_ATTR: u16 = 5;
     const STATIC_ATTR: u16 = 6;
+    /// SQ-1792: the three holding attributes, in the three slots the others leave free.
+    const CONTAINER_ATTR: u16 = 0;
+    const SUPPORTER_ATTR: u16 = 1;
+    const OPEN_ATTR: u16 = 4;
     const DICT: u32 = 0x118;
     /// SQ-1774: a free stretch of RAM above everything else for the name-function
     /// tests: `TABLE`'s function, two strings, the long that points at one of
@@ -1296,6 +1329,15 @@ mod tests {
                     TABLE => self.set_attr(i, STATIC_ATTR),
                     _ => {}
                 }
+                // SQ-1792: SACK is an open container, TABLE a supporter, APPLE neither.
+                match i {
+                    SACK => {
+                        self.set_attr(i, CONTAINER_ATTR);
+                        self.set_attr(i, OPEN_ATTR);
+                    }
+                    TABLE => self.set_attr(i, SUPPORTER_ATTR),
+                    _ => {}
+                }
                 // long 0: next object in the overall linked list, 0 on the last.
                 let next = if i + 1 < N_OBJ { self.obj(i + 1) } else { 0 };
                 self.w32(base, next);
@@ -1400,7 +1442,10 @@ mod tests {
         fn attributes(&mut self) {
             self.w32(IDENT_DIR + 16, ATTR_ARRAY);
             self.w32(IDENT_DIR + 20, ATTR_COUNT);
-            let named: [(u16, &str); 4] = [
+            let named: [(u16, &str); 7] = [
+                (CONTAINER_ATTR, "container"),
+                (SUPPORTER_ATTR, "supporter"),
+                (OPEN_ATTR, "open"),
                 (2, "edible"),
                 (DOOR_ATTR, "door"),
                 (SCENERY_ATTR, "scenery"),
@@ -1689,6 +1734,41 @@ mod tests {
         // cached numbers `detect` resolved really are the SAME ones a fresh lookup would find.
         assert_eq!(pn.scenery_attr, Some(SCENERY_ATTR));
         assert_eq!(pn.door_attr, Some(DOOR_ATTR));
+    }
+
+    // ── SQ-1792: container / supporter / open ─────────────────────────────────
+
+    /// The numbers 0, 1 and 4 are this synthetic image's own, so only a lookup through its
+    /// identifier-names table can get them right; SACK is an open container, TABLE a supporter and
+    /// APPLE neither, and the answer is the attribute's LIVE value.
+    #[test]
+    fn holds_is_read_from_the_named_attributes_and_stays_live() {
+        let (s, mut mem, pn) = detected();
+        let holds = |mem: &Memory, i: usize| pn.of(mem, s.obj(i)).expect("has words").holds;
+        assert_eq!(
+            holds(&mem, SACK),
+            Some(Holds::new(Some(true), Some(false), Some(true))),
+            "SACK carries container and open"
+        );
+        assert_eq!(holds(&mem, TABLE), Some(Holds::new(Some(false), Some(true), Some(false))));
+        assert_eq!(holds(&mem, APPLE), Some(Holds::new(Some(false), Some(false), Some(false))));
+
+        // `close sack`: the open bit (attribute 4, byte 0, mask 1<<4) clears under the same reader.
+        let byte = s.obj(SACK) + 1;
+        let cur = mem.read8(byte).unwrap();
+        mem.write8(byte, cur & !(1 << OPEN_ATTR)).unwrap();
+        assert_eq!(holds(&mem, SACK).unwrap().open, Some(false), "open reads the live bit");
+        assert_eq!(holds(&mem, SACK).unwrap().container, Some(true));
+    }
+
+    /// An image whose table names none of the three answers `None`, never `Some(false)`.
+    #[test]
+    fn holds_is_none_where_the_image_names_no_such_attribute() {
+        let (s, mem, mut pn) = detected();
+        pn.container_attr = None;
+        pn.supporter_attr = None;
+        pn.open_attr = None;
+        assert_eq!(pn.of(&mem, s.obj(SACK)).unwrap().holds, None);
     }
 
     // ── SQ-1774: running a short_name FUNCTION ────────────────────────────────

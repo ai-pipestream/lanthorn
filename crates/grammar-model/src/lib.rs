@@ -625,6 +625,57 @@ impl Adjectives {
     }
 }
 
+/// Whether an object can hold other things, and how — the facts a host needs
+/// to choose between a verb's "put X **in** Y" and "put X **on** Y" lines.
+///
+/// Every field is an [`Option`] and `None` means *this story cannot say*, never
+/// "no": a wrong `Some(false)` makes a host type "put coin in table" and a wrong
+/// `Some(true)` "put coin on box", both worse than no answer. Where each answer
+/// comes from depends on who compiled the story:
+///
+/// * **Inform 6 and Inform 7, Z-machine and Glulx.** `container`, `supporter`
+///   and `open` are *library attributes*, and the compiler writes every
+///   attribute's name into the story's *Table of Identifier Names*
+///   (`#identifiers_table`, the table behind `print (property)` and
+///   `DebugAttribute`). The attribute numbers are therefore READ from the
+///   story, never assumed from the library's declaration order. A story built
+///   with `$OMIT_SYMBOL_TABLE=1` has no such table and answers `None` for all
+///   three. Each flag is the attribute's live value, so `open` flips when the
+///   game does.
+/// * **Infocom (ZIL).** The compiler leaves no attribute names behind, so
+///   everything is inferred from the object table (`zvm::world`).
+///   `container` is **always `None`**: the one bit that marks "holds things"
+///   is set on tables and altars as well as on boxes, so it cannot say
+///   container-not-surface. `supporter` is always `None`: ZIL has a surface
+///   bit but nothing reliable locates it. `open` is the story's openness bit
+///   where one could be identified (Zork I's mailbox flips it on `open
+///   mailbox`) and `None` where the inference declined.
+/// * **Scott Adams.** No such notion; [`ObjectWords::holds`] is `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct Holds {
+    /// The object can hold things INSIDE it (Inform's `container` attribute).
+    pub container: Option<bool>,
+    /// The object can hold things ON TOP of it (Inform's `supporter`).
+    pub supporter: Option<bool>,
+    /// The object's `open` attribute is set right now. Meaningful for a
+    /// container, but it is the raw bit: a door carries it too, and a
+    /// non-container reports `Some(false)`.
+    pub open: Option<bool>,
+}
+
+impl Holds {
+    /// Build one; `#[non_exhaustive]`, so this is how another crate makes one.
+    pub fn new(container: Option<bool>, supporter: Option<bool>, open: Option<bool>) -> Holds {
+        Holds { container, supporter, open }
+    }
+
+    /// True when the story said nothing at all.
+    pub fn is_unknown(&self) -> bool {
+        self.container.is_none() && self.supporter.is_none() && self.open.is_none()
+    }
+}
+
 /// What an object is, and what it can be **called** — one answer, never two.
 ///
 /// A story tells you two different things about a thing in it. Its *printed*
@@ -691,6 +742,11 @@ pub struct ObjectWords {
     /// adjectives" on Zork Zero and "nouns only" on Zork I with nothing to say
     /// which. See [`Adjectives`].
     pub adjectives: Adjectives,
+    /// Whether this object is a container and/or a supporter, and open or
+    /// not — see [`Holds`] for where each family's answer comes from.
+    /// `None` when the story states nothing about it (every Scott Adams item,
+    /// and any story whose attribute names are not recoverable).
+    pub holds: Option<Holds>,
 }
 
 impl ObjectWords {
@@ -715,7 +771,15 @@ impl ObjectWords {
             property,
             truncated_at,
             adjectives: Adjectives::Unavailable,
+            holds: None,
         }
+    }
+
+    /// The same object, with what the story says about holding things. An
+    /// all-`None` [`Holds`] is stored as `None`: nothing was said.
+    pub fn with_holds(mut self, holds: Holds) -> ObjectWords {
+        self.holds = (!holds.is_unknown()).then_some(holds);
+        self
     }
 
     /// The same object, with its adjectives and the property they came from.
@@ -1014,6 +1078,21 @@ mod tests {
     }
 
     #[test]
+    fn holds_is_none_until_a_producer_says_something() {
+        let plain = ObjectWords::new(1, "box".into(), vec!["box".into()], None, None);
+        assert_eq!(plain.holds, None, "a new ObjectWords states nothing");
+        assert!(Holds::default().is_unknown());
+
+        let nothing = plain.clone().with_holds(Holds::new(None, None, None));
+        assert_eq!(nothing.holds, None, "an all-unknown Holds is stored as no answer");
+
+        let known = plain.with_holds(Holds::new(Some(true), None, Some(false)));
+        assert_eq!(known.holds.unwrap().container, Some(true));
+        assert_eq!(known.holds.unwrap().supporter, None, "unknown stays unknown, never false");
+        assert!(!known.holds.unwrap().is_unknown());
+    }
+
+    #[test]
     fn elementary_numbering_is_inform_s_and_stops_at_nine() {
         assert_eq!(NounKind::from_elementary(0), Some(NounKind::Noun));
         assert_eq!(NounKind::from_elementary(3), Some(NounKind::MultiHeld));
@@ -1156,6 +1235,7 @@ mod tests {
             property: None,
             truncated_at: Some(9),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         let w = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
         assert_eq!(o.first_word_in(&w("an extravagant door")), Some("extravagant".into()));
@@ -1176,6 +1256,7 @@ mod tests {
             property: Some(18),
             truncated_at: Some(6),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         // Either spelling: what the story holds, and what the player types.
         assert!(o.refers_to("lanter"));
@@ -1212,6 +1293,7 @@ mod tests {
             property: Some(18),
             truncated_at: Some(6),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         // A second rule in the same set, and an adjective list that counts.
         let scott = ObjectWords::new(9, "a jewelled crown".into(), vec!["crown".into()], None, Some(3))
@@ -1315,6 +1397,7 @@ mod tests {
             property: Some(1),
             truncated_at: Some(9),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         assert_eq!(o.describe(), "(unnamed) [pig]");
         assert!(o.refers_to("pig"));

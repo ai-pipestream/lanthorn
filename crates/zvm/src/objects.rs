@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// `grammar` feature along with [`ParseNames`], the only reader that produces
 /// one.
 #[cfg(feature = "grammar")]
-pub use grammar_model::{Adjectives, ObjectWords};
+pub use grammar_model::{Adjectives, Holds, ObjectWords};
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
@@ -578,6 +578,104 @@ pub fn short_name_property(mem: &Memory) -> Option<u8> {
     None
 }
 
+/// The names this story's compiler gave its 48 attributes, indexed BY attribute
+/// number, read out of the story's own *Table of Identifier Names* (SQ-1792).
+/// `None` for a story that carries no such table — a ZIL game, or an Inform 6
+/// compile with `$OMIT_SYMBOL_TABLE=1`. An entry is empty for an attribute the
+/// story never named, and an aliased attribute reads `"a/b"` (`Attribute
+/// non_floating alias absent` is `"absent/non_floating"`).
+///
+/// Source: Inform 6 compiler `tables.c` (`construct_storyfile`), DavidKinder/Inform6
+/// at 2e4b14f4 (the submodule commit inform6unix pins for compiler 6.33), under
+/// the Artistic License 2.0 — the same table [`short_name_property`] documents,
+/// continued: after the property names, which occupy `2 * count` bytes from the
+/// table's base (`count` being its first word), come 48 words, one packed string
+/// address per attribute number. `parserm.h`'s `DebugAttribute` reads it the same
+/// way (`anames + 2*(anames-->0)`), inform6lib 6.12.2, Artistic 2.0.
+///
+/// The table is found exactly as [`short_name_property`] finds it (entry 1 is
+/// `"name"`, every common-property entry an identifier or zero), and the
+/// attribute array behind it must hold only identifiers, aliases of them, or
+/// the compiler's `<unknown attribute>` filler.
+pub fn attribute_names(mem: &Memory) -> Option<Vec<String>> {
+    let len = mem.len() as u32;
+    let max_prop = prop_defaults_count(mem.version());
+    let entry = |a: u32| -> Option<String> {
+        let packed = mem.read_word(a);
+        if packed == 0 {
+            return None;
+        }
+        decoded_string_at(mem, mem.unpack_string(packed))
+    };
+    let window = mem.object_table() as u32..(mem.static_mem_base() as u32).min(len);
+    'table: for base in window {
+        let count = mem.read_word(base) as u32;
+        if count < 2 || base + 2 + count * 2 > len {
+            continue;
+        }
+        if entry(base + 2).as_deref() != Some("name") {
+            continue;
+        }
+        let mut named = 0;
+        for prop in 2..=count.min(max_prop) {
+            let Some(text) = entry(base + prop * 2) else { continue };
+            if !is_inform_identifier(&text) {
+                continue 'table;
+            }
+            named += 1;
+        }
+        if named < MIN_IDENTIFIERS {
+            continue;
+        }
+        let attrs = base + 2 * count;
+        if attrs + ATTRIBUTE_NAME_ENTRIES * 2 > len {
+            continue;
+        }
+        let mut names = Vec::with_capacity(ATTRIBUTE_NAME_ENTRIES as usize);
+        let mut identifiers = 0;
+        for i in 0..ATTRIBUTE_NAME_ENTRIES {
+            match entry(attrs + i * 2) {
+                None => names.push(String::new()),
+                Some(text) if text == "<unknown attribute>" => names.push(String::new()),
+                Some(text) if text.split('/').all(is_inform_identifier) => {
+                    identifiers += 1;
+                    names.push(text);
+                }
+                Some(_) => continue 'table,
+            }
+        }
+        if identifiers >= MIN_ATTRIBUTE_NAMES {
+            return Some(names);
+        }
+    }
+    None
+}
+
+/// The attribute number this story's compiler gave `name`, or `None` where the
+/// story names no such attribute or carries no names at all. See
+/// [`attribute_names`]. Only attributes this story's objects can carry (32 in
+/// v1–3, 48 after) are answered.
+pub fn attribute_number(mem: &Memory, name: &str) -> Option<u8> {
+    attribute_number_in(&attribute_names(mem)?, mem.version(), name)
+}
+
+/// [`attribute_number`] over names already read.
+pub fn attribute_number_in(names: &[String], version: u8, name: &str) -> Option<u8> {
+    let limit = if version <= 3 { 32 } else { 48 };
+    names
+        .iter()
+        .take(limit)
+        .position(|n| n.split('/').any(|part| part == name))
+        .and_then(|i| u8::try_from(i).ok())
+}
+
+/// The compiler writes this many attribute names whatever the version.
+const ATTRIBUTE_NAME_ENTRIES: u32 = 48;
+
+/// How many attributes an image must name before its table is believed — the
+/// Inform 6 library alone declares thirty-odd.
+const MIN_ATTRIBUTE_NAMES: usize = 4;
+
 /// The Inform 6 library property whose presence in the identifiers table says
 /// this story is built on that library — declared in `linklpa.h` beside
 /// `short_name` itself, and absent from Inform 7's template, which puts its map
@@ -1015,6 +1113,7 @@ pub struct ParseNames {
     adjective_property: Option<u8>,
     key_chars: usize,
     words: BTreeMap<u32, String>,
+    holds: HoldsAttrs,
 }
 
 #[cfg(feature = "grammar")]
@@ -1061,6 +1160,7 @@ impl ParseNames {
             adjective_property,
             key_chars: index.key_chars,
             words: index.by_address,
+            holds: HoldsAttrs::detect(mem),
         })
     }
 
@@ -1092,7 +1192,30 @@ impl ParseNames {
             adjective_property,
             key_chars: index.key_chars,
             words: index.by_address,
+            holds: HoldsAttrs::detect(mem),
         })
+    }
+
+    /// What the story says about object `obj` holding things — the same answer
+    /// [`of`](ParseNames::of) attaches to an [`ObjectWords`], for an object `of`
+    /// refuses because its `name` is a `parse_name` ROUTINE rather than a word
+    /// array (Anchorhead's worn trenchcoat). `None` when nothing is known.
+    pub fn holds_of(&self, mem: &Memory, obj: u16) -> Option<Holds> {
+        Some(self.holds.of(mem, obj)).filter(|h| !h.is_unknown())
+    }
+
+    /// The same reader with Infocom's openness bit taken from `world` — the
+    /// model a host derived from the story's PRISTINE object table
+    /// ([`WorldModel::discover_at_boot`](crate::world::WorldModel::discover_at_boot))
+    /// — instead of the one [`detect`](ParseNames::detect) inferred from the
+    /// memory it was handed, which drifts as a game is played. A no-op for a
+    /// story whose attributes the compiler NAMED (Inform): those are read, not
+    /// inferred, and `world` has nothing to add.
+    pub fn with_world_model(mut self, world: &crate::world::WorldModel) -> ParseNames {
+        if !self.holds.named {
+            self.holds.open = world.open_attr;
+        }
+        self
     }
 
     /// Which property the words are read from.
@@ -1124,7 +1247,8 @@ impl ParseNames {
             words,
             Some(u32::from(self.property)),
             Some(self.key_chars),
-        );
+        )
+        .with_holds(self.holds.of(mem, obj));
         match self.adjective_property {
             // No second property to read: the answer is that this story cannot
             // be asked, which `ObjectWords` reports as `Adjectives::Unavailable`
@@ -1187,6 +1311,51 @@ impl ParseNames {
         // character figure is what truncates a player's word.
         let key_chars = dict.key_len() as usize / 2 * 3;
         DictionaryIndex { by_address, key_chars }
+    }
+}
+
+/// Which attribute numbers answer "is this a container / a supporter / open" in
+/// one story (SQ-1792). See [`grammar_model::Holds`] for the contract.
+///
+/// `named` says the numbers were READ from the compiler's identifier-names table
+/// ([`attribute_names`]); otherwise only `open` can be set, and it is INFERRED
+/// by [`crate::world`] for an Infocom story. `container` is never taken from
+/// `WorldModel::container_attr`: in ZIL that bit marks tables and altars as well
+/// as boxes ("holds things"), so it cannot answer "container, not surface".
+#[cfg(feature = "grammar")]
+#[derive(Debug, Clone, Copy, Default)]
+struct HoldsAttrs {
+    container: Option<u8>,
+    supporter: Option<u8>,
+    open: Option<u8>,
+    named: bool,
+}
+
+#[cfg(feature = "grammar")]
+impl HoldsAttrs {
+    fn detect(mem: &Memory) -> HoldsAttrs {
+        if let Some(names) = attribute_names(mem) {
+            let version = mem.version();
+            return HoldsAttrs {
+                container: attribute_number_in(&names, version, "container"),
+                supporter: attribute_number_in(&names, version, "supporter"),
+                open: attribute_number_in(&names, version, "open"),
+                named: true,
+            };
+        }
+        // No names. An Inform story that omitted its table gets nothing —
+        // `open` and `openable` cannot be told apart from the object table
+        // (`world::infer_open_attr`) — while an Infocom one gets the openness
+        // bit `world` infers, when it infers one.
+        if grammar::detect_format(mem).is_inform() {
+            return HoldsAttrs::default();
+        }
+        HoldsAttrs { open: crate::world::WorldModel::open_attribute(mem), ..HoldsAttrs::default() }
+    }
+
+    fn of(&self, mem: &Memory, obj: u16) -> Holds {
+        let bit = |attr: Option<u8>| attr.map(|a| get_attr(mem, obj, a));
+        Holds::new(bit(self.container), bit(self.supporter), bit(self.open))
     }
 }
 

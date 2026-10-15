@@ -20,7 +20,7 @@ use crate::session::{FilenameReq, InputKind, TurnResult};
 /// [`Introspect`] names it without depending on `grammar-model` directly.
 /// [`Adjectives`] travels with it: it says whether the story could be asked for
 /// an object's adjectives at all, which is a different claim from having none.
-pub use grammar_model::{Adjectives, ObjectWordSet, ObjectWords};
+pub use grammar_model::{Adjectives, Holds, ObjectWordSet, ObjectWords};
 
 /// What a room's own exit table declares for one direction (SQ-1257).
 ///

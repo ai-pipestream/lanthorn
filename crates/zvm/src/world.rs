@@ -165,28 +165,7 @@ impl WorldModel {
         if max_object == 0 {
             return Self::default();
         }
-        let nattr = attr_count(mem);
-
-        // Parser dummy objects ("it", "that", "random object") carry nearly
-        // every attribute at once so that any `test_attr` on them answers yes.
-        // They are noise in every set below — one such object would make two
-        // unrelated attributes look like they overlap.
-        let real: Vec<u16> = (1..=max_object).filter(|&o| !is_wildcard(mem, o, nattr)).collect();
-
-        // Holder sets, one per attribute, over real objects only.
-        let sets: Vec<Vec<u16>> = (0..nattr)
-            .map(|a| real.iter().copied().filter(|&o| get_attr(mem, o, a)).collect())
-            .collect();
-
-        let room_holder = modal_parent(mem, &real);
-        let is_room = |o: u16| get_parent(mem, o) == room_holder;
-
-        // Things (not rooms) that actually hold something at this instant.
-        let holders: Vec<u16> =
-            real.iter().copied().filter(|&o| get_child(mem, o) != 0 && !is_room(o)).collect();
-
-        let container_attr = infer_container_attr(&sets, &holders);
-        let open_attr = container_attr.and_then(|c| infer_open_attr(&sets, c, real.len()));
+        let (real, room_holder, container_attr, open_attr) = infer_holder_attrs(mem, max_object);
         let (globals_prop, globals_holder) =
             infer_local_globals(mem, max_object, room_holder, &real);
         let (exit_props, door_dir_prop_hint, door_to_prop) = infer_exits(mem, max_object);
@@ -224,6 +203,19 @@ impl WorldModel {
             zil_exit_props,
             zil_room_width,
         }
+    }
+
+    /// The attribute this story uses for "this holder's contents are visible
+    /// right now" (Infocom's `OPENBIT`), inferred exactly as [`Self::discover`]
+    /// infers it and nothing else. It exists because `discover` also derives
+    /// exits, which asks `ParseNames::detect` — so `ParseNames` cannot call
+    /// `discover` itself without recursing forever (SQ-1792).
+    pub fn open_attribute(mem: &Memory) -> Option<u8> {
+        let max_object = crate::location::max_object_number(mem);
+        if max_object == 0 {
+            return None;
+        }
+        infer_holder_attrs(mem, max_object).3
     }
 
     /// What room `origin`'s own map data declares for `dir`, resolving through
@@ -1441,6 +1433,35 @@ fn infer_zil_room_width(mem: &Memory, max_object: u16, zil_exit_props: &[Option<
 }
 
 // ── Attribute inference ──────────────────────────────────────────────────────
+
+/// The non-dummy objects, the room bucket, and the container and openness
+/// attributes: the part of [`WorldModel::discover`] that reads only attributes
+/// and the object tree.
+fn infer_holder_attrs(mem: &Memory, max_object: u16) -> (Vec<u16>, u16, Option<u8>, Option<u8>) {
+    let nattr = attr_count(mem);
+
+    // Parser dummy objects ("it", "that", "random object") carry nearly
+    // every attribute at once so that any `test_attr` on them answers yes.
+    // They are noise in every set below — one such object would make two
+    // unrelated attributes look like they overlap.
+    let real: Vec<u16> = (1..=max_object).filter(|&o| !is_wildcard(mem, o, nattr)).collect();
+
+    // Holder sets, one per attribute, over real objects only.
+    let sets: Vec<Vec<u16>> = (0..nattr)
+        .map(|a| real.iter().copied().filter(|&o| get_attr(mem, o, a)).collect())
+        .collect();
+
+    let room_holder = modal_parent(mem, &real);
+    let is_room = |o: u16| get_parent(mem, o) == room_holder;
+
+    // Things (not rooms) that actually hold something at this instant.
+    let holders: Vec<u16> =
+        real.iter().copied().filter(|&o| get_child(mem, o) != 0 && !is_room(o)).collect();
+
+    let container_attr = infer_container_attr(&sets, &holders);
+    let open_attr = container_attr.and_then(|c| infer_open_attr(&sets, c, real.len()));
+    (real, room_holder, container_attr, open_attr)
+}
 
 fn attr_count(mem: &Memory) -> u8 {
     if mem.version() <= 3 { 32 } else { 48 }
