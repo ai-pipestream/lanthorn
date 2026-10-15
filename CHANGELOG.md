@@ -27,6 +27,12 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Fixed
+
+- **Scott Adams games you have more than one copy of are looked up on IFDB once.** A
+  library refresh used to ask IFDB about every Scott copy separately, and fetching one copy
+  never linked the others; copies of the same adventure now share one lookup and one link.
+
 ## v0.9.6 — 2026-10-14
 
 ### Highlights

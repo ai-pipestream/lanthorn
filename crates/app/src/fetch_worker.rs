@@ -191,9 +191,25 @@ fn scott_ifdb_id(path: &Path, disk_entry: Option<&str>) -> Option<String> {
     if !matches!(loaded, crate::hints::LoadedStory::Scott(_)) {
         return None;
     }
+    scott_stem_tuid(path, disk_entry)
+}
+
+/// The mapped IFDB id for the filename stem a Scott story goes by: the ENTRY's
+/// for a story inside a zip or disk image, the file's own otherwise. Reads no
+/// file, so a caller that already knows the story is Scott (its computed IFID
+/// is `SCOTT-…`) can ask without opening it. Shared by [`scott_ifdb_id`] and
+/// the duplicate-linking paths so they cannot disagree on a stem (SQ-1791).
+fn scott_stem_tuid(path: &Path, disk_entry: Option<&str>) -> Option<String> {
     let named: &Path = disk_entry.map(Path::new).unwrap_or(path);
     let stem = named.file_stem().and_then(|s| s.to_str())?;
     crate::picker::scott_tuid(stem).map(str::to_string)
+}
+
+/// A Scott story's mapped IFDB id, for linking its copies. Its computed IFID
+/// (`SCOTT-<hash>`) is never listed by IFDB, so the table is its identity. The
+/// scan's own `SCOTT-` IFID gates it: nothing else is worth a lookup.
+fn scott_link_tuid(ifid: &str, path: &Path, disk_entry: Option<&str>) -> Option<String> {
+    ifid.starts_with("SCOTT-").then(|| scott_stem_tuid(path, disk_entry)).flatten()
 }
 
 /// Handle one story: skip-check, fetch-or-skip, sidecar write, cover write.
@@ -242,7 +258,8 @@ fn fetch_one(
     // id; only an IFID-keyed fetch consults the skip cache.
     let forced = forced || id_override.is_some();
     let linked = if id_override.is_none() && story_info::needs_fetch(existing.as_ref(), forced) {
-        link_from_store(&game_dir, &ifid, forced, remembered.as_deref(), fetched_this_run)
+        let scott = scott_link_tuid(&ifid, &path, disk_entry.as_deref());
+        link_from_store(&game_dir, &ifid, scott.as_deref(), forced, remembered.as_deref(), fetched_this_run)
     } else {
         None
     };
@@ -310,20 +327,24 @@ fn fetch_one(
 fn link_from_store(
     game_dir: &Path,
     ifid: &str,
+    scott_tuid: Option<&str>,
     forced: bool,
     remembered: Option<&str>,
     fetched_this_run: &HashSet<String>,
 ) -> Option<FetchedMeta> {
     let cat = crate::ifdb_store::catalogue_of(game_dir)?;
     let tuid = if forced {
-        let t = remembered.map(str::to_string).or_else(|| crate::ifdb_store::tuid_for_ifid(cat, ifid))?;
+        let t = remembered
+            .map(str::to_string)
+            .or_else(|| crate::ifdb_store::tuid_for_ifid(cat, ifid))
+            .or_else(|| scott_tuid.map(str::to_string))?;
         fetched_this_run.contains(&t).then_some(t)?
     } else {
         // A copy that knows its page (a hand link, say) keeps fetching by it.
         if remembered.is_some() {
             return None;
         }
-        crate::ifdb_store::tuid_for_ifid(cat, ifid)?
+        crate::ifdb_store::tuid_for_ifid(cat, ifid).or_else(|| scott_tuid.map(str::to_string))?
     };
     let meta = crate::ifdb_store::read_record(cat, &tuid)?;
     if meta.not_found || (!forced && meta.fetch_version != story_info::FETCH_VERSION) {
@@ -350,9 +371,9 @@ pub fn link_listed_copies(roots: &crate::data_roots::DataRoots, targets: &[Fetch
     for t in targets {
         let key = t.key.clone().unwrap_or_else(|| crate::storage::story_key_at_from(&t.path, t.disk_entry.as_deref()));
         let game_dir = crate::storage::game_dir(cat, &key);
-        if story_info::linked_tuid(&game_dir).is_some()
-            || crate::ifdb_store::tuid_for_ifid(cat, &t.ifid).as_deref() != Some(tuid)
-        {
+        let listed = crate::ifdb_store::tuid_for_ifid(cat, &t.ifid).as_deref() == Some(tuid)
+            || scott_link_tuid(&t.ifid, &t.path, t.disk_entry.as_deref()).as_deref() == Some(tuid);
+        if story_info::linked_tuid(&game_dir).is_some() || !listed {
             continue;
         }
         write_fetched(roots, &game_dir, &t.ifid, meta.clone());
@@ -1445,6 +1466,97 @@ mod tests {
         let stories = vec![target(&dir, "a.z5", "ZCODE-1-A"), target(&dir, "z.z5", "ZCODE-9-Z")];
         let (progress, calls) = run(&dir, r, stories, false);
         assert_eq!(calls.len(), 2);
+        assert!(progress.iter().all(|p| p.outcome == Outcome::Fetched));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SQ-1791: Scott copies link by their mapped IFDB id ----------------
+
+    const SCOTT_ADV01: &str = "\n32767 1 0 1 2 6 1 0 3 125 0 1\n150 1 0 0 0 0 0 0\n\
+\"AUTO 0\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\
+0 0 0 0 0 0 0\n\"*you are in a room\"\n\"\"\n\"*\"\n\"\"\n0\n0\n0\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n\
+0\n0\n0\n0\n1\n0\n0\n";
+    const ADV01_TUID: &str = "dy4ok8sdlut6ddj7";
+
+    /// Two Scott copies of Adventureland (a `.blb`, and a `.dat` entry in a zip; distinct names so their game folders differ),
+    /// with the `SCOTT-` IFIDs the scan would give them, plus a response for
+    /// the game's mapped page id.
+    fn scott_pair(tag: &str) -> (PathBuf, FetchTarget, FetchTarget, HashMap<String, FakeResp>) {
+        let dir = crate::scratch_dir(tag);
+        std::fs::write(dir.join("adv01.blb"), blb_wrapping_saai(SCOTT_ADV01.as_bytes())).unwrap();
+        let zip_path = dir.join("AdamsGames.zip");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        zw.start_file("adv01.dat", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zw, SCOTT_ADV01.as_bytes()).unwrap();
+        zw.finish().unwrap();
+        let raw = target(&dir, "adv01.blb", "SCOTT-0000000000000001");
+        let zipped = FetchTarget {
+            path: zip_path,
+            disk_entry: Some("adv01.dat".into()),
+            ifid: "SCOTT-0000000000000002".into(),
+            key: None,
+        };
+        let mut r = HashMap::new();
+        r.insert(ADV01_TUID.to_string(), entry_record(ADV01_TUID, "Adventureland", &["ZCODE-9-Z"]));
+        (dir, raw, zipped, r)
+    }
+
+    #[test]
+    fn two_scott_copies_cost_one_request() {
+        let (dir, raw, zipped, r) = scott_pair("scott-link-two");
+        let (progress, calls) = run(&dir, r, vec![raw, zipped.clone()], false);
+        assert_eq!(calls, vec![format!("id:{ADV01_TUID}")], "one request for the game");
+        assert_eq!(progress[0].outcome, Outcome::Fetched);
+        assert_eq!(progress[1].outcome, Outcome::Linked);
+        let key = crate::storage::story_key_at_from(&zipped.path, zipped.disk_entry.as_deref());
+        let gd = crate::storage::game_dir(&dir, &key);
+        assert_eq!(story_info::linked_tuid(&gd).as_deref(), Some(ADV01_TUID));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forced_run_asks_once_for_two_scott_copies() {
+        let (dir, raw, zipped, r) = scott_pair("scott-link-forced");
+        let (_, first) = run(&dir, r.clone(), vec![raw.clone(), zipped.clone()], false);
+        assert_eq!(first.len(), 1);
+        let (progress, calls) = run(&dir, r, vec![raw, zipped], true);
+        assert_eq!(calls, vec![format!("id:{ADV01_TUID}")], "refresh asks once for the game");
+        assert_eq!(progress[0].outcome, Outcome::Fetched);
+        assert_eq!(progress[1].outcome, Outcome::Linked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_one_story_fetch_links_the_other_scott_copy() {
+        let (dir, raw, zipped, r) = scott_pair("scott-link-listed");
+        let roots = crate::data_roots::DataRoots::single(&dir);
+        let (progress, calls) = run(&dir, r, vec![raw.clone()], true);
+        assert_eq!(calls.len(), 1);
+        let all = vec![raw.clone(), zipped.clone()];
+        let linked = link_listed_copies_after(&roots, &all, &raw, &progress[0].outcome);
+        assert_eq!(linked.iter().map(|t| t.ifid.as_str()).collect::<Vec<_>>(), vec!["SCOTT-0000000000000002"]);
+        let key = crate::storage::story_key_at_from(&zipped.path, zipped.disk_entry.as_deref());
+        assert_eq!(story_info::linked_tuid(&crate::storage::game_dir(&dir, &key)).as_deref(), Some(ADV01_TUID));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unmapped_scott_stem_and_a_non_scott_story_are_unaffected() {
+        let dir = crate::scratch_dir("scott-link-unmapped");
+        for n in ["mystery-a.dat", "mystery-b.dat"] {
+            std::fs::write(dir.join(n), SCOTT_ADV01).unwrap();
+        }
+        let mut r = HashMap::new();
+        r.insert("SCOTT-1".to_string(), entry_record("tuidaaaa", "Mystery", &["SCOTT-1"]));
+        r.insert("SCOTT-2".to_string(), entry_record("tuidaaaa", "Mystery", &["SCOTT-2"]));
+        r.insert("ZCODE-1-A".to_string(), entry_record("tuidzzzz", "Z", &["ZCODE-1-A"]));
+        let stories = vec![
+            target(&dir, "mystery-a.dat", "SCOTT-1"),
+            target(&dir, "mystery-b.dat", "SCOTT-2"),
+            target(&dir, "z.z5", "ZCODE-1-A"),
+        ];
+        let (progress, calls) = run(&dir, r, stories, false);
+        assert_eq!(calls, vec!["SCOTT-1", "SCOTT-2", "ZCODE-1-A"], "each asks by IFID");
         assert!(progress.iter().all(|p| p.outcome == Outcome::Fetched));
         let _ = std::fs::remove_dir_all(&dir);
     }

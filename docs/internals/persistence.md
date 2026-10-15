@@ -355,6 +355,15 @@ and returns the targets it linked; `link_listed_copies_after` is the same call
 keyed off a worker `Outcome` (only `Fetched`/`Linked` link anything). The TUI's `f`
 and an embedding host's one-story refresh both call it.
 
+**Scott copies link by their mapped id** (SQ-1791). A Scott database's computed IFID
+(`SCOTT-<hash>`) is never listed by IFDB, so the IFID map cannot link it. Its identity
+for linking is the TUID `picker::scott_tuid` maps its filename stem to (the zip or disk
+entry's stem, via `fetch_worker::scott_stem_tuid`, shared with `scott_ifdb_id`). A target
+whose scanned IFID starts `SCOTT-` is known to be Scott, so no file is opened to decide.
+`link_from_store` and `link_listed_copies` treat that TUID like a listed IFID, under the
+same rules (unforced: current record only; forced: only a TUID fetched this run).
+Glulx stories with no embedded UUID (`GLULX-<hash>`) are not covered.
+
 `story_info::load`/`save` keep returning one assembled `StoryInfo`, so callers
 and embedding hosts are unchanged. **Adoption:** a copy whose `info.json` still
 holds its own record (every build before SQ-1723) is read as before, and the first
