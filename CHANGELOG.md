@@ -49,6 +49,9 @@ while any such tag, or this Unreleased section, still exists.*
 - **Scott Adams games you have more than one copy of are looked up on IFDB once.** A
   library refresh used to ask IFDB about every Scott copy separately, and fetching one copy
   never linked the others; copies of the same adventure now share one lookup and one link.
+- **`cargo audit` passes for projects that embed lanthorn.** lanthorn now uses zip 9, which
+  clears security advisories RUSTSEC-2026-0367, -0368 and -0369. lanthorn never unpacked
+  archives the way those advisories describe, so players were not exposed.
 
 ## v0.9.6 — 2026-10-14
 
