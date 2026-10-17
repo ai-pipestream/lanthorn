@@ -1471,7 +1471,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     let mut img_png: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     {
         let names: Vec<(usize, String)> = (0..zip.len())
-            .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+            .filter_map(|i| zip.by_index(i).ok().and_then(|e| e.name().map(std::borrow::Cow::into_owned).ok()))
             .filter_map(|name| {
                 let n = name.strip_prefix(ENTRY_TRANSCRIPT_IMG_PREFIX)?.strip_suffix(".png")?;
                 n.parse::<usize>().ok().map(|idx| (idx, name))
@@ -1631,7 +1631,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     // order `pictures_png` emits (ascending z_seq) — preserved here, NOT sorted
     // by window, so `load_pictures_png` can reproduce the relative z-order.
     let picture_names: Vec<(u8, String)> = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+        .filter_map(|i| zip.by_index(i).ok().and_then(|e| e.name().map(std::borrow::Cow::into_owned).ok()))
         .filter_map(|name| {
             let n = name.strip_prefix(ENTRY_PICTURES_PREFIX)?.strip_suffix(".png")?;
             n.parse::<u8>().ok().map(|win| (win, name))
@@ -1772,7 +1772,7 @@ pub fn rename_archive(old_path: &Path, new_path: &Path, new_name: &str) -> io::R
     let options = zip::write::SimpleFileOptions::default();
     for i in 0..zip.len() {
         let entry = zip.by_index(i).map_err(to_io)?;
-        if entry.name() == ENTRY_META {
+        if entry.name_raw() == ENTRY_META.as_bytes() {
             out.start_file(ENTRY_META, options)?;
             out.write_all(&meta_json)?;
         } else {
@@ -2165,10 +2165,10 @@ mod tests {
             let mut zout = zip::ZipWriter::new(out);
             for i in 0..zin.len() {
                 let mut e = zin.by_index(i).unwrap();
-                if e.name() == ENTRY_COMMAND_HISTORY {
+                if e.name_raw() == ENTRY_COMMAND_HISTORY.as_bytes() {
                     continue;
                 }
-                let name = e.name().to_string();
+                let name = e.name().unwrap().into_owned();
                 let mut buf = Vec::new();
                 e.read_to_end(&mut buf).unwrap();
                 zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
@@ -3597,7 +3597,7 @@ mod tests {
             let mut zout = zip::ZipWriter::new(out);
             for i in 0..zin.len() {
                 let mut e = zin.by_index(i).unwrap();
-                let name = e.name().to_string();
+                let name = e.name().unwrap().into_owned();
                 let mut buf = Vec::new();
                 e.read_to_end(&mut buf).unwrap();
                 if name == ENTRY_SCREEN {

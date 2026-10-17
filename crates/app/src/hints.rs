@@ -883,7 +883,7 @@ fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>, tuid: Option<
         let entry = zip
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
         // Only the bare filename portion needs to match the pattern.
         let basename = name.rsplit('/').next().unwrap_or(&name);
         if is_hint_sidecar(basename) {
@@ -1549,7 +1549,7 @@ fn for_each_zip_entry(
         if declared == 0 || declared > MAX_ZIP_ENTRY || declared > budget {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
         let mut buf = Vec::new();
         (&mut entry).take(MAX_ZIP_ENTRY + 1).read_to_end(&mut buf)?;
         budget = budget.saturating_sub(buf.len() as u64);
@@ -1668,7 +1668,7 @@ pub fn zip_entry_names(path: &Path) -> io::Result<Vec<String>> {
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if !entry.is_dir() {
-            out.push(entry.name().to_string());
+            out.push(entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned());
         }
     }
     Ok(out)
@@ -2322,8 +2322,8 @@ pub fn read_zip_entry(
         let mut entry = zip
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if pred(entry.name()) {
-            let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
+        if pred(&name) {
             // Capped read (one byte past the cap detects overflow without ever
             // buffering the excess): the entry's declared size is attacker
             // data, so the *inflated* stream itself is what gets bounded.
