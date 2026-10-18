@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and "is this a bug?"
+    url: https://github.com/sharkusk/lanthorn/discussions
+    about: Ask in Discussions - it's the right place for questions that aren't clearly bugs.
+  - name: The Golden Lanthorn support
+    url: https://goldenlanthorn.com/support
+    about: No GitHub account? Players of The Golden Lanthorn can get help here.

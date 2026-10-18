@@ -101,6 +101,28 @@ new folders it stops and tells you what, leaving everything where it was. Add
 (say the new folder is on another disk), it tells you which item to move by hand
 and deletes nothing.
 
+## Reporting a problem
+
+Found something that still isn't right? Open the game that shows the problem
+and type `/report-bug`. lanthorn prints a short summary (version, system,
+terminal, graphics, settings, game, map), copies it to your clipboard if your
+terminal allows it (tmux may not), and saves the full report as
+`report-bug.txt` in your logs folder (see above); the summary's last line,
+`attach:`, names that file.
+
+Then [open an issue](https://github.com/sharkusk/lanthorn/issues/new/choose),
+pick **Bug in Lanthorn**, paste the summary into the form and drag the
+`report-bug.txt` from the `attach:` line into it. The file includes the
+commands you typed this session, so glance through it first. Please
+don't attach commercial game files; the report already names the file and
+release.
+
+If lanthorn won't start at all, include the output of `lanthorn --version`,
+your operating system and your terminal instead, plus `crash.log` if there is one.
+
+Questions and "how do I..." are welcome in
+[Discussions](https://github.com/sharkusk/lanthorn/discussions).
+
 ## Going deeper
 
 - [The persistence model](../internals/persistence.md) — every file lanthorn writes, and where

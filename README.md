@@ -412,6 +412,9 @@ Boxes or blank squares where glyphs should be? That is a font gap, not a bug —
 see [**looks**](docs/guide/looks.md) for the font check, and
 [**troubleshooting**](docs/guide/troubleshooting.md) for the rest.
 
+*Next release:* Found a bug? Type `/report-bug`, then [open an issue](https://github.com/sharkusk/lanthorn/issues/new/choose) -
+the troubleshooting guide walks you through it.
+
 ---
 
 ## Configuration
