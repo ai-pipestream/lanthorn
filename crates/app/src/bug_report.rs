@@ -120,8 +120,11 @@ pub struct BugReportFacts {
     /// `None` with no game loaded.
     pub game: Option<GameFacts>,
     pub map: Option<MapFacts>,
-    /// The logs folder, already `~`-abbreviated.
-    pub logs_dir: String,
+    /// The full report's file, already `~`-abbreviated: what the player attaches.
+    pub report_file: String,
+    /// Why the full report could not be written, if it could not be. The summary's
+    /// `attach:` line then says so instead of pointing at a file that is not there.
+    pub save_error: Option<String>,
     /// The home directory, scrubbed to `~` wherever it appears in either text.
     pub home: Option<String>,
     pub timestamp: String,
@@ -212,7 +215,10 @@ fn settings_line(s: &SettingsFacts) -> String {
     }
     parts.push(match (s.sound, s.audio_device) {
         (true, true) => "sound on".to_string(),
-        (true, false) => "sound on (no device)".to_string(),
+        // `AppState::audio` is opened lazily on the first sound that plays, so
+        // `None` means "not started yet"; nothing records a failed open, so a
+        // device failure is never claimed here.
+        (true, false) => "sound on (not started yet)".to_string(),
         (false, _) => "sound off".to_string(),
     });
     labelled("settings", &parts.join(" · "))
@@ -292,7 +298,13 @@ pub fn build(f: &BugReportFacts) -> BugReport {
     if let Some(m) = &f.map {
         lines.extend(map_lines(m));
     }
-    lines.push(labelled("logs", &f.logs_dir));
+    lines.push(labelled(
+        "attach",
+        &match &f.save_error {
+            None => format!("{} (the full report: drag it into the issue)", f.report_file),
+            Some(e) => format!("could not save {}: {e}", f.report_file),
+        },
+    ));
     let summary = lines.join("\n");
 
     let mut full = format!("lanthorn bug report, {}\n\n{summary}\n", f.timestamp);
@@ -360,7 +372,7 @@ mod tests {
                 sound: true,
                 audio_device: true,
             },
-            logs_dir: "~/.local/state/lanthorn/logs".into(),
+            report_file: "~/.local/state/lanthorn/report-bug.txt".into(),
             timestamp: "2026-10-18T12:00:00Z".into(),
             terminal_dump: vec!["[dump-terminal]".into(), "  graphics protocol: kitty".into()],
             ..Default::default()
@@ -411,7 +423,7 @@ game:     Zork Zero · zork0.z6 · Z-machine v6 r393 s890714 0x1234
           IFID ZCODE-393-890714-1234 · IFDB abc123 · machine Amiga (from the disk)
 map:      42 rooms · 61 connections · 3 layers · here: \"West of House\"
           pane 60x40 · zoom Compact · map shown
-logs:     ~/.local/state/lanthorn/logs";
+attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into the issue)";
         assert_eq!(build(&f).summary, expect);
     }
 
@@ -466,13 +478,14 @@ logs:     ~/.local/state/lanthorn/logs";
         let mut f = base();
         f.home = Some("/Users/someone".into());
         f.game = Some(game());
-        f.logs_dir = "/Users/someone/.local/state/lanthorn/logs".into();
+        f.report_file = "/Users/someone/.local/state/lanthorn/report-bug.txt".into();
         f.window_dump = Some(vec!["source=/Users/someone/games/zork0.z6".into()]);
         f.commands = vec!["open /Users/someone/x".into()];
         let r = build(&f);
         assert!(!r.summary.contains("/Users/someone"), "{}", r.summary);
         assert!(!r.full.contains("/Users/someone"), "{}", r.full);
-        assert!(r.summary.contains("logs:     ~/.local/state/lanthorn/logs"));
+        assert!(r.summary.contains("attach:   ~/.local/state/lanthorn/report-bug.txt"));
+        assert!(!r.summary.contains("logs:"));
         assert!(r.summary.contains("zork0.z6"), "the game is named by its file name");
     }
 
@@ -513,6 +526,26 @@ logs:     ~/.local/state/lanthorn/logs";
         f.graphics.images_off = true;
         f.graphics.protocol = None;
         assert!(build(&f).summary.contains("none (images off)"));
+    }
+
+    #[test]
+    fn a_failed_save_replaces_the_attach_promise() {
+        let mut f = base();
+        f.save_error = Some("permission denied".into());
+        let s = build(&f).summary;
+        assert!(
+            s.ends_with("attach:   could not save ~/.local/state/lanthorn/report-bug.txt: permission denied"),
+            "{s}"
+        );
+        assert!(!s.contains("drag it"), "{s}");
+    }
+
+    #[test]
+    fn sound_without_a_sink_is_not_called_no_device() {
+        let mut f = base();
+        f.settings.audio_device = false;
+        let s = build(&f).summary;
+        assert!(s.contains("sound on (not started yet)") && !s.contains("no device"), "{s}");
     }
 
     #[test]

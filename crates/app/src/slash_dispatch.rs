@@ -1036,7 +1036,8 @@ fn bug_report_facts(
         },
         game,
         map,
-        logs_dir: crate::abbreviate_home(config.logs_root()),
+        report_file: crate::abbreviate_home(&app::export::bug_report_path(config.logs_root())),
+        save_error: None,
         home: app::user_dirs::home_dir().map(|h| h.display().to_string()),
         timestamp: jiff::Timestamp::now().to_string(),
         terminal_dump: app::terminal_dump::dump_text(&snap),
@@ -1057,8 +1058,14 @@ fn report_bug(
     story_rect: Rect,
     map_rect: Rect,
 ) {
-    let facts = bug_report_facts(state, mapper, session, story_bytes, story_path, story_rect, map_rect);
-    let report = app::bug_report::build(&facts);
+    let mut facts = bug_report_facts(state, mapper, session, story_bytes, story_path, story_rect, map_rect);
+    // Write the file FIRST: the summary's `attach:` line has to say whether it is there.
+    let mut report = app::bug_report::build(&facts);
+    let saved = app::export::write_bug_report(state.config.logs_root(), &report.full);
+    if let Err(e) = &saved {
+        facts.save_error = Some(e.to_string());
+        report = app::bug_report::build(&facts);
+    }
     for line in report.summary.lines() {
         state.push_transcript_internal(line, TranscriptKind::Meta);
     }
@@ -1071,18 +1078,15 @@ fn report_bug(
         let _ = out.write_all(seq.as_bytes());
         let _ = out.flush();
     }
-    let copied = "Copied to your clipboard (if your terminal allows it; copy it from above if not).";
-    let msg = match app::export::write_bug_report(state.config.logs_root(), &report.full) {
-        Ok(p) => format!(
-            "{copied} Full report, including your commands this session: {} — attach it to the issue.",
-            crate::abbreviate_home(&p)
-        ),
-        Err(e) => format!(
-            "{copied} The full report could not be saved to {}: {e}",
-            crate::abbreviate_home(&app::export::bug_report_path(state.config.logs_root()))
-        ),
+    state.push_transcript_internal(
+        "Copied to your clipboard \u{2014} paste it into the issue form (if nothing pastes, copy the summary above).",
+        TranscriptKind::Meta,
+    );
+    let second = match saved {
+        Ok(_) => "Attach report-bug.txt from the line above; it includes your commands this session.",
+        Err(_) => "The full report could not be saved \u{2014} see the attach line above.",
     };
-    state.push_transcript_internal(&msg, TranscriptKind::Meta);
+    state.push_transcript_internal(second, TranscriptKind::Meta);
 }
 
 /// Gather everything `/dump-terminal` reports (SQ-0994).
@@ -2111,8 +2115,12 @@ mod debug_dispatch_tests {
         assert!(text.contains("IFID ZCODE-34-871124-A3C7 · machine IBM PC (default)"), "{text}");
         assert!(text.contains("0 rooms · 0 connections · 1 layer\n"), "{text}");
         assert!(!text.contains(&*fixture.parent().unwrap().to_string_lossy()), "never the story's directory: {text}");
-        assert!(text.contains("Copied to your clipboard (if your terminal allows it; copy it from above if not). Full report, including your commands this session: "), "{text}");
-        assert!(text.contains("report-bug.txt — attach it to the issue."), "{text}");
+        assert!(text.contains("attach:   ") && text.contains("report-bug.txt (the full report: drag it into the issue)"), "{text}");
+        assert!(!text.contains("logs:"), "{text}");
+        assert!(text.ends_with(
+            "Copied to your clipboard \u{2014} paste it into the issue form (if nothing pastes, copy the summary above).\n\
+             Attach report-bug.txt from the line above; it includes your commands this session."
+        ), "{text}");
 
         let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");
         assert_eq!(written.matches("== /dump-terminal ==").count(), 1, "overwritten, not appended");
