@@ -968,6 +968,7 @@ fn bug_report_facts(
         disk_entry: state.source.disk_entry.clone(),
         profile: config.interpreter_profile,
         profile_source: config.interpreter_source,
+        map_shown: shown,
         map_pane: shown.then_some((map_rect.width, map_rect.height)),
         zoom: format!("{:?}", state.zoom),
         commands: &state.command_history,

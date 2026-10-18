@@ -95,7 +95,8 @@ pub struct MapFacts {
     pub connections: usize,
     pub layers: usize,
     pub current_room: Option<String>,
-    /// Map pane size in cells; `None` when the pane is hidden.
+    /// Map pane size in cells; `None` when the host has no cell size for it or
+    /// the pane is hidden (see `shown`).
     pub pane: Option<(u16, u16)>,
     pub zoom: String,
     pub shown: bool,
@@ -340,7 +341,10 @@ pub struct SessionInputs<'a> {
     pub disk_entry: Option<String>,
     pub profile: crate::interpreter::InterpreterProfile,
     pub profile_source: crate::interpreter::ProfileSource,
-    /// The map pane in cells; `None` when it is hidden.
+    /// Whether the host is showing the map pane, independent of whether it can
+    /// state the pane's size in cells.
+    pub map_shown: bool,
+    /// The map pane in cells; `None` when the host has none or the pane is hidden.
     pub map_pane: Option<(u16, u16)>,
     /// The map zoom, spelled the way the host names it.
     pub zoom: String,
@@ -405,7 +409,7 @@ pub fn gather_session_facts(i: &SessionInputs) -> SessionFacts {
         current_room: graph.current().and_then(|id| graph.room(id)).map(|r| r.name.clone()),
         pane: i.map_pane,
         zoom: i.zoom.clone(),
-        shown: i.map_pane.is_some(),
+        shown: i.map_shown,
     };
     SessionFacts {
         game: Some(game),
@@ -743,6 +747,13 @@ attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into 
     /// SQ-1797, real-game smoke: the public gatherer names the game by FILE NAME
     /// whatever path it is handed, and carries the commands and the map JSON.
     #[test]
+    fn a_shown_map_without_a_cell_size_is_not_reported_hidden() {
+        let lines = map_lines(&MapFacts { pane: None, ..map() });
+        assert!(lines[1].ends_with("zoom Compact · map shown"), "{lines:?}");
+        assert!(!lines[1].contains("pane"), "{lines:?}");
+    }
+
+    #[test]
     fn gather_session_facts_names_the_game_by_file_name_only() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stories/minizork-r34-s871124.z3");
@@ -750,7 +761,7 @@ attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into 
         let session = crate::session::GameSession::new(bytes.clone(), true, false, None).expect("boots");
         let mapper = mapper::mapper::Mapper::default();
         let commands = vec!["look".to_string()];
-        let inputs = SessionInputs {
+        let mut inputs = SessionInputs {
             session: &session,
             mapper: &mapper,
             story_bytes: &bytes,
@@ -761,6 +772,7 @@ attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into 
             disk_entry: None,
             profile: crate::interpreter::InterpreterProfile::IbmPc,
             profile_source: crate::interpreter::ProfileSource::Fallback,
+            map_shown: true,
             map_pane: Some((60, 40)),
             zoom: "Compact".into(),
             commands: &commands,
@@ -775,6 +787,10 @@ attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into 
         let json = facts.map_json.as_deref().expect("map json");
         assert!(!json.contains("/Users/someone"), "{json}");
         assert!(!format!("{facts:?}").contains("/Users/someone"));
+
+        inputs.map_pane = None;
+        let unmeasured = gather_session_facts(&inputs);
+        assert_eq!(unmeasured.map.as_ref().map(|m| (m.pane, m.shown)), Some((None, true)));
 
         let none = gather_session_facts(&SessionInputs { story_path: std::path::Path::new(""), ..inputs });
         assert!(none.game.is_none() && none.map.is_none() && none.map_json.is_none());
