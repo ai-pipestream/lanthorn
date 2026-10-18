@@ -2551,6 +2551,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 .map(|(_, r)| *r)
                 .chain(last_panes.room_dock_tabs.iter().map(|(_, r)| *r))
                 .chain(last_panes.map_card_buttons.iter().map(|(_, r)| *r))
+                // The command bar's send button (SQ-1801) can sit in the last
+                // column of the story pane, against a splitter's grab zone.
+                .chain(state.input_submit_area())
                 .collect();
             match app::pane_drag::on_mouse(&mut state, m, &last_panes.pane_layout, &last_panes.boundaries, &last_panes.border_controls, &dock_chrome) {
                 DragOutcome::Ignored => {}
@@ -3375,6 +3378,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     }
                     KeyResolve::None => Action::None,
                 }
+            }
+            // ── Command bar's send button (SQ-1801) ───────────────────────────
+            // A left-click on the button is Enter: it routes to the very same
+            // `Action::SubmitCommand` arm below (so slash commands, history and
+            // the pending-input checks all behave identically). A click on the
+            // bar's text is not matched here and keeps placing the caret.
+            Event::Mouse(m) if app::input::submit_button_action(&state, &m).is_some() => {
+                app::input::submit_button_action(&state, &m).expect("guarded by the match arm")
             }
             // ── Command band (SQ-0664) ────────────────────────────────────────
             // The band is NOT a modal, so unlike the old verb dock it cannot

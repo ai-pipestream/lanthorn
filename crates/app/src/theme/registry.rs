@@ -612,6 +612,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("warning_marker", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("input_text", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("input_submit", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     // A Scott Adams game's own chrome window describing the current room —
     // unrelated to our map pane's Room Panel below, hence the `scott_` prefix
@@ -964,6 +965,7 @@ mod tests {
         "warning_marker",
         "input_text",
         "input_prompt",
+        "input_submit",
         "upper_window_border",
         "scott_room_panel",
         "palette_query",

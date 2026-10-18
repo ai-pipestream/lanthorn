@@ -2966,6 +2966,9 @@ pub struct AppState {
     /// layout the input code cannot see. `None` before the first frame, or when the command bar is
     /// hidden.
     pub(crate) input_text_origin: std::cell::Cell<Option<(u16, u16)>>,
+    /// Screen rect of the command bar's send button (SQ-1801), published by the renderer each
+    /// frame the button is drawn and `None` otherwise (empty line, char mode, no command bar).
+    pub(crate) input_submit_rect: std::cell::Cell<Option<ratatui::layout::Rect>>,
     /// Size `(cols, rows)` of the map pane's inner content, captured by the renderer each frame
     /// so `Action::Recenter` can centre against the pane the player is actually looking at
     /// (SQ-0349).
@@ -4066,6 +4069,7 @@ impl Default for AppState {
             render_job: std::cell::RefCell::new(None),
             render_steps: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             input_text_origin: std::cell::Cell::new(None),
+            input_submit_rect: std::cell::Cell::new(None),
             map_pane_size: std::cell::Cell::new(None),
             modal_list_viewport: 0,
             input: crate::text_field::TextField::default(),
@@ -6474,6 +6478,28 @@ impl AppState {
         }
         let cell = (col - x0) as usize;
         Some(crate::textwidth::col_to_char_idx(self.input.as_str(), cell).min(self.input.char_len()))
+    }
+
+    /// The command bar's send button rect as last drawn, if it is on screen (SQ-1801).
+    pub fn input_submit_area(&self) -> Option<ratatui::layout::Rect> {
+        self.input_submit_rect.get()
+    }
+
+    /// Is `(col, row)` on the command bar's send button (SQ-1801)?
+    ///
+    /// The rect is the renderer's, so this is only true while the button is actually on screen:
+    /// the renderer publishes `None` for an empty line, char mode and an off command bar, and the
+    /// guards here cover the frames in between (a stale rect after the line is cleared, a modal
+    /// covering the bar).
+    pub fn input_submit_hit(&self, col: u16, row: u16) -> bool {
+        self.config.command_bar
+            && !self.char_mode
+            && !self.event_wait
+            && !self.input.value.is_empty()
+            && !self.any_modal_overlay_open()
+            && self.input_submit_rect.get().is_some_and(|r| {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            })
     }
 
     /// Clear the current autocomplete suggestions.

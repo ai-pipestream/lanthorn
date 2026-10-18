@@ -950,6 +950,24 @@ pub fn room_dock_mouse_action(
     Some(Action::None)
 }
 
+/// The action a mouse event on the command bar's send button means (SQ-1801): a left-press on
+/// it is exactly Enter, so it yields the same `Action::SubmitCommand` the Enter key does and the
+/// run loop's one submit arm handles both. `None` for everything else — including a click on the
+/// bar's text, which keeps placing the caret.
+pub fn submit_button_action(
+    state: &AppState,
+    m: &crossterm::event::MouseEvent,
+) -> Option<Action> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+        && state.input_submit_hit(m.column, m.row)
+    {
+        Some(Action::SubmitCommand(state.input.value.clone()))
+    } else {
+        None
+    }
+}
+
 /// Per-modal button-to-action mapping for the config screen.
 /// Maps a `ButtonId` click (or the close [X] hit) to the appropriate `Action`.
 fn config_dialog_action(
@@ -12298,6 +12316,51 @@ mod tests {
             matches!(action, Action::Autocomplete),
             "a showing completion wins over CursorToClick, got {:?}", action
         );
+    }
+
+    /// SQ-1801: a left-press on the command bar's published send-button rect is Enter —
+    /// the very same `SubmitCommand` carrying the typed line (slash commands included) —
+    /// while a press on the bar's text still places the caret.
+    #[test]
+    fn left_click_on_the_send_button_submits_like_enter_and_the_text_still_places_the_caret() {
+        use crossterm::event::MouseEventKind;
+
+        let mut s = AppState::default();
+        s.config.command_bar = true;
+        s.input.set("/help", true);
+        // Text starts at column 85 (inside story_rect), the button is the last column.
+        s.input_text_origin.set(Some((85, 5)));
+        s.input_submit_rect.set(Some(ratatui::layout::Rect::new(117, 5, 1, 1)));
+
+        let down = |col, row| mouse_event(MouseEventKind::Down(MouseButton::Left), col, row, KeyModifiers::NONE);
+        let enter = match key_to_command(&s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyResolve::Action(a) => a,
+            _ => panic!("Enter should resolve to an action"),
+        };
+        let click = submit_button_action(&s, &down(117, 5)).expect("the button submits");
+        assert!(
+            matches!((&click, &enter), (Action::SubmitCommand(a), Action::SubmitCommand(b)) if a == b && a == "/help"),
+            "click {:?} must equal Enter {:?}", click, enter
+        );
+
+        // Beside the button, or on the text: not a submit; the text keeps the caret.
+        assert!(submit_button_action(&s, &down(116, 5)).is_none());
+        assert!(submit_button_action(&s, &down(117, 4)).is_none());
+        assert!(submit_button_action(&s, &down(87, 5)).is_none());
+        let action = mouse_to_action(&s, down(87, 5), map_rect(), story_rect(), &[], &None);
+        assert!(matches!(action, Action::CursorToClick(87, 5)), "text click keeps the caret, got {:?}", action);
+
+        // Only the left press: release and right-press do nothing.
+        assert!(submit_button_action(&s, &mouse_event(MouseEventKind::Up(MouseButton::Left), 117, 5, KeyModifiers::NONE)).is_none());
+        assert!(submit_button_action(&s, &mouse_event(MouseEventKind::Down(MouseButton::Right), 117, 5, KeyModifiers::NONE)).is_none());
+
+        // A stale rect never submits an empty line, a hidden prompt, or under a modal.
+        let mut empty = AppState::default();
+        empty.config.command_bar = true;
+        empty.input_submit_rect.set(Some(ratatui::layout::Rect::new(117, 5, 1, 1)));
+        assert!(submit_button_action(&empty, &down(117, 5)).is_none(), "empty line");
+        s.char_mode = true;
+        assert!(submit_button_action(&s, &down(117, 5)).is_none(), "char mode");
     }
 
     /// With no completion showing, a click in the story pane keeps today's

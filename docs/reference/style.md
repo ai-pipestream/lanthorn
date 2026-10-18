@@ -192,6 +192,7 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `warning_marker` | Elements | Style | `alert` |  | |
 | `input_text` | Elements | Style | `text` |  | |
 | `input_prompt` | Elements | Style | `text` |  | |
+| `input_submit` | Elements | Style | `text` |  | |
 | `upper_window_border` | Elements | Style | `line` |  | |
 | `scott_room_panel` | Elements | Style | `accent` | `reversed` | |
 | `palette_query` | Elements | Style | `text` |  | |

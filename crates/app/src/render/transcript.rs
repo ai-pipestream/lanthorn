@@ -2302,6 +2302,7 @@ fn render_input_content(
     }
     let w = region.width as usize;
     let input_y = region.y;
+    state.input_submit_rect.set(None);
 
     // The "> " prompt and the typed text are separately styleable (patched over
     // the normal style, so an unset selector renders identically to before).
@@ -2318,7 +2319,18 @@ fn render_input_content(
     let prefix_trunc = truncate_line(&prefix, w);
     draw_str_clipped(buf, region.x, input_y, prefix_trunc, prompt_style, region);
     let text_x = region.x + prefix_trunc.chars().count() as u16;
-    let text_w = w.saturating_sub(prefix_trunc.chars().count());
+    let mut text_w = w.saturating_sub(prefix_trunc.chars().count());
+    // The command bar's send button (SQ-1801): one glyph at the right edge, only
+    // while there is a line to send. The text gives up the glyph's column and a
+    // gap column, so nothing the player typed is ever drawn under it.
+    let show_submit = !state.input.value.is_empty() && text_w >= 3;
+    if show_submit {
+        text_w -= 2;
+        let sx = region.right() - 1;
+        let submit_style = text_style.patch(state.colors.theme.get("input_submit").style);
+        draw_str_clipped(buf, sx, input_y, &state.symbols.controls.submit.to_string(), submit_style, region);
+        state.input_submit_rect.set(Some(Rect::new(sx, input_y, 1, 1)));
+    }
     // The typed line is measured and drawn in CELLS (SQ-0655): a wide glyph the
     // player typed or pasted takes two, and the caret — plus the click that places
     // it (`input_click_index`) — has to land on the same columns the text does.
@@ -2333,7 +2345,7 @@ fn render_input_content(
     let ghost = ghost_completion(state);
     if let Some(g) = &ghost {
         let gx = text_x + input_cells;
-        let gw = region.right().saturating_sub(gx) as usize;
+        let gw = (text_x as usize + text_w).saturating_sub(gx as usize);
         let g_trunc = crate::textwidth::truncate_to_cols(g, gw);
         draw_str_cells(buf, gx, input_y, g_trunc, state.colors.theme.get("suggestion").style, region);
     }
@@ -6229,6 +6241,91 @@ mod tests {
         }
         assert_eq!(prompt_fg, Some(Color::Green), "'>' uses input_prompt style");
         assert_eq!(text_fg, Some(Color::Red), "typed text uses input_text style");
+    }
+
+    // ── The command bar's send button (SQ-1801) ───────────────────────────────
+
+    /// Render a 40x6 frame with the command bar on and `typed` in the line;
+    /// returns the buffer and the state (so the published rect can be read).
+    fn render_bar(typed: &str, boxed: bool, tweak: impl FnOnce(&mut AppState)) -> (Buffer, AppState) {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = true;
+        state.focus = Focus::Game;
+        state.input.set(typed, true);
+        if boxed {
+            state.colors.input_line_sides =
+                crate::render::paneframe::PaneSides::all(BorderStyle::Single);
+        }
+        tweak(&mut state);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+        (buf, state)
+    }
+
+    fn glyph_cells(buf: &Buffer, ch: char) -> Vec<(u16, u16)> {
+        let s = ch.to_string();
+        let mut v = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf.cell((x, y)).is_some_and(|c| c.symbol() == s) {
+                    v.push((x, y));
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn submit_button_sits_at_the_right_edge_unboxed_and_boxed() {
+        let g = AppState::default().symbols.controls.submit;
+        // Unboxed: the bar is the last row, the button its last column.
+        let (buf, state) = render_bar("look", false, |_| {});
+        assert_eq!(glyph_cells(&buf, g), vec![(39, 5)], "unboxed: last column of the last row");
+        assert_eq!(state.input_submit_rect.get(), Some(Rect::new(39, 5, 1, 1)));
+        // Boxed: inside the frame, so one column in from the edge, on the content row.
+        let (buf, state) = render_bar("look", true, |_| {});
+        assert_eq!(glyph_cells(&buf, g), vec![(38, 4)], "boxed: last column inside the frame");
+        assert_eq!(state.input_submit_rect.get(), Some(Rect::new(38, 4, 1, 1)));
+    }
+
+    #[test]
+    fn submit_button_is_absent_when_there_is_nothing_to_send_or_no_prompt() {
+        let g = AppState::default().symbols.controls.submit;
+        let (buf, state) = render_bar("", false, |_| {});
+        assert!(glyph_cells(&buf, g).is_empty(), "empty line: no button");
+        assert_eq!(state.input_submit_rect.get(), None);
+        let (buf, state) = render_bar("look", false, |s| s.char_mode = true);
+        assert!(glyph_cells(&buf, g).is_empty(), "char mode hides the prompt and the button");
+        assert_eq!(state.input_submit_rect.get(), None);
+        let (buf, _) = render_bar("look", false, |s| s.event_wait = true);
+        assert!(glyph_cells(&buf, g).is_empty(), "event wait hides it too");
+        let (buf, state) = render_bar("look", false, |s| s.config.command_bar = false);
+        assert!(glyph_cells(&buf, g).is_empty(), "inline prompt mode gets no button");
+        assert_eq!(state.input_submit_rect.get(), None);
+    }
+
+    #[test]
+    fn long_input_is_cut_before_the_submit_button_not_drawn_under_it() {
+        let g = AppState::default().symbols.controls.submit;
+        let long = "x".repeat(80);
+        let (buf, _) = render_bar(&long, false, |_| {});
+        // "> " is 2 columns; the button takes the last, and one gap column precedes it.
+        assert_eq!(glyph_cells(&buf, g), vec![(39, 5)]);
+        let xs = glyph_cells(&buf, 'x');
+        assert_eq!(xs.iter().map(|&(x, _)| x).max(), Some(37), "text stops two columns short of the button");
+        assert_eq!(buf.cell((38, 5)).map(|c| c.symbol().to_string()), Some(" ".to_string()), "the gap stays blank");
+    }
+
+    #[test]
+    fn submit_button_takes_the_input_submit_style() {
+        let g = AppState::default().symbols.controls.submit;
+        let (buf, _) = render_bar("look", false, |s| {
+            s.colors.theme = theme_with_overrides(&[("input_submit", Color::Magenta)]);
+        });
+        let (x, y) = glyph_cells(&buf, g)[0];
+        assert_eq!(buf.cell((x, y)).map(|c| c.fg), Some(Color::Magenta));
     }
 
     // ── Inline-prompt mode (command_bar off) ──────────────────────────────────

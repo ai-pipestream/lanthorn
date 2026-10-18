@@ -30,6 +30,7 @@ while any such tag, or this Unreleased section, still exists.*
 ### Added
 
 - **`/report-bug` gathers what a bug report needs.** It shows a short summary — version, system, terminal, graphics, the game and its map — copies it for pasting into an issue, and saves a fuller report, including your commands this session, to your logs folder to attach.
+- **The command bar has a send button.** Once you have typed something, a small return-key mark appears at the right end of the bar; click it to send the line, exactly as if you had pressed Enter (slash commands work too). It uses a Nerd Font icon if you said yes to the font check, and a plain `↵` otherwise. Restyle it with the `input_submit` selector in `style.toml`.
 
 ### Fixed
 
