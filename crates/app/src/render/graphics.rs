@@ -1015,6 +1015,20 @@ pub fn v6_pixel_lock_applies(picker: &Picker) -> bool {
     picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
 }
 
+/// Whether this protocol's images are painted ABOVE the terminal's cells, so a
+/// dialog written into the cells beneath one is invisible (SQ-1796).
+///
+/// Sixel and iTerm2 draw a bitmap over the cell grid. Kitty, as this app drives it
+/// (`render_kitty_virtual`), places NO bitmap at all: the image is a field of unicode
+/// placeholder cells, so a dialog that overwrites those cells simply replaces them
+/// and wins; half-blocks is cells outright.
+pub fn protocol_paints_over_cells(picker: &Picker) -> bool {
+    matches!(
+        picker.protocol_type(),
+        ratatui_image::picker::ProtocolType::Sixel | ratatui_image::picker::ProtocolType::Iterm2
+    )
+}
+
 /// Whether this terminal may be sent a DEFLATED kitty transmission (SQ-0997).
 ///
 /// `o=z` is not a hint a terminal may ignore. One that cannot inflate refuses the

@@ -932,6 +932,15 @@ fn render_node(
             // canvas falls through to the image protocol (or a plain fill). (SQ-0332)
             if state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, false) {
                 // painted as cells
+            } else if state.any_modal_overlay_open()
+                && state.game_picker.as_ref().is_some_and(crate::render::graphics::protocol_paints_over_cells)
+            {
+                // SQ-1796: a dialog may have no graphics-free region to sit in (an
+                // all-art screen with the map off — see `dialog_bounds`), so it goes
+                // over the art; a sixel/iTerm2 bitmap would then cover it. Approximate
+                // the art as cells while the dialog is up, exactly as the v6 path does
+                // (see the `Layered` arm). Kitty needs none of this: its image IS cells.
+                state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, true);
             } else if let Some(picker) = state.game_picker.as_ref() {
                 let letterbox = state.colors.theme.get("graphics").style;
                 if state.glk_stretch {
@@ -2409,8 +2418,23 @@ pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect, state: 
     for g in graphics {
         bounds = subtract_rect(bounds, g);
     }
+    // SQ-1796: when the art leaves only a sliver (Kerkerkruip's opening menu: one
+    // graphics window fills the story pane, the map is off), the dialog got a
+    // 117x2 strip, `draw_hotkey_dialog` refused to draw into it, and a dialog whose
+    // keys all worked could not be seen. Avoiding art is a courtesy that needs room
+    // to be one; with none, the dialog goes over it (`render_node`'s Graphics arm
+    // makes that visible under sixel/iTerm2; under kitty the art is cells).
+    if (bounds.width as u32) * (bounds.height as u32) * MIN_DIALOG_ROOM_DIVISOR
+        < (frame.width as u32) * (frame.height as u32)
+    {
+        return frame;
+    }
     bounds
 }
+
+/// A graphics-free region smaller than `1/MIN_DIALOG_ROOM_DIVISOR` of the frame is not
+/// room for a dialog — see [`dialog_bounds`].
+const MIN_DIALOG_ROOM_DIVISOR: u32 = 4;
 
 /// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
 /// does), collecting every graphics leaf's rect.
@@ -14179,6 +14203,82 @@ mod tests {
         });
         let area = Rect::new(0, 0, 20, 12);
         assert_eq!(dialog_bounds(&model, area, area, &dialog_state()), Rect::new(0, 3, 20, 9));
+    }
+
+    /// SQ-1796: Kerkerkruip's opening menu is one graphics window filling the story
+    /// pane, with the map off. Carving it out of the frame left a 2-row sliver, which
+    /// `draw_hotkey_dialog` (min 6 rows) silently declined to draw into — an open
+    /// dialog nobody could see. With no room beside the art the dialog takes the frame.
+    #[test]
+    fn dialog_bounds_gives_the_frame_back_when_art_fills_the_pane() {
+        let model = model_with(graphics_node());
+        let frame = Rect::new(0, 0, 40, 12);
+        let story_area = Rect::new(1, 1, 38, 9); // inside the pane frame, as the app lays it out
+        assert_eq!(dialog_bounds(&model, story_area, frame, &dialog_state()), frame);
+        // And that frame is one the hotkey dialog really draws into.
+        let mut state = dialog_state();
+        state.overlays.hotkey_dialog = true;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 28));
+        let big = Rect::new(0, 0, 80, 28);
+        let model = model_with(graphics_node());
+        let bounds = dialog_bounds(&model, Rect::new(1, 1, 78, 24), big, &state);
+        assert_eq!(bounds, big);
+        assert!(crate::render::hotkeys::draw_hotkey_dialog(&state, bounds, &mut buf).is_some(), "the dialog draws");
+    }
+
+    /// The fallback must not undo the courtesy it is a fallback FOR: a game that
+    /// leaves real room (a sidebar, a banner) still keeps dialogs off its art.
+    /// (`dialog_bounds_excludes_*` above pin the exact rects; this pins the line.)
+    #[test]
+    fn dialog_bounds_still_avoids_art_when_a_quarter_of_the_frame_is_free() {
+        let model = model_with(graphics_node());
+        let frame = Rect::new(0, 0, 40, 12);
+        // Art covers cols 0..30 of 40: the free strip is exactly a quarter.
+        let bounds = dialog_bounds(&model, Rect::new(0, 0, 30, 12), frame, &dialog_state());
+        assert_eq!(bounds, Rect::new(30, 0, 10, 12));
+    }
+
+    /// SQ-1796, the other half: the dialog now goes over the art, so a protocol that
+    /// paints a bitmap ABOVE the cells (sixel, iTerm2) must not be emitting one under
+    /// it. Kitty is the control — its image is placeholder cells, which the dialog
+    /// replaces, so it keeps drawing the real picture.
+    #[test]
+    fn modal_over_art_drops_the_bitmap_only_where_the_bitmap_would_cover_it() {
+        use ratatui_image::picker::ProtocolType;
+        // A detailed canvas, so it is NOT approximated as cells on its own.
+        let mut img = image::RgbaImage::new(64, 64);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 4) as u8, (y * 4) as u8, ((x * y) % 251) as u8, 255]);
+        }
+        let node = WinNode::Graphics(crate::engine::GraphicsWindow {
+            win: 3, canvas: std::sync::Arc::new(img), version: 1, upscale: false, undrawn: false,
+        });
+        let model = model_with(node);
+        let area = Rect::new(0, 0, 20, 10);
+        let draw = |protocol: ProtocolType, modal: bool| -> Vec<String> {
+            let mut state = dialog_state();
+            state.game_picker = Some({
+                let mut p = ratatui_image::picker::Picker::halfblocks();
+                p.set_protocol_type(protocol);
+                p
+            });
+            state.overlays.hotkey_dialog = modal;
+            let mut buf = Buffer::empty(area);
+            let (mut links, mut win_rects) = (Vec::new(), Vec::new());
+            render_node(&model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors);
+            buf.content().iter().map(|c| c.symbol().to_string()).collect()
+        };
+        let has_bitmap = |cells: &[String]| cells.iter().any(|s| s.contains('\x1b'));
+        let has_placeholder = |cells: &[String]| cells.iter().any(|s| s.contains('\u{10EEEE}'));
+
+        let sixel_open = draw(ProtocolType::Sixel, false);
+        assert!(has_bitmap(&sixel_open), "non-vacuity: with no dialog sixel emits its bitmap");
+        let sixel_modal = draw(ProtocolType::Sixel, true);
+        assert!(!has_bitmap(&sixel_modal), "a sixel bitmap would be painted over the dialog");
+
+        let kitty_open = draw(ProtocolType::Kitty, false);
+        let kitty_modal = draw(ProtocolType::Kitty, true);
+        assert!(has_placeholder(&kitty_open) && has_placeholder(&kitty_modal), "kitty's art is placeholder cells either way");
     }
 
     #[test]

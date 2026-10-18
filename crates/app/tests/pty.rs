@@ -32,6 +32,8 @@ mod gallery_manifest;
 mod pty_emitted_stream;
 #[path = "suites/pty_flank_alpha_seam.rs"]
 mod pty_flank_alpha_seam;
+#[path = "suites/pty_dialog_over_art.rs"]
+mod pty_dialog_over_art;
 #[path = "suites/pty_narcolepsy_bubble.rs"]
 mod pty_narcolepsy_bubble;
 #[path = "suites/pty_hangup_autosave.rs"]

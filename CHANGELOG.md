@@ -31,6 +31,10 @@ while any such tag, or this Unreleased section, still exists.*
 
 - **`/report-bug` gathers what a bug report needs.** It shows a short summary — version, system, terminal, graphics, the game and its map — copies it for pasting into an issue, and saves a fuller report, including your commands this session, to your logs folder to attach.
 
+### Fixed
+
+- **Dialogs show over a game's pictures.** On screens that are all artwork, such as Kerkerkruip's opening menu, the Ctrl-P hotkey dialog opened but was never drawn, so you could not see it (and there is no `/` prompt there to fall back on). Dialogs now appear over the picture when there is no room beside it.
+
 ## v0.9.7 — 2026-10-16
 
 ### Highlights
