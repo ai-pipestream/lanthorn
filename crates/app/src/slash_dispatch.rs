@@ -943,8 +943,7 @@ fn bug_report_facts(
     story_rect: Rect,
     map_rect: Rect,
 ) -> app::bug_report::BugReportFacts {
-    use app::bug_report::{BugReportFacts, GameFacts, GraphicsFacts, MapFacts, SettingsFacts};
-    use app::interpreter::ProfileSource;
+    use app::bug_report::{BugReportFacts, GraphicsFacts, SettingsFacts, SharedFacts, TerminalHostFacts};
 
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let mut term_program = env("TERM_PROGRAM");
@@ -957,63 +956,24 @@ fn bug_report_facts(
     let config = &state.config;
     let has_game = !story_path.as_os_str().is_empty();
 
-    let (game, map, window_dump, map_json) = if has_game {
-        let walked = app::export_json::build_walked_story(session, story_bytes, story_path);
-        let ident = &walked.ident;
-        let is_z = ident.engine == "z-machine";
-        let game = GameFacts {
-            title: state.title.clone(),
-            file: ident.file.clone(),
-            engine: ident.engine.to_string(),
-            format_version: if is_z { story_bytes.first().copied() } else { None },
-            release: ident.release,
-            serial: ident.serial.clone(),
-            checksum: ident.checksum.clone(),
-            ifid: Some(state.ifid.clone()),
-            ifdb_tuid: app::hints_tab::game_ifdb_tuid(state, story_path),
-            disk_entry: state.source.disk_entry.clone(),
-            // The player-facing ZMSD name; the IBM PC advertises no number (the VM's
-            // own rule is 6 on v6, 1 elsewhere), so it is named as machine 6.
-            machine: is_z.then(|| {
-                use app::interpreter::InterpreterProfile;
-                match config.interpreter_profile.interpreter_number() {
-                    Some(n) => app::launch_options::interpreter_name(n).to_string(),
-                    None if config.interpreter_profile == InterpreterProfile::IbmPc => {
-                        app::launch_options::interpreter_name(6).to_string()
-                    }
-                    None => format!("{:?}", config.interpreter_profile),
-                }
-            }),
-            machine_source: is_z.then_some(match config.interpreter_source {
-                ProfileSource::Medium => "from the disk",
-                ProfileSource::Asked => "asked for",
-                ProfileSource::Fallback => "default",
-            }),
-        };
-        let shown = state.layout == app::state::Layout::Split;
-        let map = MapFacts {
-            rooms: mapper.graph.rooms().count(),
-            connections: mapper.graph.connections().len(),
-            layers: mapper.graph.layers().len(),
-            current_room: mapper.graph.current().and_then(|id| mapper.graph.room(id)).map(|r| r.name.clone()),
-            pane: shown.then_some((map_rect.width, map_rect.height)),
-            zoom: format!("{:?}", state.zoom),
-            shown,
-        };
-        (
-            Some(game),
-            Some(map),
-            Some(window_dump_lines(state, session, story_rect)),
-            Some(app::export_json::render_walked_json(&mapper.graph, &walked)),
-        )
-    } else {
-        (None, None, None, None)
-    };
+    let shown = state.layout == app::state::Layout::Split;
+    let session_facts = app::bug_report::gather_session_facts(&app::bug_report::SessionInputs {
+        session,
+        mapper,
+        story_bytes,
+        story_path,
+        title: &state.title,
+        ifid: &state.ifid,
+        ifdb_tuid: if has_game { app::hints_tab::game_ifdb_tuid(state, story_path) } else { None },
+        disk_entry: state.source.disk_entry.clone(),
+        profile: config.interpreter_profile,
+        profile_source: config.interpreter_source,
+        map_pane: shown.then_some((map_rect.width, map_rect.height)),
+        zoom: format!("{:?}", state.zoom),
+        commands: &state.command_history,
+    });
 
-    BugReportFacts {
-        version: buildinfo::LONG.to_string(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
+    let host = TerminalHostFacts {
         term_program,
         term_program_version: env("TERM_PROGRAM_VERSION"),
         term: env("TERM"),
@@ -1034,16 +994,25 @@ fn bug_report_facts(
             sound: config.enable_sound,
             audio_device: state.audio.is_some(),
         },
-        game,
-        map,
-        report_file: crate::abbreviate_home(&app::export::bug_report_path(config.logs_root())),
-        save_error: None,
-        home: app::user_dirs::home_dir().map(|h| h.display().to_string()),
-        timestamp: jiff::Timestamp::now().to_string(),
         terminal_dump: app::terminal_dump::dump_text(&snap),
-        window_dump,
-        map_json,
-        commands: state.command_history.clone(),
+        window_dump: has_game.then(|| window_dump_lines(state, session, story_rect)),
+    };
+
+    BugReportFacts {
+        shared: SharedFacts {
+            version: buildinfo::LONG.to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            timestamp: jiff::Timestamp::now().to_string(),
+            home: app::user_dirs::home_dir().map(|h| h.display().to_string()),
+            game: session_facts.game,
+            map: session_facts.map,
+            map_json: session_facts.map_json,
+            commands: session_facts.commands,
+            report_file: crate::abbreviate_home(&app::export::bug_report_path(config.logs_root())),
+            save_error: None,
+        },
+        host: host.into_host_part(),
     }
 }
 
@@ -1063,7 +1032,7 @@ fn report_bug(
     let mut report = app::bug_report::build(&facts);
     let saved = app::export::write_bug_report(state.config.logs_root(), &report.full);
     if let Err(e) = &saved {
-        facts.save_error = Some(e.to_string());
+        facts.shared.save_error = Some(e.to_string());
         report = app::bug_report::build(&facts);
     }
     for line in report.summary.lines() {
