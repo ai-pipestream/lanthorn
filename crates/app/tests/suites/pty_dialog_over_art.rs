@@ -25,8 +25,6 @@ fn the_dialog_over_art_test_is_unix_only() {
 }
 
 #[cfg(unix)]
-use std::cell::Cell;
-#[cfg(unix)]
 use std::rc::Rc;
 #[cfg(unix)]
 use std::time::Duration;
@@ -62,31 +60,25 @@ fn hotkey_dialog_shows_over_an_all_art_screen_under_kitty() {
     spec.cols = COLS;
     spec.rows = ROWS;
     // The menu ANIMATES, so the pty is never quiet for the harness's usual 120 ms and a
-    // `Key::Wait` (which waits for quiet) would never release the keystroke. Stage by
-    // content instead: art flowing -> Ctrl-P -> a few more frames -> end on the ceiling.
+    // `Key::Wait` (which waits for quiet) would never release the keystroke. Stage on
+    // CONTENT, never on byte throughput (a slow runner emits less per second): the art's
+    // placeholder cells are on screen -> Ctrl-P. No second stage: an open dialog disarms
+    // the game's timer, so the stream goes quiet and the run ends on the harness's own
+    // tail; a missing dialog keeps animating and the ceiling ends it, and the oracle
+    // assertion below then names the symptom.
     spec.quiet = Duration::ZERO;
-    let booted_at = Rc::new(Cell::new(usize::MAX));
-    let (mark, check) = (booted_at.clone(), booted_at.clone());
     spec.keys = vec![
         driver::Key::WaitUntil {
-            label: "the menu's art flowing",
-            ready: Rc::new(move |bytes: &[u8]| {
-                let up = bytes.len() > 400_000;
-                if up && mark.get() == usize::MAX {
-                    mark.set(bytes.len());
-                }
-                up
+            label: "the menu's art on screen (placeholder cells)",
+            ready: Rc::new(|bytes: &[u8]| {
+                // U+10EEEE, kitty's placeholder, is f4 8e bb ae in UTF-8.
+                bytes.windows(4).filter(|w| *w == [0xf4, 0x8e, 0xbb, 0xae]).take(1000).count() >= 1000
             }),
-            cap: Duration::from_secs(20),
+            cap: Duration::from_secs(60),
         },
         driver::Key::Bytes(vec![0x10]),
-        driver::Key::WaitUntil {
-            label: "frames drawn after Ctrl-P",
-            ready: Rc::new(move |bytes: &[u8]| bytes.len() > check.get().saturating_add(300_000)),
-            cap: Duration::from_secs(20),
-        },
     ];
-    spec.timeout = Duration::from_secs(25);
+    spec.timeout = Duration::from_secs(90);
     let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
     let neg = cap.negotiated();
     assert!(neg.is_kitty(), "the capture must exercise the kitty path: {}", neg.explain());
