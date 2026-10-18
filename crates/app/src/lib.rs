@@ -169,6 +169,7 @@ pub mod styles;
 pub mod symbols;
 pub mod term_colors;
 pub mod terminal_dump;
+pub mod bug_report;
 pub mod text_field;
 pub mod textwidth;
 pub mod theme;

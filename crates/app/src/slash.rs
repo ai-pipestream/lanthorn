@@ -91,6 +91,10 @@ pub enum SlashOutcome {
     /// explain the traffic (SQ-0994). Printed to the transcript and mirrored to
     /// `dump-terminal.log` in the logs folder. Handled in `slash_dispatch`.
     DumpTerminal,
+    /// Gather what a bug report needs: show a short summary in the transcript,
+    /// copy it to the clipboard, and write the full report to `report-bug.txt` in
+    /// the logs folder (SQ-1795). Handled in `slash_dispatch`.
+    ReportBug,
     /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
     /// (needs AppState + the engine's debugger capability).
     ToggleDebug,
@@ -731,6 +735,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-terminal", category: Category::Help, context: Context::Global,
         usage: "dump-terminal", description: "dump this terminal's detected protocol, cell size, capabilities and traffic — here and to dump-terminal.log in your logs folder",
         dispatch: |_| SlashOutcome::DumpTerminal },
+    CommandSpec { name: "report-bug", category: Category::Help, context: Context::Global,
+        usage: "report-bug", description: "gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder",
+        dispatch: |_| SlashOutcome::ReportBug },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",
         dispatch: |_| SlashOutcome::ToggleDebug },
@@ -1282,7 +1289,8 @@ mod tests {
         // `scroll-document` for the Journal's Documents tab, and made
         // `create-documents-folder` a second command both worlds share.
         // SQ-1707 added `set-glk-fit`: stretch/aspect fit for design-size Glulx games.
-        assert_eq!(COMMANDS.len(), 101, "registry must match the spec's Full command table");
+        // SQ-1795 added `report-bug`: the bug report's facts, summarised and saved.
+        assert_eq!(COMMANDS.len(), 102,"registry must match the spec's Full command table");
     }
 
     /// SQ-1237 unified the panel vocabulary — `command band` became `command
@@ -1488,6 +1496,15 @@ mod tests {
         assert!(matches!(parse("dump-terminal", '/'), SlashOutcome::DumpTerminal));
         assert!(spec.description.contains("dump-terminal.log"), "{}", spec.description);
         assert_eq!(spec.category, Category::Help);
+    }
+
+    /// SQ-1795.
+    #[test]
+    fn report_bug_command_parses() {
+        let spec = find_command("report-bug").expect("report-bug is registered");
+        assert!(matches!(parse("report-bug", '/'), SlashOutcome::ReportBug));
+        assert_eq!(spec.category, Category::Help);
+        assert_eq!(spec.context, Context::Global);
     }
 
     #[test]

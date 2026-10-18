@@ -124,81 +124,7 @@ pub(crate) fn dispatch_slash_outcome(
             // all "NOT DRAWN this frame" — the one thing a reader is here to learn.
             // The game halves stay live: a modal runs no game code, so the window
             // table and the model still describe the frame being reported.
-            let (frame, frame_line) = state.v6_dump_frame();
-            let cells = frame.as_ref().map(|f| f.cells.clone()).unwrap_or_default();
-            let history: Vec<String> = state
-                .v6_path_log
-                .borrow()
-                .iter()
-                .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
-                .collect();
-            let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
-                Some(gs) if !gs.v6_window_dump(&cells, Some(&state.v6_text)).is_empty() => {
-                    gs.v6_window_dump(&cells, Some(&state.v6_text))
-                }
-                _ => session.window_dump(),
-            };
-            out.push(frame_line);
-            // The ring's plan and clip belong to the frame that drew them, so they
-            // ride the same snapshot; with no game frame recorded there is nothing
-            // honest to print (SQ-0756).
-            let clip = match frame.as_ref() {
-                None => "unavailable — no game frame recorded".to_string(),
-                Some(f) => match f.ring_clip {
-                    Some((art, row)) if art == u16::MAX => {
-                        format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", f.ring_plan)
-                    }
-                    Some((art, row)) => format!(
-                        "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
-                        f.ring_plan
-                    ),
-                    None => format!("plan {}, ring not clipped", f.ring_plan),
-                },
-            };
-            out.push(format!("  ring: {clip}"));
-            // SQ-0588: windows whose recorded ops did not reproduce their canvas at
-            // save time. Each is a draw path we are not recording — the archive fell
-            // back to a PNG for it, so it restores correctly but cannot be recoloured
-            // by a later palette change.
-            let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
-            for msg in &save_diags {
-                out.push(format!("  save: {msg}"));
-            }
-            // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
-            // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
-            // among them — so a wrong value here makes the game's own artwork come out
-            // the wrong size, with nothing downstream to blame. Two ways it can be
-            // wrong, and this line tells them apart: with no image protocol we fall
-            // back to a hardcoded 8x16 regardless of the real font, and where there IS
-            // one the Picker reports LOGICAL points, which on a 2x HiDPI display are
-            // half the device pixels the terminal actually paints (the same mismatch
-            // that keeps pixel-precise mouse reporting switched off, see startup.rs).
-            // Compare `implies` against the real window size to tell which.
-            let (raw_w, raw_h, src) = match state.game_picker.as_ref() {
-                Some(p) => {
-                    let f = p.font_size();
-                    (f.width as u32, f.height as u32, "terminal-reported")
-                }
-                None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
-            };
-            // What the game actually sees, after SQ-0593 scaling. Reporting the raw
-            // terminal value alone was misleading the moment the divisor existed.
-            let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
-            out.push(format!(
-                "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
-                 → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
-                story_rect.width, story_rect.height,
-                cw * story_rect.width as u32, ch * story_rect.height as u32
-            ));
-            let encodes = state.graphics_render.borrow().band_encodes;
-            out.push(format!("  band uploads since launch: {encodes}"));
-            let bands = state.graphics_render.borrow().band_log.clone();
-            for b in bands {
-                out.push(format!("  {b}"));
-            }
-            if !history.is_empty() {
-                out.push(format!("  recent render paths (oldest first): {}", history.join(" · ")));
-            }
+            let out = window_dump_lines(state, &*session, story_rect);
             for line in &out {
                 state.push_transcript_internal(line, TranscriptKind::Meta);
             }
@@ -273,6 +199,9 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => format!("  [dump log failed: {e}]"),
             };
             state.push_transcript_internal(&msg, TranscriptKind::Meta);
+        }
+        SlashOutcome::ReportBug => {
+            report_bug(state, mapper, &*session, story_bytes, story_path, story_rect, map_rect);
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
@@ -917,6 +846,243 @@ pub(crate) fn dispatch_slash_outcome(
         }
     }
     false
+}
+
+/// The lines `/dump-windows` prints: the engine's window dump merged with the last
+/// game frame's render mapping, ring plan, save diagnostics and cell size. Shared by
+/// `/report-bug` (SQ-1795) so the two cannot drift.
+fn window_dump_lines(state: &AppState, session: &dyn Engine, story_rect: Rect) -> Vec<String> {
+    let (frame, frame_line) = state.v6_dump_frame();
+    let cells = frame.as_ref().map(|f| f.cells.clone()).unwrap_or_default();
+    let history: Vec<String> = state
+        .v6_path_log
+        .borrow()
+        .iter()
+        .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
+        .collect();
+    let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
+        Some(gs) if !gs.v6_window_dump(&cells, Some(&state.v6_text)).is_empty() => {
+            gs.v6_window_dump(&cells, Some(&state.v6_text))
+        }
+        _ => session.window_dump(),
+    };
+    out.push(frame_line);
+    // The ring's plan and clip belong to the frame that drew them, so they
+    // ride the same snapshot; with no game frame recorded there is nothing
+    // honest to print (SQ-0756).
+    let clip = match frame.as_ref() {
+        None => "unavailable — no game frame recorded".to_string(),
+        Some(f) => match f.ring_clip {
+            Some((art, row)) if art == u16::MAX => {
+                format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", f.ring_plan)
+            }
+            Some((art, row)) => format!(
+                "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
+                f.ring_plan
+            ),
+            None => format!("plan {}, ring not clipped", f.ring_plan),
+        },
+    };
+    out.push(format!("  ring: {clip}"));
+    // SQ-0588: windows whose recorded ops did not reproduce their canvas at
+    // save time. Each is a draw path we are not recording — the archive fell
+    // back to a PNG for it, so it restores correctly but cannot be recoloured
+    // by a later palette change.
+    let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
+    for msg in &save_diags {
+        out.push(format!("  save: {msg}"));
+    }
+    // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
+    // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
+    // among them — so a wrong value here makes the game's own artwork come out
+    // the wrong size, with nothing downstream to blame. Two ways it can be
+    // wrong, and this line tells them apart: with no image protocol we fall
+    // back to a hardcoded 8x16 regardless of the real font, and where there IS
+    // one the Picker reports LOGICAL points, which on a 2x HiDPI display are
+    // half the device pixels the terminal actually paints (the same mismatch
+    // that keeps pixel-precise mouse reporting switched off, see startup.rs).
+    // Compare `implies` against the real window size to tell which.
+    let (raw_w, raw_h, src) = match state.game_picker.as_ref() {
+        Some(p) => {
+            let f = p.font_size();
+            (f.width as u32, f.height as u32, "terminal-reported")
+        }
+        None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
+    };
+    // What the game actually sees, after SQ-0593 scaling. Reporting the raw
+    // terminal value alone was misleading the moment the divisor existed.
+    let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
+    out.push(format!(
+        "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
+         → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
+        story_rect.width, story_rect.height,
+        cw * story_rect.width as u32, ch * story_rect.height as u32
+    ));
+    let encodes = state.graphics_render.borrow().band_encodes;
+    out.push(format!("  band uploads since launch: {encodes}"));
+    let bands = state.graphics_render.borrow().band_log.clone();
+    for b in bands {
+        out.push(format!("  {b}"));
+    }
+    if !history.is_empty() {
+        out.push(format!("  recent render paths (oldest first): {}", history.join(" · ")));
+    }
+    out
+}
+
+/// Gather the facts `/report-bug` reports (SQ-1795). Reads only state something
+/// already tracks, and reuses the producers `/dump-terminal`, `/dump-windows` and
+/// `/export-json` use; the formatting and privacy rules are in
+/// [`app::bug_report::build`].
+fn bug_report_facts(
+    state: &AppState,
+    mapper: &Mapper,
+    session: &dyn Engine,
+    story_bytes: &[u8],
+    story_path: &std::path::Path,
+    story_rect: Rect,
+    map_rect: Rect,
+) -> app::bug_report::BugReportFacts {
+    use app::bug_report::{BugReportFacts, GameFacts, GraphicsFacts, MapFacts, SettingsFacts};
+    use app::interpreter::ProfileSource;
+
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut term_program = env("TERM_PROGRAM");
+    if term_program.is_none() && std::env::var_os("WT_SESSION").is_some() {
+        term_program = Some("Windows Terminal".to_string());
+    }
+    let present = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
+
+    let snap = terminal_snapshot(state, session, story_rect);
+    let config = &state.config;
+    let has_game = !story_path.as_os_str().is_empty();
+
+    let (game, map, window_dump, map_json) = if has_game {
+        let walked = app::export_json::build_walked_story(session, story_bytes, story_path);
+        let ident = &walked.ident;
+        let is_z = ident.engine == "z-machine";
+        let game = GameFacts {
+            title: state.title.clone(),
+            file: ident.file.clone(),
+            engine: ident.engine.to_string(),
+            format_version: if is_z { story_bytes.first().copied() } else { None },
+            release: ident.release,
+            serial: ident.serial.clone(),
+            checksum: ident.checksum.clone(),
+            ifid: Some(state.ifid.clone()),
+            ifdb_tuid: app::hints_tab::game_ifdb_tuid(state, story_path),
+            disk_entry: state.source.disk_entry.clone(),
+            // The player-facing ZMSD name; the IBM PC advertises no number (the VM's
+            // own rule is 6 on v6, 1 elsewhere), so it is named as machine 6.
+            machine: is_z.then(|| {
+                use app::interpreter::InterpreterProfile;
+                match config.interpreter_profile.interpreter_number() {
+                    Some(n) => app::launch_options::interpreter_name(n).to_string(),
+                    None if config.interpreter_profile == InterpreterProfile::IbmPc => {
+                        app::launch_options::interpreter_name(6).to_string()
+                    }
+                    None => format!("{:?}", config.interpreter_profile),
+                }
+            }),
+            machine_source: is_z.then_some(match config.interpreter_source {
+                ProfileSource::Medium => "from the disk",
+                ProfileSource::Asked => "asked for",
+                ProfileSource::Fallback => "default",
+            }),
+        };
+        let shown = state.layout == app::state::Layout::Split;
+        let map = MapFacts {
+            rooms: mapper.graph.rooms().count(),
+            connections: mapper.graph.connections().len(),
+            layers: mapper.graph.layers().len(),
+            current_room: mapper.graph.current().and_then(|id| mapper.graph.room(id)).map(|r| r.name.clone()),
+            pane: shown.then_some((map_rect.width, map_rect.height)),
+            zoom: format!("{:?}", state.zoom),
+            shown,
+        };
+        (
+            Some(game),
+            Some(map),
+            Some(window_dump_lines(state, session, story_rect)),
+            Some(app::export_json::render_walked_json(&mapper.graph, &walked)),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
+    BugReportFacts {
+        version: buildinfo::LONG.to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        term_program,
+        term_program_version: env("TERM_PROGRAM_VERSION"),
+        term: env("TERM"),
+        tmux: present("TMUX"),
+        ssh: present("SSH_CONNECTION").or_else(|| present("SSH_TTY")),
+        graphics: GraphicsFacts::from_snapshot(&snap),
+        settings: SettingsFacts {
+            images: config.images,
+            v6_render: format!("{:?}", config.v6_render).to_lowercase(),
+            pixel_lock: config.v6_pixel_lock,
+            game_colours: config.honor_game_colours,
+            // A style may be a path; only its file name is the player's to share.
+            style: config.style.as_deref().map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .map_or_else(|| s.to_string(), |n| n.to_string_lossy().into_owned())
+            }),
+            sound: config.enable_sound,
+            audio_device: state.audio.is_some(),
+        },
+        game,
+        map,
+        logs_dir: crate::abbreviate_home(config.logs_root()),
+        home: app::user_dirs::home_dir().map(|h| h.display().to_string()),
+        timestamp: jiff::Timestamp::now().to_string(),
+        terminal_dump: app::terminal_dump::dump_text(&snap),
+        window_dump,
+        map_json,
+        commands: state.command_history.clone(),
+    }
+}
+
+/// `/report-bug` (SQ-1795): summary to the transcript and the clipboard, the full
+/// report to `report-bug.txt` in the logs folder.
+fn report_bug(
+    state: &mut AppState,
+    mapper: &Mapper,
+    session: &dyn Engine,
+    story_bytes: &[u8],
+    story_path: &std::path::Path,
+    story_rect: Rect,
+    map_rect: Rect,
+) {
+    let facts = bug_report_facts(state, mapper, session, story_bytes, story_path, story_rect, map_rect);
+    let report = app::bug_report::build(&facts);
+    for line in report.summary.lines() {
+        state.push_transcript_internal(line, TranscriptKind::Meta);
+    }
+    // The clipboard goes out the way a mouse-selection copy does: OSC 52 on
+    // stdout. Terminals that refuse it simply ignore it, hence the wording below.
+    {
+        use std::io::Write;
+        let seq = app::clipboard::osc52_copy_sequence(&report.summary);
+        let mut out = std::io::stdout();
+        let _ = out.write_all(seq.as_bytes());
+        let _ = out.flush();
+    }
+    let copied = "Copied to your clipboard (if your terminal allows it; copy it from above if not).";
+    let msg = match app::export::write_bug_report(state.config.logs_root(), &report.full) {
+        Ok(p) => format!(
+            "{copied} Full report, including your commands this session: {} — attach it to the issue.",
+            crate::abbreviate_home(&p)
+        ),
+        Err(e) => format!(
+            "{copied} The full report could not be saved to {}: {e}",
+            crate::abbreviate_home(&app::export::bug_report_path(state.config.logs_root()))
+        ),
+    };
+    state.push_transcript_internal(&msg, TranscriptKind::Meta);
 }
 
 /// Gather everything `/dump-terminal` reports (SQ-0994).
@@ -1906,6 +2072,68 @@ mod debug_dispatch_tests {
         assert!(written.contains("=== /dump-terminal "), "stamped like every other dump: {written}");
         assert!(written.contains("graphics protocol: halfblocks"), "and carries the report: {written}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn dispatch_report_bug(state: &mut AppState, dir: &std::path::Path, story: &[u8], story_path: &std::path::Path) {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::ReportBug,
+            state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, dir, story, story_path,
+            Rect::new(0, 0, 40, 30), Rect::new(0, 0, 80, 24), true,
+        );
+        assert!(!should_break, "a diagnostic never breaks the run loop");
+    }
+
+    /// SQ-1795, real-game smoke: a booted fixture's identity lands in the summary by
+    /// FILE NAME, the full report is written (overwritten, not appended), and the
+    /// closing transcript line names it.
+    #[test]
+    fn report_bug_names_the_game_and_writes_the_full_report() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
+        let Ok(bytes) = std::fs::read(&fixture) else { return }; // fixture absent: vacuous, like the other real-game suites
+        let dir = temp_dir("report-bug");
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.title = "Mini-Zork".into();
+        state.ifid = "ZCODE-34-871124-A3C7".into();
+        state.record_command("look");
+
+        dispatch_report_bug(&mut state, &dir, &bytes, &fixture);
+        dispatch_report_bug(&mut state, &dir, &bytes, &fixture);
+
+        let text = state.transcript.join("\n");
+        assert!(text.contains("game:     Mini-Zork · minizork-r34-s871124.z3 · Z-machine v3 r34 s871124"), "{text}");
+        assert!(text.contains("IFID ZCODE-34-871124-A3C7 · machine IBM PC (default)"), "{text}");
+        assert!(text.contains("0 rooms · 0 connections · 1 layer\n"), "{text}");
+        assert!(!text.contains(&*fixture.parent().unwrap().to_string_lossy()), "never the story's directory: {text}");
+        assert!(text.contains("Copied to your clipboard (if your terminal allows it; copy it from above if not). Full report, including your commands this session: "), "{text}");
+        assert!(text.contains("report-bug.txt — attach it to the issue."), "{text}");
+
+        let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");
+        assert_eq!(written.matches("== /dump-terminal ==").count(), 1, "overwritten, not appended");
+        assert!(written.contains("== window layout (/dump-windows) =="), "{written}");
+        assert!(written.contains("== map (lanthorn-map JSON) =="), "{written}");
+        assert!(written.contains("\nlook\n"), "the command typed this session: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no game, the game and map sections are simply absent.
+    #[test]
+    fn report_bug_works_with_no_game() {
+        let dir = temp_dir("report-bug-nogame");
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        dispatch_report_bug(&mut state, &dir, &[], std::path::Path::new(""));
+        let text = state.transcript.join("\n");
+        assert!(text.contains("lanthorn "), "{text}");
+        assert!(!text.contains("game:") && !text.contains("map:"), "{text}");
+        let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");
+        assert!(!written.contains("== map (lanthorn-map JSON) =="), "{written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

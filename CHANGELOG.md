@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Added
+
+- **`/report-bug` gathers what a bug report needs.** It shows a short summary — version, system, terminal, graphics, the game and its map — copies it for pasting into an issue, and saves a fuller report, including your commands this session, to your logs folder to attach.
+
 ## v0.9.7 — 2026-10-16
 
 ### Highlights
