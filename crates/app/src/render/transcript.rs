@@ -3048,6 +3048,11 @@ fn render_middle(
         }
     }
 
+    // The inline send button (SQ-1801) is republished below whenever it is drawn.
+    if !state.config.command_bar {
+        state.input_submit_rect.set(None);
+    }
+
     // ── Inline live input (command_bar off) ──────────────────────────────────
     // Draw the typed command + block cursor flush after the last transcript row
     // (the game's kept `>` prompt), so scrollback and the live line read as one
@@ -3115,11 +3120,32 @@ fn render_middle(
             // before the caret so the caret can sit on its first glyph.
             let drawn = input_trunc.chars().count();
             let ghost = ghost_completion(state);
+            let mut ghost_cells = 0u16;
             if let Some(g) = &ghost {
                 let gx = start_col + input_cells;
                 let gw = body_area.right().saturating_sub(gx) as usize;
                 let g_trunc = crate::textwidth::truncate_to_cols(g, gw);
-                draw_str_cells(buf, gx, row_y, g_trunc, state.colors.theme.get("suggestion").style, body_area);
+                ghost_cells = draw_str_cells(buf, gx, row_y, g_trunc, state.colors.theme.get("suggestion").style, body_area);
+            }
+            // The send button (SQ-1801): with the command panel open and a line typed,
+            // a submit glyph one gap cell after the text (after the hint too, and so
+            // after the caret cell at the end of the line). The inline line is cut,
+            // never wrapped, so "the last row" is this row; when it has no room left
+            // the glyph goes to the start of the next row if the viewport has one.
+            if state.command_band_visible() && !state.input.value.is_empty() {
+                let bx = start_col + input_cells + ghost_cells + 1;
+                let spot = if bx < body_area.right() {
+                    Some((bx, row_y))
+                } else if row_y + 1 < transcript_bottom {
+                    Some((body_area.x, row_y + 1))
+                } else {
+                    None
+                };
+                if let Some((sx, sy)) = spot {
+                    let submit_style = text_style.patch(state.colors.theme.get("input_submit").style);
+                    draw_str_clipped(buf, sx, sy, &state.symbols.controls.submit.to_string(), submit_style, body_area);
+                    state.input_submit_rect.set(Some(Rect::new(sx, sy, 1, 1)));
+                }
             }
             // Draw the caret where it actually IS, not always after the last char
             // (SQ-0354). Clamped to the drawn (truncated) text; its column is the
@@ -6322,6 +6348,84 @@ mod tests {
     fn submit_button_takes_the_input_submit_style() {
         let g = AppState::default().symbols.controls.submit;
         let (buf, _) = render_bar("look", false, |s| {
+            s.colors.theme = theme_with_overrides(&[("input_submit", Color::Magenta)]);
+        });
+        let (x, y) = glyph_cells(&buf, g)[0];
+        assert_eq!(buf.cell((x, y)).map(|c| c.fg), Some(Color::Magenta));
+    }
+
+    // ── The command panel's inline send button (SQ-1801) ───────────────────────
+
+    /// 40x`h` frame, inline prompt (command bar off), game `>` kept, `typed` in the line.
+    fn render_inline_btn(typed: &str, h: u16, tweak: impl FnOnce(&mut AppState)) -> (Buffer, AppState) {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = false;
+        state.transcript = vec!["You are in a hall.".to_string(), ">".to_string()];
+        state.input.set(typed, true);
+        state.focus = Focus::Game;
+        state.overlays.command_band = Some(crate::state::CommandBandState::default());
+        tweak(&mut state);
+        let area = Rect::new(0, 0, 40, h);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+        (buf, state)
+    }
+
+    #[test]
+    fn inline_submit_button_follows_the_text_by_one_gap_with_the_panel_open() {
+        let g = AppState::default().symbols.controls.submit;
+        let (buf, state) = render_inline_btn("look", 10, |_| {});
+        let cells = glyph_cells(&buf, g);
+        assert_eq!(cells.len(), 1, "one glyph: {:?}", cells);
+        let (x, y) = cells[0];
+        // ">" then "look" at columns 1..5; the caret cell is 5; the glyph follows one gap on.
+        assert_eq!(x, 6);
+        assert_eq!(buf.cell((1, y)).map(|c| c.symbol().to_string()), Some("l".into()));
+        assert_eq!(
+            buf.cell((5, y)).map(|c| c.symbol().to_string()).unwrap_or_default().trim(),
+            "",
+            "the caret cell after the text is not covered"
+        );
+        assert_eq!(state.input_submit_rect.get(), Some(Rect::new(x, y, 1, 1)));
+        assert_eq!(state.input_text_origin.get(), Some((1, y)), "text origin unmoved");
+    }
+
+    #[test]
+    fn inline_submit_button_is_absent_without_panel_text_or_prompt() {
+        let g = AppState::default().symbols.controls.submit;
+        let (buf, state) = render_inline_btn("look", 10, |s| s.overlays.command_band = None);
+        assert!(glyph_cells(&buf, g).is_empty(), "panel closed");
+        assert_eq!(state.input_submit_rect.get(), None);
+        let (buf, state) = render_inline_btn("", 10, |_| {});
+        assert!(glyph_cells(&buf, g).is_empty(), "empty line");
+        assert_eq!(state.input_submit_rect.get(), None);
+        let (buf, state) = render_inline_btn("look", 10, |s| s.char_mode = true);
+        assert!(glyph_cells(&buf, g).is_empty(), "char mode");
+        assert_eq!(state.input_submit_rect.get(), None);
+    }
+
+    #[test]
+    fn inline_submit_button_goes_to_the_next_row_when_the_text_fills_this_one() {
+        let g = AppState::default().symbols.controls.submit;
+        // Text fills columns 1..39 exactly: no room for gap + glyph on its row.
+        let full = "x".repeat(39);
+        let (buf, state) = render_inline_btn(&full, 10, |_| {});
+        let cells = glyph_cells(&buf, g);
+        let (px, py) = state.input_text_origin.get().unwrap();
+        assert_eq!(px, 1);
+        assert_eq!(cells, vec![(0, py + 1)], "start of the next row");
+        assert_eq!(state.input_submit_rect.get(), Some(Rect::new(0, py + 1, 1, 1)));
+        // No next row inside the viewport: omitted rather than overdrawn.
+        let (buf, state) = render_inline_btn(&full, 3, |_| {});
+        assert!(glyph_cells(&buf, g).is_empty(), "no room below: omitted");
+        assert_eq!(state.input_submit_rect.get(), None);
+    }
+
+    #[test]
+    fn inline_submit_button_takes_the_input_submit_style() {
+        let g = AppState::default().symbols.controls.submit;
+        let (buf, _) = render_inline_btn("look", 10, |s| {
             s.colors.theme = theme_with_overrides(&[("input_submit", Color::Magenta)]);
         });
         let (x, y) = glyph_cells(&buf, g)[0];

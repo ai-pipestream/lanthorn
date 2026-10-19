@@ -6492,7 +6492,9 @@ impl AppState {
     /// guards here cover the frames in between (a stale rect after the line is cleared, a modal
     /// covering the bar).
     pub fn input_submit_hit(&self, col: u16, row: u16) -> bool {
-        self.config.command_bar
+        // The inline prompt's button (the command panel's) exists only while the panel is up;
+        // the command bar's does not care about the panel.
+        (self.config.command_bar || self.command_band_visible())
             && !self.char_mode
             && !self.event_wait
             && !self.input.value.is_empty()

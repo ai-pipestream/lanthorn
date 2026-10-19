@@ -35,6 +35,8 @@ an object, and the words land on your prompt; **Enter** still sends
 whatever's actually written there, so nothing fires on its own except the
 one-click quick actions.
 
+While the panel is open and there is a command on your prompt, a small `↵` appears just after it; click it to send the line, the same as pressing **Enter**.
+
 Those quick actions draw as a compass rose when the band is wide enough, with
 the map's own portal glyphs — `↑` `◉` `◎` `↓` for up, in, out and down —
 clustered beside it. Each is a single click that submits at once, no `Enter`

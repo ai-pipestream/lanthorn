@@ -12363,6 +12363,24 @@ mod tests {
         assert!(submit_button_action(&s, &down(117, 5)).is_none(), "char mode");
     }
 
+    /// SQ-1801: in inline prompt mode the send button is the command panel's. A click on its
+    /// rect submits only while the panel is open (a stale rect after closing it is inert).
+    #[test]
+    fn inline_send_button_click_submits_only_while_the_command_panel_is_open() {
+        use crossterm::event::MouseEventKind;
+
+        let mut s = AppState::default();
+        s.config.command_bar = false;
+        s.input.set("open door", true);
+        s.input_submit_rect.set(Some(ratatui::layout::Rect::new(12, 5, 1, 1)));
+        let down = mouse_event(MouseEventKind::Down(MouseButton::Left), 12, 5, KeyModifiers::NONE);
+
+        assert!(submit_button_action(&s, &down).is_none(), "panel closed: stale rect is inert");
+        s.overlays.command_band = Some(crate::state::CommandBandState::default());
+        let a = submit_button_action(&s, &down).expect("panel open: the button submits");
+        assert!(matches!(a, Action::SubmitCommand(ref l) if l == "open door"), "got {:?}", a);
+    }
+
     /// With no completion showing, a click in the story pane keeps today's
     /// behaviour (`StartSelection`, activating the game pane) — covered
     /// end-to-end by `left_down_in_story_starts_selection_and_activates_game`;
