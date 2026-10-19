@@ -192,7 +192,7 @@ pub fn search_url(query: &str) -> String {
 
 /// Hand-rolled: the one call site (an IFID reaching us from story bytes,
 /// not guaranteed URL-safe) doesn't justify a `percent-encoding` dependency.
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

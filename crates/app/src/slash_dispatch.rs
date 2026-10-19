@@ -200,8 +200,8 @@ pub(crate) fn dispatch_slash_outcome(
             };
             state.push_transcript_internal(&msg, TranscriptKind::Meta);
         }
-        SlashOutcome::ReportBug => {
-            report_bug(state, mapper, &*session, story_bytes, story_path, story_rect, map_rect);
+        SlashOutcome::ReportBug { open } => {
+            report_bug(state, mapper, &*session, story_bytes, story_path, story_rect, map_rect, open);
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
@@ -979,7 +979,7 @@ fn bug_report_facts(
         term_program_version: env("TERM_PROGRAM_VERSION"),
         term: env("TERM"),
         tmux: present("TMUX"),
-        ssh: present("SSH_CONNECTION").or_else(|| present("SSH_TTY")),
+        ssh: ssh_env(),
         graphics: GraphicsFacts::from_snapshot(&snap),
         settings: SettingsFacts {
             images: config.images,
@@ -1017,6 +1017,12 @@ fn bug_report_facts(
     }
 }
 
+/// The SSH environment value (`SSH_CONNECTION`, else `SSH_TTY`) when this session is remote.
+fn ssh_env() -> Option<String> {
+    let present = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
+    present("SSH_CONNECTION").or_else(|| present("SSH_TTY"))
+}
+
 /// `/report-bug` (SQ-1795): summary to the transcript and the clipboard, the full
 /// report to `report-bug.txt` in the logs folder.
 fn report_bug(
@@ -1027,6 +1033,7 @@ fn report_bug(
     story_path: &std::path::Path,
     story_rect: Rect,
     map_rect: Rect,
+    open: bool,
 ) {
     let mut facts = bug_report_facts(state, mapper, session, story_bytes, story_path, story_rect, map_rect);
     // Write the file FIRST: the summary's `attach:` line has to say whether it is there.
@@ -1057,6 +1064,26 @@ fn report_bug(
         Err(_) => "The full report could not be saved \u{2014} see the attach line above.",
     };
     state.push_transcript_internal(second, TranscriptKind::Meta);
+
+    // SQ-1799. The transcript cannot carry a clickable link (the app holds mouse
+    // capture, and a Meta line is plain text), so the issue is offered by command.
+    let url = app::bug_report::issue_url(&report.summary);
+    state.push_transcript_internal(
+        "Open a prefilled GitHub issue: run /report-bug open (it fills the form with the summary above).",
+        TranscriptKind::Meta,
+    );
+    if open {
+        match app::bug_report::open_plan(ssh_env().is_some(), app::opener::is_web_mode()) {
+            app::bug_report::OpenPlan::Launch => app::opener::open(&url),
+            app::bug_report::OpenPlan::CannotOpen => {
+                state.push_transcript_internal(
+                    "Can't open a browser from here \u{2014} copy this address into one instead:",
+                    TranscriptKind::Meta,
+                );
+                state.push_transcript_internal(&url, TranscriptKind::Meta);
+            }
+        }
+    }
 }
 
 /// Gather everything `/dump-terminal` reports (SQ-0994).
@@ -2054,7 +2081,7 @@ mod debug_dispatch_tests {
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
         let mut style_watcher: Option<app::watch::StyleWatcher> = None;
         let should_break = dispatch_slash_outcome(
-            SlashOutcome::ReportBug,
+            SlashOutcome::ReportBug { open: false },
             state, &mut mapper, &mut engine, &mut style_watcher,
             dir, "IFIDTEST", dir, dir, story, story_path,
             Rect::new(0, 0, 40, 30), Rect::new(0, 0, 80, 24), true,
@@ -2089,7 +2116,8 @@ mod debug_dispatch_tests {
         assert!(!text.contains("logs:"), "{text}");
         assert!(text.ends_with(
             "Copied to your clipboard \u{2014} paste it into the issue form (if nothing pastes, copy the summary above).\n\
-             Attach report-bug.txt from the line above; it includes your commands this session."
+             Attach report-bug.txt from the line above; it includes your commands this session.\n\
+             Open a prefilled GitHub issue: run /report-bug open (it fills the form with the summary above)."
         ), "{text}");
 
         let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");

@@ -79,7 +79,7 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Help | `dump-windows` | dump the last game frame's window layout, here and to dump-windows.log in your logs folder |
 | Help | `dump-cells` | write the last frame's cells — glyphs, colours and attributes — to dump-cells.log in your logs folder |
 | Help | `dump-terminal` | dump this terminal's detected protocol, cell size, capabilities and traffic — here and to dump-terminal.log in your logs folder |
-| Help | `report-bug` | gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder |
+| Help | `report-bug [open]` | gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder; `open` also opens an issue prefilled with the summary |
 | Help | `debug` | toggle the Z-machine debug inspector pane |
 | Help | `trace [sections|all|none]` | toggle debug-trace sections (screen, map, hostio, v6) written to trace.log; no arg shows current state |
 | Help | `dump-notifications` | print the notification history to the transcript, in case a toast was missed |

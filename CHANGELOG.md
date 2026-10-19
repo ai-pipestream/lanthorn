@@ -30,10 +30,12 @@ while any such tag, or this Unreleased section, still exists.*
 ### Added
 
 - **`/report-bug` gathers what a bug report needs.** It shows a short summary — version, system, terminal, graphics, the game and its map — copies it for pasting into an issue, and saves a fuller report, including your commands this session, to your logs folder to attach.
+- **`/report-bug` can open a GitHub issue already filled in.** Run `/report-bug open` and your browser opens a new issue with the report's summary in place (over SSH or in the browser build it prints the address to copy instead).
 - **The command panel has a send button.** With the command panel open and a command on your prompt, a small return-key mark appears just after it (at the right end of the bar, if you use the command bar); click it to send the line, exactly as if you had pressed Enter (slash commands work too). It uses a Nerd Font icon if you said yes to the font check, and a plain `↵` otherwise. Restyle it with the `input_submit` selector in `style.toml`.
 
 ### Fixed
 
+- **Web links on Windows no longer break on `&`.** Opening a link that contains an `&` (some document links, for example) used to cut it short.
 - **Dialogs show over a game's pictures.** On screens that are all artwork, such as Kerkerkruip's opening menu, the Ctrl-P hotkey dialog opened but was never drawn, so you could not see it (and there is no `/` prompt there to fall back on). Dialogs now appear over the picture when there is no room beside it.
 
 ## v0.9.7 — 2026-10-16

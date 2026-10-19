@@ -473,6 +473,53 @@ pub fn build(f: &BugReportFacts) -> BugReport {
     BugReport { summary: scrub(summary), full: scrub(full) }
 }
 
+/// The issue form `/report-bug open` fills in; its required textarea is `summary`.
+const ISSUE_URL_BASE: &str = "https://github.com/sharkusk/lanthorn/issues/new?template=lanthorn-bug.yml&summary=";
+/// Longest URL we hand out; browsers and the issue page start refusing long URLs a little above this.
+const ISSUE_URL_MAX: usize = 7000;
+const ISSUE_URL_TRUNCATED: &str = "\u{2026} (truncated \u{2014} see the attached report-bug.txt)";
+
+/// A new-issue URL with the form's `summary` field prefilled from `summary`.
+///
+/// If the percent-encoded URL would pass [`ISSUE_URL_MAX`] bytes, whole trailing lines
+/// are dropped until it fits and a final line points at the attached file instead.
+pub fn issue_url(summary: &str) -> String {
+    let url_of = |text: &str| format!("{ISSUE_URL_BASE}{}", crate::ifdb::percent_encode(text));
+    let full = url_of(summary);
+    if full.len() <= ISSUE_URL_MAX {
+        return full;
+    }
+    let mut lines: Vec<&str> = summary.lines().collect();
+    while lines.pop().is_some() {
+        let mut text = lines.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(ISSUE_URL_TRUNCATED);
+        let url = url_of(&text);
+        if url.len() <= ISSUE_URL_MAX {
+            return url;
+        }
+    }
+    url_of(ISSUE_URL_TRUNCATED)
+}
+
+/// What `/report-bug open` does with the browser: launch it, or say it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenPlan {
+    Launch,
+    CannotOpen,
+}
+
+/// Over SSH or in the browser-served image there is no local browser to launch.
+pub fn open_plan(ssh: bool, web: bool) -> OpenPlan {
+    if ssh || web {
+        OpenPlan::CannotOpen
+    } else {
+        OpenPlan::Launch
+    }
+}
+
 #[cfg(all(test, feature = "t-misc"))]
 mod tests {
     use super::*;
@@ -794,5 +841,34 @@ attach:   ~/.local/state/lanthorn/report-bug.txt (the full report: drag it into 
 
         let none = gather_session_facts(&SessionInputs { story_path: std::path::Path::new(""), ..inputs });
         assert!(none.game.is_none() && none.map.is_none() && none.map_json.is_none());
+    }
+
+    #[test]
+    fn issue_url_encodes_reserved_and_non_ascii() {
+        let u = issue_url("a&b=c#d+e f\n\u{e9}");
+        assert!(u.starts_with("https://github.com/sharkusk/lanthorn/issues/new?template=lanthorn-bug.yml&summary="));
+        assert!(u.ends_with("a%26b%3Dc%23d%2Be%20f%0A%C3%A9"), "{u}");
+    }
+
+    #[test]
+    fn issue_url_truncates_on_whole_lines() {
+        let summary = (0..400).map(|i| format!("line number {i} &")).collect::<Vec<_>>().join("\n");
+        let u = issue_url(&summary);
+        assert!(u.len() <= ISSUE_URL_MAX, "{}", u.len());
+        let tail = crate::ifdb::percent_encode(&format!("\n{ISSUE_URL_TRUNCATED}"));
+        assert!(u.ends_with(&tail), "{u}");
+        let body = u.split("summary=").nth(1).unwrap();
+        let kept = body.matches("%0A").count();
+        assert!((2..400).contains(&kept));
+        assert!(body.contains("line%20number%200%20%26%0Aline"), "whole lines kept: {body}");
+        assert!(!issue_url("short").contains("truncated"));
+    }
+
+    #[test]
+    fn open_plan_refuses_ssh_and_web() {
+        assert_eq!(open_plan(false, false), OpenPlan::Launch);
+        assert_eq!(open_plan(true, false), OpenPlan::CannotOpen);
+        assert_eq!(open_plan(false, true), OpenPlan::CannotOpen);
+        assert_eq!(open_plan(true, true), OpenPlan::CannotOpen);
     }
 }

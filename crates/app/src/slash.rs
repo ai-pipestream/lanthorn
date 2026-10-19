@@ -94,7 +94,10 @@ pub enum SlashOutcome {
     /// Gather what a bug report needs: show a short summary in the transcript,
     /// copy it to the clipboard, and write the full report to `report-bug.txt` in
     /// the logs folder (SQ-1795). Handled in `slash_dispatch`.
-    ReportBug,
+    ReportBug {
+        /// `/report-bug open`: also open the prefilled issue in the browser.
+        open: bool,
+    },
     /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
     /// (needs AppState + the engine's debugger capability).
     ToggleDebug,
@@ -736,8 +739,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "dump-terminal", description: "dump this terminal's detected protocol, cell size, capabilities and traffic — here and to dump-terminal.log in your logs folder",
         dispatch: |_| SlashOutcome::DumpTerminal },
     CommandSpec { name: "report-bug", category: Category::Help, context: Context::Global,
-        usage: "report-bug", description: "gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder",
-        dispatch: |_| SlashOutcome::ReportBug },
+        usage: "report-bug [open]", description: "gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder; `open` also opens an issue prefilled with the summary",
+        dispatch: |a| SlashOutcome::ReportBug { open: a.contains(&"open") } },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",
         dispatch: |_| SlashOutcome::ToggleDebug },
@@ -1502,7 +1505,8 @@ mod tests {
     #[test]
     fn report_bug_command_parses() {
         let spec = find_command("report-bug").expect("report-bug is registered");
-        assert!(matches!(parse("report-bug", '/'), SlashOutcome::ReportBug));
+        assert!(matches!(parse("report-bug", '/'), SlashOutcome::ReportBug { open: false }));
+        assert!(matches!(parse("report-bug open", '/'), SlashOutcome::ReportBug { open: true }));
         assert_eq!(spec.category, Category::Help);
         assert_eq!(spec.context, Context::Global);
     }
