@@ -19,29 +19,14 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
-
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
-
-### Added
-
-- **`/report-bug` gathers what a bug report needs.** It shows a short summary — version, system, terminal, graphics, the game and its map — copies it for pasting into an issue, and saves a fuller report, including your commands this session, to your logs folder to attach.
-- **`/report-bug` can open a GitHub issue already filled in.** Run `/report-bug open` and your browser opens a new issue with the report's summary in place (over SSH or in the browser build it prints the address to copy instead).
-- **The command panel has a send button.** With the command panel open and a command on your prompt, a small return-key mark appears just after it (at the right end of the bar, if you use the command bar); click it to send the line, exactly as if you had pressed Enter (slash commands work too). It uses a Nerd Font icon if you said yes to the font check, and a plain `↵` otherwise. Restyle it with the `input_submit` selector in `style.toml`.
-
-### Fixed
-
-- **Web links on Windows no longer break on `&`.** Opening a link that contains an `&` (some document links, for example) used to cut it short.
-- **Dialogs show over a game's pictures.** On screens that are all artwork, such as Kerkerkruip's opening menu, the Ctrl-P hotkey dialog opened but was never drawn, so you could not see it (and there is no `/` prompt there to fall back on). Dialogs now appear over the picture when there is no room beside it.
-
-## v0.9.7 — 2026-10-16
+## v0.9.7 — 2026-10-19
 
 ### Highlights
 
+- **`/report-bug` puts together a bug report for you**, and `/report-bug open` starts a
+  GitHub issue already filled in with it.
+- **The command panel has a send button**, so a command you built with the mouse can be sent
+  with the mouse too.
 - **Scott Adams games you own more than one copy of are looked up on IFDB once**, and
   fetching one copy links the rest.
 - **For embedding hosts: in-scope objects say whether they hold things in or on, and
@@ -49,6 +34,17 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Added
 
+- **`/report-bug` gathers what a bug report needs.** It shows a short summary — version,
+  system, terminal, graphics, the game and its map — copies it for pasting into an issue, and
+  saves a fuller report, including your commands this session, to your logs folder to attach.
+- **`/report-bug` can open a GitHub issue already filled in.** Run `/report-bug open` and
+  your browser opens a new issue with the report's summary in place (over SSH or in the
+  browser build it prints the address to copy instead).
+- **The command panel has a send button.** With the command panel open and a command on your
+  prompt, a small return-key mark appears just after it (at the right end of the bar, if you
+  use the command bar); click it to send the line, exactly as if you had pressed Enter (slash
+  commands work too). It uses a Nerd Font icon if you said yes to the font check, and a plain
+  `↵` otherwise. Restyle it with the `input_submit` selector in `style.toml`.
 - **For embedding hosts: each in-scope object now says whether it is a container or a
   supporter, and whether it is open.** `ObjectWords::holds` lets a host choose between "put X
   in Y" and "put X on Y" without guessing. Inform 6 and Inform 7 games (Z-code and Glulx)
@@ -57,6 +53,12 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **Dialogs show over a game's pictures.** On screens that are all artwork, such as
+  Kerkerkruip's opening menu, the Ctrl-P hotkey dialog opened but was never drawn, so you could
+  not see it (and there is no `/` prompt there to fall back on). Dialogs now appear over the
+  picture when there is no room beside it.
+- **Web links on Windows no longer break on `&`.** Opening a link that contains an `&` (some
+  document links, for example) used to cut it short.
 - **Scott Adams games you have more than one copy of are looked up on IFDB once.** A
   library refresh used to ask IFDB about every Scott copy separately, and fetching one copy
   never linked the others; copies of the same adventure now share one lookup and one link.
