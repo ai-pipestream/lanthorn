@@ -200,7 +200,7 @@ fn rows(buf: &Buffer, area: Rect) -> Vec<String> {
 fn state(honor: bool) -> app::state::AppState {
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(app::render::graphics::kitty_picker(8, 16));
+    st.set_game_picker(Some(app::render::graphics::kitty_picker(8, 16)));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st.config.honor_game_colours = honor;
     st

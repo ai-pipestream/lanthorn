@@ -169,7 +169,7 @@ fn split_renders_three_regions(honor: bool) {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     for i in 0..6 {
@@ -292,7 +292,7 @@ fn the_ring_leaves_the_panels_rows_alone() {
     // The panel's cell rows, from the model's pixel rect at this scale.
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // Distinctive transcript text: if the ring rasterizes the chrome canvas over the
     // panel, banner-ish content lands on those rows.

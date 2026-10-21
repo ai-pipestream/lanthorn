@@ -551,6 +551,9 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         min_story_screen,
         glk_cell_px,
     } = terminal;
+    // Core boot code reads only these plain facts of the picker (SQ-1804); the
+    // picker itself is stored on the state below.
+    let game_imaging = game_picker.as_ref().map(crate::imaging::GameImaging::from);
 
     // `disk_entry` is which story on the image the browser row stood for
     // (SQ-0859) — `None` for every loose file and every single-story floppy, and
@@ -767,12 +770,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     let char_px: (f64, f64) = match glk_cell_px {
         Some(px) => px,
         None => {
-            let char_px = game_picker
-                .as_ref()
-                .map(|p| {
-                    let f = p.font_size();
-                    (f.width as u32, f.height as u32)
-                })
+            let char_px = game_imaging
+                .map(|g| (g.cell_px.0 as u32, g.cell_px.1 as u32))
                 .unwrap_or((8, 16));
             // SQ-0593: divide out the terminal's scale before the game sees it. A
             // Glk game's graphics-window sizes are pixel constants its author
@@ -1340,7 +1339,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 &bytes,
                 &game_dir,
                 resolve_pict_blorb(&story_path, cfg.images),
-                game_picker.as_ref(),
+                game_imaging,
                 cfg.scott_picture_resolution_override,
             );
             match crate::scott_session::ScottSession::new_with_options(
@@ -1549,7 +1548,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     }
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_status_bar = cfg.show_status_bar;
-    state.game_picker = game_picker;
+    state.set_game_picker(game_picker);
     state.game_picker_query_answered = game_picker_query_answered;
     state.glk_cell_px = glk_cell_px;
     // SQ-1703 P3: a story with a `.cfg` design size lays out at it and is

@@ -3150,9 +3150,10 @@ impl ScottPictureSources {
     /// `pict_blorb` arrives already resolved (`resolve_pict_blorb`, `main.rs`)
     /// rather than being resolved in here: it is binary-crate-only (it reaches
     /// into `picker_ui`'s zip-aware tiers), and this type lives in the `app`
-    /// library crate alongside every other Scott session type. `picker` is
-    /// likewise handed in — the launch/`@restart` Picker, or `None` when there
-    /// is no terminal to ask (the fallback cell size below applies).
+    /// library crate alongside every other Scott session type. `imaging` is
+    /// likewise handed in — the launch/`@restart` image-backend facts (SQ-1804:
+    /// a plain value, not the `Picker`), or `None` when there is no terminal to
+    /// ask (the fallback cell size below applies).
     ///
     /// `saga_pictures` is re-derived from `story_path`/`bytes` on every call,
     /// through the same [`crate::hints::saga_picture_files`] a live mount's
@@ -3166,14 +3167,11 @@ impl ScottPictureSources {
         bytes: &[u8],
         game_dir: &std::path::Path,
         pict_blorb: Option<blorb::Blorb>,
-        picker: Option<&ratatui_image::picker::Picker>,
+        imaging: Option<crate::imaging::GameImaging>,
         resolution_override: Option<ScottPictureResolution>,
     ) -> Self {
-        let char_px = picker
-            .map(|p| {
-                let f = p.font_size();
-                (f.width as u32, f.height as u32)
-            })
+        let char_px = imaging
+            .map(|g| (g.cell_px.0 as u32, g.cell_px.1 as u32))
             .unwrap_or(crate::scott_session::ScottSession::FALLBACK_CHAR_PX);
         let resolution = resolution_override
             .or_else(|| crate::styles::read_per_game_scott_picture_resolution(game_dir))

@@ -152,7 +152,7 @@ fn the_dealt_table_composites_at_screen_scale_and_paints_no_black_bands() {
         // screen either way.
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Raster;
         state.config.honor_game_colours = honor;
         *state.v6_paint.borrow_mut() = session.paint_surface();
@@ -172,7 +172,7 @@ fn the_dealt_table_composites_at_screen_scale_and_paints_no_black_bands() {
         for (w, h) in [(100u16, 34u16), (80, 25), (132, 50), (64, 20)] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             state.config.v6_render = app::config::V6RenderMode::Raster;
             state.config.honor_game_colours = honor;
             *state.v6_paint.borrow_mut() = session.paint_surface();

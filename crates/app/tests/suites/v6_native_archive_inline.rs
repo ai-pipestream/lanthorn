@@ -234,7 +234,7 @@ fn the_native_dropcap_reaches_the_rendered_transcript() {
 
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.honor_game_colours = honor_game_colours;
         state.push_transcript_image(dropcap);
         state.push_transcript("Behind the barred door of the treasury.");

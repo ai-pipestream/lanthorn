@@ -139,7 +139,7 @@ fn composite(s: &GameSession, honor: bool) -> image::RgbaImage {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.honor_game_colours = honor;
     *state.v6_paint.borrow_mut() = s.paint_surface();
 

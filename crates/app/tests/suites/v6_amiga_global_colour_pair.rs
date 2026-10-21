@@ -396,8 +396,7 @@ fn render_hybrid(s: &GameSession, honor: bool, cols: u16, rows: u16) -> (Rect, B
     let model = s.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);
@@ -620,8 +619,7 @@ fn render_with_transcript(s: &GameSession, lines: &[String], honor: bool) -> (Re
     let model = s.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     for line in lines {
@@ -762,8 +760,7 @@ fn render_echo(s: &GameSession, lines: &[String], honor: bool, typed: &str, comm
     let model = s.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     for line in lines {
@@ -963,7 +960,7 @@ fn chrome_inherits_the_page_the_game_dressed() {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
         state.config.honor_game_colours = true;
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let area = Rect::new(0, 0, 98, 37);
         let mut buf = Buffer::empty(area);
         let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -1067,14 +1064,13 @@ fn zork_zero_define_menu_has_a_resolved_painted_menu_layout() {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
     state.config.honor_game_colours = true;
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     let area = Rect::new(0, 0, 98, 37);
 
     let layout = app::render::v6_layout::classify_windows(items.as_slice(), state.v6_text.cell());
     let native = app::render::v6_layout::native_extent(items.as_slice(), &state.v6_text);
     let cell_px = state
-        .game_picker
-        .as_ref()
+        .game_picker()
         .map(|p| {
             let f = p.font_size();
             (f.width, f.height)
@@ -1207,14 +1203,13 @@ fn zork_zero_define_menu_has_a_resolved_painted_menu_layout_on_macintosh() {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default_in(s.machine.palette());
     state.config.honor_game_colours = true;
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     let area = Rect::new(0, 0, 98, 37);
 
     let layout = app::render::v6_layout::classify_windows(items.as_slice(), state.v6_text.cell());
     let native = app::render::v6_layout::native_extent(items.as_slice(), &state.v6_text);
     let cell_px = state
-        .game_picker
-        .as_ref()
+        .game_picker()
         .map(|p| {
             let f = p.font_size();
             (f.width, f.height)

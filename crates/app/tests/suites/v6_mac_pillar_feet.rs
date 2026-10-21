@@ -210,7 +210,7 @@ fn desired_heights(s: &GameSession, panes: &[(u16, u16)]) -> Vec<u32> {
             // `from_fontsize`: a headless test has no terminal to query.
             #[allow(deprecated)]
             let picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
-            st.game_picker = Some(picker);
+            st.set_game_picker(Some(picker));
             st.config.v6_render = app::config::V6RenderMode::Hybrid;
             let area = ratatui::layout::Rect::new(0, 0, w, h);
             let mut buf = ratatui::buffer::Buffer::empty(area);

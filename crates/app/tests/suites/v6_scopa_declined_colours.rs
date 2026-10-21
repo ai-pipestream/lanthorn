@@ -84,7 +84,7 @@ fn render(session: &GameSession, mode: app::config::V6RenderMode, honor: bool, w
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = mode;
     state.config.honor_game_colours = honor;
     *state.v6_paint.borrow_mut() = session.paint_surface();
@@ -229,7 +229,7 @@ fn the_score_screen_does_not_bridge_the_gap_between_two_runs() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Raster;
         state.config.honor_game_colours = honor;
         let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);

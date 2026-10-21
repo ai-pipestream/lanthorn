@@ -122,13 +122,13 @@ fn render_state(
 ) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some({
+    state.set_game_picker(Some({
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         if let Some(p) = protocol {
             picker.set_protocol_type(p);
         }
         picker
-    });
+    }));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor_game_colours;
     state.push_transcript("Banquet Hall");

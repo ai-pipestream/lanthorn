@@ -306,12 +306,8 @@ pub fn reset_game(
             // 8×16 constant), introducing no rounding of its own.
             let char_px: (f64, f64) = state.glk_cell_px.unwrap_or_else(|| {
                 state
-                    .game_picker
-                    .as_ref()
-                    .map(|p| {
-                        let f = p.font_size();
-                        (f.width as f64, f.height as f64)
-                    })
+                    .game_imaging()
+                    .map(|g| (g.cell_px.0 as f64, g.cell_px.1 as f64))
                     .unwrap_or((8.0, 16.0))
             });
             let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
@@ -379,7 +375,7 @@ pub fn reset_game(
                 &bytes,
                 game_dir,
                 resolve_pict_blorb(story_path, state.config.images),
-                state.game_picker.as_ref(),
+                state.game_imaging(),
                 state.config.scott_picture_resolution_override,
             );
             crate::scott_session::ScottSession::new_with_options(

@@ -112,7 +112,7 @@ fn boot_v6(file: &str, colours: bool) -> Option<GameSession> {
 fn state_for(mode: app::config::V6RenderMode) -> app::state::AppState {
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     st.config.v6_render = mode;
     st
 }

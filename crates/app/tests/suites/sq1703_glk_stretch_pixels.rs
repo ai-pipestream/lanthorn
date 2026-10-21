@@ -64,7 +64,7 @@ fn transmitted(path: PathBuf, proto: ProtocolType, cols: u16, rows: u16, input: 
     assert!(b.state.glk_stretch, "design mode is on");
     let mut picker = app::render::graphics::kitty_picker(CELL.0, CELL.1);
     picker.set_protocol_type(proto);
-    b.state.game_picker = Some(picker);
+    b.state.set_game_picker(Some(picker));
     assert!(resize_glulx(b.session.as_mut(), (cols, rows)));
     for line in input {
         let _ = app::engine::Engine::submit(b.session.as_mut(), line);

@@ -399,7 +399,7 @@ fn render_story_pane_frame(
         }
         let graphics: Vec<Rect> = win_rects
             .iter()
-            .filter(|(w, k, _)| *k == WinKind::Graphics && state.game_picker.is_some() && !cell_painted.contains(w))
+            .filter(|(w, k, _)| *k == WinKind::Graphics && state.game_imaging().is_some() && !cell_painted.contains(w))
             .map(|(_, _, r)| *r)
             .collect();
         for y in 0..frame.height {
@@ -933,7 +933,7 @@ fn render_node(
             if state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, false) {
                 // painted as cells
             } else if state.any_modal_overlay_open()
-                && state.game_picker.as_ref().is_some_and(crate::render::graphics::protocol_paints_over_cells)
+                && state.game_picker().is_some_and(crate::render::graphics::protocol_paints_over_cells)
             {
                 // SQ-1796: a dialog may have no graphics-free region to sit in (an
                 // all-art screen with the map off — see `dialog_bounds`), so it goes
@@ -941,7 +941,7 @@ fn render_node(
                 // the art as cells while the dialog is up, exactly as the v6 path does
                 // (see the `Layered` arm). Kitty needs none of this: its image IS cells.
                 state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, true);
-            } else if let Some(picker) = state.game_picker.as_ref() {
+            } else if let Some(picker) = state.game_picker() {
                 let letterbox = state.colors.theme.get("graphics").style;
                 if state.glk_stretch {
                     // Design mode: fill exactly the window's cell rect (SQ-1703 P3).
@@ -1009,7 +1009,7 @@ fn render_node(
             // whole v6 pixel path for the duration, and Arthur's header art vanished
             // with it.
             if !state.any_modal_overlay_open() && !takeover_route {
-            if let Some(picker) = state.game_picker.as_ref() {
+            if let Some(picker) = state.game_picker() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items, &state.v6_text);
@@ -2095,14 +2095,7 @@ fn render_node(
                 // map. Without one, clicks on this path were simply dead while the
                 // raster/hybrid paths' both worked.
                 {
-                    let cell_px = state
-                        .game_picker
-                        .as_ref()
-                        .map(|p| {
-                            let f = p.font_size();
-                            (f.width, f.height)
-                        })
-                        .unwrap_or((8, 16));
+                    let cell_px = state.game_imaging().map(|g| g.cell_px).unwrap_or((8, 16));
                     state.graphics_render.borrow_mut().record_cell_path_click_map(
                         area,
                         (native_w, native_h),
@@ -2240,7 +2233,7 @@ fn render_node(
                             let modals = state.open_modal_overlays();
                             if !modals.is_empty() {
                                 format!("modal overlay open: {}", modals.join(", "))
-                            } else if state.game_picker.is_none() {
+                            } else if state.game_imaging().is_none() {
                                 "no image protocol".to_string()
                             } else if takeover_route {
                                 "painted menu takeover routed here".to_string()
@@ -2781,15 +2774,8 @@ fn render_inline_buffer(
     // Inline images render as bands only when a game picker exists (same as the
     // transcript); `char_px` is that picker's cell pixel size for pixel-accurate
     // fit. Mirrors `render_middle`.
-    let images_enabled = state.game_picker.is_some();
-    let char_px = state
-        .game_picker
-        .as_ref()
-        .map(|p| {
-            let f = p.font_size();
-            (f.width, f.height)
-        })
-        .unwrap_or((1, 1));
+    let images_enabled = state.game_imaging().is_some();
+    let char_px = state.game_imaging().map(|g| g.cell_px).unwrap_or((1, 1));
     let (rows, _total, _first) = visible_wrapped_lines_kinded(
         &b.lines,
         &kinds,
@@ -13980,7 +13966,7 @@ mod tests {
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let area = Rect::new(0, 0, 10, 8);
         let mut buf = Buffer::empty(area);
         render_inline_buffer(&b, &state, area, &mut buf, &mut Vec::new());
@@ -14052,7 +14038,7 @@ mod tests {
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let area = Rect::new(0, 0, 10, 8);
         let mut buf = Buffer::empty(area);
         let mut links: Vec<((u16, u16), u32)> = Vec::new();
@@ -14257,11 +14243,11 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let draw = |protocol: ProtocolType, modal: bool| -> Vec<String> {
             let mut state = dialog_state();
-            state.game_picker = Some({
+            state.set_game_picker(Some({
                 let mut p = ratatui_image::picker::Picker::halfblocks();
                 p.set_protocol_type(protocol);
                 p
-            });
+            }));
             state.overlays.hotkey_dialog = modal;
             let mut buf = Buffer::empty(area);
             let (mut links, mut win_rects) = (Vec::new(), Vec::new());
@@ -15029,13 +15015,13 @@ mod tests {
         let glyphs_over_art = protocol == ratatui_image::picker::ProtocolType::Halfblocks;
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some({
+        state.set_game_picker(Some({
             // `halfblocks()` then override: the only non-deprecated constructor
             // that does not need a live terminal to query.
             let mut p = ratatui_image::picker::Picker::halfblocks();
             p.set_protocol_type(protocol);
             p
-        });
+        }));
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("HELLO STORY WORLD");
 
@@ -15105,7 +15091,7 @@ mod tests {
         // publishes its geometry inside (strictly smaller than) the full pane.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("HELLO STORY WORLD");
 
@@ -15148,7 +15134,7 @@ mod tests {
         // art the cell path throws it away, and the sibling case below is that.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("You may choose to:");
 
@@ -15224,7 +15210,7 @@ mod tests {
         // menu SURVIVES the trip is the sibling assertion below it.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("You may choose to:");
 
@@ -15375,7 +15361,7 @@ mod tests {
     fn plate_frame_probe(with_plate: bool, honor: bool, side: PlateSide) -> (Rect, bool) {
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.config.honor_game_colours = honor;
         state.push_transcript("HELLO STORY WORLD");
@@ -15587,7 +15573,7 @@ mod tests {
         // behavior where the raster path returned None and published no geometry.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = crate::config::V6RenderMode::Raster;
         // 40 short lines overflow the 19-row body → real scroll capacity.
         for k in 0..40 {
@@ -15742,7 +15728,7 @@ mod tests {
         // the story pane needs the cells (`screen.rs:670-673`).
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.overlays.reset_dialog = true;
         assert!(state.any_modal_overlay_open(), "the overlay route into the cell path is open");
         state.push_transcript("HELLO STORY WORLD");
@@ -15791,7 +15777,7 @@ mod tests {
         // overlay route) both surviving entrances stay covered.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = None; // no image protocol
+        state.set_game_picker(None); // no image protocol
         state.push_transcript("HELLO STORY WORLD");
 
         let model = cell_path_v6_model();
@@ -16289,7 +16275,7 @@ mod tests {
 
             let mut state = AppState::default();
             state.colors = crate::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             for i in 0..2000 {
                 state
                     .transcript
@@ -16301,7 +16287,7 @@ mod tests {
             state.transcript_images.resize(state.transcript.len(), None);
 
             // A large pane: 220x64 cells at halfblocks 10x20 px = 2200x1280 device.
-            let picker = state.game_picker.clone().unwrap();
+            let picker = state.game_picker().cloned().unwrap();
             let area = Rect::new(0, 0, 220, 64);
 
             // Build closure: replicate the raster branch's canvas construction.

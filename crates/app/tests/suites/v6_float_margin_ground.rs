@@ -96,7 +96,7 @@ fn zork0_with_floats(profile: InterpreterProfile, honor: bool) -> Option<(GameSe
 
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let elems = Engine::take_transcript_elems(&mut session);

@@ -166,8 +166,7 @@ fn render_echo(
     let model = at.session.screen();
     let mut state = app::state::AppState::default();
     state.colors = colors;
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honour;
     state.config.command_bar = command_bar;

@@ -137,7 +137,7 @@ fn state(honor: bool) -> app::state::AppState {
     st.colors = app::colors::ColorScheme::terminal_default();
     // A real kitty cell size: this screen's topic list is glyphs over a placed
     // ring, which is the arrangement the click map has to invert.
-    st.game_picker = Some(app::render::graphics::kitty_picker(8, 16));
+    st.set_game_picker(Some(app::render::graphics::kitty_picker(8, 16)));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st.config.honor_game_colours = honor;
     st

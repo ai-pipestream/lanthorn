@@ -902,7 +902,7 @@ fn window_dump_lines(state: &AppState, session: &dyn Engine, story_rect: Rect) -
     // half the device pixels the terminal actually paints (the same mismatch
     // that keeps pixel-precise mouse reporting switched off, see startup.rs).
     // Compare `implies` against the real window size to tell which.
-    let (raw_w, raw_h, src) = match state.game_picker.as_ref() {
+    let (raw_w, raw_h, src) = match state.game_picker() {
         Some(p) => {
             let f = p.font_size();
             (f.width as u32, f.height as u32, "terminal-reported")
@@ -1105,7 +1105,7 @@ fn terminal_snapshot(
     use app::terminal_dump::{CellSource, OpCounts, Probe, RenderFacts, TerminalSnapshot, TrafficStats};
     use ratatui_image::picker::{Capability, ProtocolType};
 
-    let picker = state.game_picker.as_ref();
+    let picker = state.game_picker();
     let protocol = picker.map(|p| {
         match p.protocol_type() {
             ProtocolType::Halfblocks => "halfblocks",
@@ -2046,7 +2046,7 @@ mod debug_dispatch_tests {
         // builds exactly this, and its empty capability list is the "nobody
         // asked" kind of empty rather than the "the terminal said no" kind.
         state.config.image_protocol = app::config::ImageProtocol::Halfblocks;
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let traffic: app::terminal_dump::TrafficHandle = Default::default();
         state.term_traffic = Some(std::sync::Arc::clone(&traffic));
 
@@ -2153,7 +2153,7 @@ mod debug_dispatch_tests {
         let dir = temp_dir("dumpterm-traffic");
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
 
         let traffic: app::terminal_dump::TrafficHandle = Default::default();
         {

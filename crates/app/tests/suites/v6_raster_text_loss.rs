@@ -64,7 +64,7 @@ fn boot(name: &str, honor: bool) -> Option<GameSession> {
 fn raster_state(honor: bool) -> app::state::AppState {
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     st.config.v6_render = app::config::V6RenderMode::Raster;
     st.config.honor_game_colours = honor;
     st

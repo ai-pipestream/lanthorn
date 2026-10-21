@@ -147,7 +147,7 @@ fn frame_driven(file: &str, honor: bool, drive: bool) -> Option<Frame> {
 
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honoured;
     // Zork Zero's boot banner IS the transcript; Arthur opens on an intro plate

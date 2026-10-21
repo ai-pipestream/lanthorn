@@ -964,7 +964,7 @@ fn draw_pager(p: &Pager, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut D
 fn draw_image(state: &AppState, v: &ImageView, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut DocHits) {
     draw_title(&v.name, st, area, buf, hits);
     let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
-    let Some(picker) = state.game_picker.as_ref().filter(|_| body.width > 0 && body.height > 0) else {
+    let Some(picker) = state.game_picker().filter(|_| body.width > 0 && body.height > 0) else {
         return;
     };
     let fs = picker.font_size();
@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(t.open_entry(0, false, false, &mut |_| {}), OpenOutcome::Opened);
         assert!(matches!(t.view, DocView::Image(_)));
         let mut s = state_with(t);
-        s.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        s.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let _ = render(&s, 40, 12);
         let DocView::Image(v) = &s.documents_tab.view else { panic!("image") };
         let r = v.last_rect.get();

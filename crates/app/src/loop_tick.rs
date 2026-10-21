@@ -180,13 +180,12 @@ pub(crate) fn poll_picker_requery(
     dirty: &mut Option<std::time::Instant>,
     query: impl FnOnce() -> Option<ratatui_image::picker::Picker>,
 ) -> bool {
-    let changed = requery_picker_if_settled(
-        &mut state.game_picker,
-        state.game_picker_query_answered,
-        dirty,
-        query,
-    );
+    // `game_picker` is only written through `set_game_picker`, so work on a
+    // copy and store it back (with its derived `game_imaging`) on a change.
+    let mut picker = state.game_picker().cloned();
+    let changed = requery_picker_if_settled(&mut picker, state.game_picker_query_answered, dirty, query);
     if changed {
+        state.set_game_picker(picker);
         state.graphics_render.borrow_mut().invalidate_cell_geometry();
     }
     changed
@@ -497,13 +496,13 @@ mod poll_picker_requery_tests {
     fn answered_state(font: (u16, u16)) -> AppState {
         let mut state = AppState::default();
         let p = Picker::from_fontsize(FontSize::new(font.0, font.1));
-        state.game_picker = Some(p);
+        state.set_game_picker(Some(p));
         state.game_picker_query_answered = true;
         state
     }
 
     fn font_of(state: &AppState) -> (u16, u16) {
-        let f = state.game_picker.as_ref().expect("picker still present").font_size();
+        let f = state.game_picker().expect("picker still present").font_size();
         (f.width, f.height)
     }
 
@@ -608,7 +607,7 @@ mod poll_picker_requery_tests {
     #[test]
     fn an_unanswered_launch_query_never_requeries() {
         let mut state = AppState::default();
-        state.game_picker = Some(Picker::halfblocks());
+        state.set_game_picker(Some(Picker::halfblocks()));
         state.game_picker_query_answered = false; // e.g. --image-protocol halfblocks, or a silent tty
         let calls = Cell::new(0u32);
         let mut dirty = Some(Instant::now() - std::time::Duration::from_millis(200));

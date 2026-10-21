@@ -1612,8 +1612,7 @@ fn render_hybrid(
 ) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);

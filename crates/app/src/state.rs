@@ -3818,7 +3818,14 @@ pub struct AppState {
     pub picture_pace_next: Option<std::time::Instant>,
 
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
-    pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// Private: written only by [`AppState::set_game_picker`], which also
+    /// derives `game_imaging`, so the two cannot drift (SQ-1804). Read through
+    /// [`AppState::game_picker`].
+    game_picker: Option<ratatui_image::picker::Picker>,
+    /// The plain facts (cell px, protocol) of `game_picker`, for core code that
+    /// must not name `ratatui_image` (SQ-1804). `Some` exactly when
+    /// `game_picker` is. Read through [`AppState::game_imaging`].
+    game_imaging: Option<crate::imaging::GameImaging>,
     /// Whether `game_picker`'s LAUNCH-time build got any answer at all from a
     /// real stdio query (SQ-1511). `false` when `--image-protocol halfblocks`
     /// forced a picker that never queried (`Picker::halfblocks()` touches no
@@ -4196,6 +4203,7 @@ impl Default for AppState {
             glulx_timer_next_fire: None,
             picture_pace_next: None,
             game_picker: None,
+            game_imaging: None,
             game_picker_query_answered: false,
             glk_cell_px: None,
             min_story_screen: None,
@@ -4219,6 +4227,28 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Install (or clear) the in-game graphics picker. The ONLY writer of
+    /// `game_picker`: it derives `game_imaging` from the same value, so core
+    /// code reading the plain facts can never disagree with the picker
+    /// (SQ-1804).
+    pub fn set_game_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
+        self.game_imaging = picker.as_ref().map(crate::imaging::GameImaging::from);
+        self.game_picker = picker;
+    }
+
+    /// The real picker, for the code that builds and encodes protocols. Core
+    /// code that only wants "images on / cell px / protocol" reads
+    /// [`AppState::game_imaging`] instead.
+    pub fn game_picker(&self) -> Option<&ratatui_image::picker::Picker> {
+        self.game_picker.as_ref()
+    }
+
+    /// The plain image-backend facts derived from the picker (`Some` exactly
+    /// when game images are on). SQ-1804.
+    pub fn game_imaging(&self) -> Option<crate::imaging::GameImaging> {
+        self.game_imaging
+    }
+
     /// Return true if any time-based animation/effect is in flight, so the run
     /// loop should fast-poll (and redraw) to advance it without input. Covers the
     /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
@@ -6649,6 +6679,31 @@ pub(crate) fn write_map_trace(user_dir: &std::path::Path, steps: &[String], on: 
 #[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
+
+    /// SQ-1804: `game_imaging` is derived from `game_picker` by the one setter,
+    /// so installing, replacing and clearing the picker moves both together.
+    #[test]
+    fn set_game_picker_keeps_game_imaging_in_step() {
+        use crate::imaging::{GameImaging, ImageProtocol};
+        let mut s = AppState::default();
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        assert_eq!(
+            s.game_imaging(),
+            Some(GameImaging { cell_px: (9, 19), protocol: ImageProtocol::Kitty })
+        );
+        assert!(s.game_picker().is_some());
+
+        s.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        let g = s.game_imaging().expect("halfblocks picker installed");
+        assert_eq!(g.protocol, ImageProtocol::Halfblocks);
+        let f = s.game_picker().expect("picker").font_size();
+        assert_eq!(g.cell_px, (f.width, f.height));
+
+        s.set_game_picker(None);
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+    }
 
     #[test]
     fn appstate_history_defaults_empty() {

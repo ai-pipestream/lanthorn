@@ -144,7 +144,7 @@ fn fmvpoker_backdrop_reaches_the_composite() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.honor_game_colours = honor;
 
         let (canvas, _metrics) =

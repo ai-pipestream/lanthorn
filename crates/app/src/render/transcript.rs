@@ -2543,15 +2543,8 @@ fn render_middle(
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
-    let images_enabled = state.game_picker.is_some();
-    let char_px = state
-        .game_picker
-        .as_ref()
-        .map(|p| {
-            let f = p.font_size();
-            (f.width, f.height)
-        })
-        .unwrap_or((1, 1));
+    let images_enabled = state.game_imaging().is_some();
+    let char_px = state.game_imaging().map(|g| g.cell_px).unwrap_or((1, 1));
     // Reserve the rightmost column of the body as the scrollbar gutter so text
     // never collides with the scrollbar. Wrap and clip to this narrower body.
     let body_area = if area.width >= 2 {
@@ -2886,12 +2879,8 @@ fn render_middle(
     // falls back to `(0, 0)`, which no real cell size ever is, so a live image's
     // stale entries are dropped rather than kept on a guess.
     let current_cell = state
-        .game_picker
-        .as_ref()
-        .map(|p| {
-            let fs = p.font_size();
-            (fs.width.max(1), fs.height.max(1))
-        })
+        .game_imaging()
+        .map(|g| (g.cell_px.0.max(1), g.cell_px.1.max(1)))
         .unwrap_or((0, 0));
     // Every evicted band's kitty upload must be freed in the terminal, not
     // merely forgotten (SQ-1190) — `InlineImageRender` has no `GraphicsRender`
@@ -4562,7 +4551,7 @@ mod tests {
         let mut state = AppState::default();
         // A picker is required for a band to be emitted at all (`images_enabled`) —
         // without one an inline image renders as nothing, per `script_state`'s doc.
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.push_transcript_kind("before", TranscriptKind::Story);
         state.push_transcript_image(crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(16, 16, image::Rgba([9, 9, 9, 255]))),
@@ -4601,7 +4590,7 @@ mod tests {
     fn render_transcript_builds_cell_link_map_for_a_margin_float_picture() {
         let machine = minimal_machine();
         let mut state = AppState::default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.push_transcript_kind("before", TranscriptKind::Story);
         state.push_transcript_image(crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]))),
@@ -7542,7 +7531,7 @@ mod tests {
     fn script_state() -> AppState {
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state
     }
 
@@ -7894,7 +7883,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 16);
 
         let build = |state: &mut AppState| {
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             state.push_transcript_kind("west of house", TranscriptKind::Story);
             state.push_transcript_image(script_image()); // 4 strips tall
             state.push_transcript_kind("beside one", TranscriptKind::Story); // claims 1 strip
@@ -8014,14 +8003,14 @@ mod tests {
         drive_script(&mut live, before, true);
         restore(&mut live);
         // A different pane and a different graphics backend.
-        live.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+        live.set_game_picker(Some(crate::render::graphics::kitty_picker(8, 16)));
         wrap_render(&live, after);
         // PERTURB, then assert.
         live.push_transcript_kind(moved, TranscriptKind::Story);
         wrap_render(&live, after);
 
         let mut fresh = script_state();
-        fresh.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+        fresh.set_game_picker(Some(crate::render::graphics::kitty_picker(8, 16)));
         restore(&mut fresh);
         fresh.push_transcript_kind(moved, TranscriptKind::Story);
         wrap_render(&fresh, after);

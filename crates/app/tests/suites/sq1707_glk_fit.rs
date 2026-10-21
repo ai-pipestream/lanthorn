@@ -407,7 +407,7 @@ fn assert_images_match_boxes(name: &str, cols: u16, rows: u16, min_images: usize
     assert!(b.state.glk_stretch && b.state.glk_fit == GlkFitMode::Aspect);
     let mut picker = app::render::graphics::kitty_picker(CELL.0 as u16, CELL.1 as u16);
     picker.set_protocol_type(ProtocolType::Kitty);
-    b.state.game_picker = Some(picker);
+    b.state.set_game_picker(Some(picker));
     let (buf, wins) = render(&mut b, cols, rows);
     let mut seen = 0;
     for (_, _, rc) in wins.iter().filter(|(_, k, _)| *k == WinKind::Graphics) {

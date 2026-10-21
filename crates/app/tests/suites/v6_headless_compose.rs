@@ -879,7 +879,7 @@ fn the_terminal_render_publishes_the_pair_the_model_states() {
     let model = b.session.screen();
     for honor in [true, false] {
         let mut state = tui_state(&b, honor);
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let pane = ratatui::layout::Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(pane);
         let _ = app::render::screen::render_story_pane(&model, false, None, &state, pane, &mut buf);
@@ -1172,8 +1172,7 @@ const PLAN_CELL: (u16, u16) = (8, 18);
 fn plan_oracle_and_answer(b: &Booted, honor: bool, pane: (u16, u16)) -> (&'static str, V6BottomPlan) {
     let mut state = tui_state(b, honor);
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(PLAN_CELL.0, PLAN_CELL.1)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(PLAN_CELL.0, PLAN_CELL.1))));
     let model = b.session.screen();
     let area = ratatui::layout::Rect::new(0, 0, pane.0, pane.1);
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, area.right() + 1, area.bottom() + 1));
@@ -1358,7 +1357,7 @@ fn raster_fallback_oracle_and_answer(session: &GameSession) -> (String, bool) {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     *state.v6_paint.borrow_mut() = Engine::paint_surface(session);
 
@@ -1601,7 +1600,7 @@ fn hybrid_text_rows_agree_with_what_the_real_hybrid_render_draws() {
     let mut state = tui_state(&b, true);
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let cell = state.v6_text.cell();
-    state.game_picker = Some(app::render::graphics::kitty_picker(cell.w(), cell.h()));
+    state.set_game_picker(Some(app::render::graphics::kitty_picker(cell.w(), cell.h())));
     let (rows, hyb) = hybrid_rows(&b, &state);
     assert!(
         rows.contains(&192),

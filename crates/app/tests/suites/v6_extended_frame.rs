@@ -253,7 +253,7 @@ fn state_for(mode: app::config::V6RenderMode, transcript: &str, b: &Booted) -> a
     let mut picker =
         ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(CELL.0, CELL.1));
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = mode;
     state.config.honor_game_colours = b.honoured;
     // This suite's default assumption throughout is the whole-magnification

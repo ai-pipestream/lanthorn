@@ -33,7 +33,7 @@ pub(crate) fn try_blit_band_row(
     buf: &mut Buffer,
 ) -> bool {
     if let Some(band) = &wr.band {
-        if let Some(picker) = state.game_picker.as_ref() {
+        if let Some(picker) = state.game_picker() {
             let suppress = sixel_scroll_suppress(state, picker);
             blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
         }
@@ -64,7 +64,7 @@ pub(crate) fn blit_float_row(
     row_y: u16,
     buf: &mut Buffer,
 ) {
-    if let Some(picker) = state.game_picker.as_ref() {
+    if let Some(picker) = state.game_picker() {
         let suppress = sixel_scroll_suppress(state, picker);
         blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
     }

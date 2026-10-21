@@ -1150,7 +1150,7 @@ fn a_proportional_run_stops_at_its_windows_right_edge() {
 /// which is the shipped default and the surface the score bar is actually read on.
 fn hybrid_rows(session: &GameSession, state: &mut app::state::AppState) -> Vec<String> {
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     let area = ratatui::layout::Rect::new(0, 0, 100, 30);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     let model = Engine::screen(session);
@@ -1246,7 +1246,7 @@ fn reversed_spaces_rule_the_inventory_page_instead_of_flooding_it() {
     let _ = session.submit_char(135); // F3 — the inventory screen
 
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     let area = ratatui::layout::Rect::new(0, 0, 90, 34);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     let model = Engine::screen(&session);
@@ -1472,7 +1472,7 @@ fn the_score_bar_comes_back_as_cells_after_an_in_game_restart() {
     let Some((mut session, machine)) = boot() else { return };
     let mut state = raster_state(&machine);
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
 
     // Non-vacuity: this case can only see the defect on a press whose declared
     // cell is NOT the 8x16 the pristine header carries. The floppy's face is what

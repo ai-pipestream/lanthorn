@@ -105,7 +105,7 @@ fn boot(name: &str, honor: bool) -> Option<(GameSession, app::state::AppState)> 
     s.flush_boot_pictures();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     app::state::apply_transcript_elems(&mut state, &Engine::take_transcript_elems(&mut s));

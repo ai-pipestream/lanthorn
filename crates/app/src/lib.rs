@@ -100,6 +100,7 @@ pub mod glulx_roomlock;
 pub mod glulx_session;
 pub mod host;
 pub mod graphics;
+pub mod imaging;
 pub mod inline_image;
 pub mod inventory;
 pub mod export_dot;

@@ -293,7 +293,7 @@ fn arthur_hybrid_parks_the_first_new_row_at_the_top() {
     for honor in [true, false] {
         let Some(mut s) = boot_v6("arthur-r74-s890714.z6", 74, "890714", honor) else { return };
         let mut state = story_state(honor);
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         let p = park(&mut s, &mut state, Rect::new(0, 0, 80, 30), &["verbose", "look", "look", "look"]);
         assert_nothing_scrolled_past(&p, true, &format!("arthur-r74-s890714.z6 hybrid, honor={honor}"));
@@ -308,7 +308,7 @@ fn arthur_amiga_floppy_parks_the_first_new_row_at_the_top() {
     let file = "Arthur - The Quest for Excalibur.adf";
     let Some(mut s) = boot_v6(file, 54, "890606", true) else { return };
     let mut state = story_state(true);
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let p = park(&mut s, &mut state, Rect::new(0, 0, 80, 30), &["verbose", "look", "look", "look"]);
     assert_nothing_scrolled_past(&p, true, &format!("{file} [release 54, serial 890606] hybrid"));
@@ -323,7 +323,7 @@ fn arthur_amiga_floppy_parks_the_first_new_row_at_the_top() {
 fn arthur_raster_parks_the_first_new_row_at_the_top() {
     let Some(mut s) = boot_v6("arthur-r74-s890714.z6", 74, "890714", true) else { return };
     let mut state = story_state(true);
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Raster;
     let p = park(&mut s, &mut state, Rect::new(0, 0, 80, 30), &["verbose", "look", "look"]);
     assert_nothing_scrolled_past(&p, false, "arthur-r74-s890714.z6 raster");
@@ -474,7 +474,7 @@ fn a_turn_that_continues_the_row_above_it_parks_on_that_row() {
         for rows in [30, 48] {
             let Some(mut s) = boot_v6(file, 54, "890606", honor) else { return };
             let mut state = story_state(honor);
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             state.config.v6_render = app::config::V6RenderMode::Hybrid;
             // Inline-prompt mode, the shipped default: `startup.rs` hands
             // `command_bar` (false) straight to `set_strip_prompt`, so the game's own
@@ -609,7 +609,7 @@ fn a_continued_row_that_wraps_parks_on_the_row_it_shares_and_no_higher() {
 fn the_command_bar_row_is_not_a_readable_transcript_row() {
     let Some(mut s) = boot_v6("arthur-r74-s890714.z6", 74, "890714", true) else { return };
     let mut state = story_state(true);
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.command_bar = true;
     let p = park(&mut s, &mut state, Rect::new(0, 0, 80, 30), &["verbose", "look", "look"]);

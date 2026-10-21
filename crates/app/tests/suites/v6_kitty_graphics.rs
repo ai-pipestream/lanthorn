@@ -65,7 +65,7 @@ fn boot() -> Option<GameSession> {
 fn kitty_state() -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(kitty_picker(14, 28));
+    state.set_game_picker(Some(kitty_picker(14, 28)));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state
 }

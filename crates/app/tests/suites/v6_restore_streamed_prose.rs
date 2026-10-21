@@ -273,7 +273,7 @@ fn render(session: &GameSession, honor: bool, kitty: bool, w: u16, h: u16) -> Bu
     };
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     *state.v6_paint.borrow_mut() = Engine::paint_surface(session);

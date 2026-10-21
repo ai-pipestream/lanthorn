@@ -53,7 +53,7 @@ fn v6_model() -> ScreenModel {
 fn v6_state() -> AppState {
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.push_transcript("HELLO STORY WORLD");
     state

@@ -201,8 +201,7 @@ const PANES: &[(u16, u16)] = &[(98, 38), (78, 28), (157, 59)];
 fn app_state(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state

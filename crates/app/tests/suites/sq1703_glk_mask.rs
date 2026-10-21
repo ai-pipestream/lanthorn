@@ -339,7 +339,7 @@ fn narcolepsy_undrawn_graphics_windows_are_white_before_and_after_waking() {
 fn with_an_image_protocol_the_hide_pass_spares_graphics_windows_only() {
     let Some(path) = story("narco.blorb") else { return };
     let mut b = booted_first_prompt(path, (800, 600));
-    b.state.game_picker = Some(app::render::graphics::kitty_picker(8, 16));
+    b.state.set_game_picker(Some(app::render::graphics::kitty_picker(8, 16)));
     assert!(resize_glulx(b.session.as_mut(), (100, 37)));
     let area = Rect::new(0, 0, 100, 37);
     let mut buf = Buffer::empty(area);
@@ -376,7 +376,7 @@ fn with_an_image_protocol_the_hide_pass_spares_graphics_windows_only() {
 fn with_an_image_protocol_the_hide_pass_still_blanks_text_cells() {
     let Some(path) = story("narco.blorb") else { return };
     let mut b = booted_first_prompt(path, (800, 600));
-    b.state.game_picker = Some(app::render::graphics::kitty_picker(8, 16));
+    b.state.set_game_picker(Some(app::render::graphics::kitty_picker(8, 16)));
     // Everything visible except x 520..680, y 100..300 (inside window 2's 480,60 240x378).
     let opaque: Vec<bool> = (0..600u32).flat_map(|y| (0..800u32).map(move |x| !((520..680).contains(&x) && (100..300).contains(&y)))).collect();
     b.state.glk_mask = app::glk_cfg::GlkMask::from_opaque(800, 600, &opaque).map(std::sync::Arc::new);

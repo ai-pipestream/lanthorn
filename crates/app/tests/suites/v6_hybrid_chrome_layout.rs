@@ -173,7 +173,7 @@ fn shogun_pc() -> Option<GameSession> {
 fn render_state(picker: ratatui_image::picker::Picker) -> AppState {
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state
 }

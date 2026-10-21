@@ -5,6 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
+use crate::imaging::{GameImaging, ImageProtocol};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
@@ -1730,6 +1731,25 @@ pub fn kitty_picker(cell_w: u16, cell_h: u16) -> Picker {
     let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(cell_w, cell_h));
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
     picker
+}
+
+impl From<&Picker> for GameImaging {
+    /// The plain facts core code reads off a picker (SQ-1804). The only
+    /// conversion; `AppState::set_game_picker` calls it so the picker and the
+    /// value derived from it cannot disagree.
+    fn from(picker: &Picker) -> Self {
+        use ratatui_image::picker::ProtocolType;
+        let f = picker.font_size();
+        GameImaging {
+            cell_px: (f.width, f.height),
+            protocol: match picker.protocol_type() {
+                ProtocolType::Halfblocks => ImageProtocol::Halfblocks,
+                ProtocolType::Sixel => ImageProtocol::Sixel,
+                ProtocolType::Kitty => ImageProtocol::Kitty,
+                ProtocolType::Iterm2 => ImageProtocol::Iterm2,
+            },
+        }
+    }
 }
 
 /// The kitty image backing one graphics window (SQ-0520/SQ-0995).

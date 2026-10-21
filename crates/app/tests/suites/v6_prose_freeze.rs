@@ -210,7 +210,7 @@ fn shogun_frozen_header_reaches_the_composite() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.honor_game_colours = honor;
         if let Some(p) = Engine::paint_surface(&session) {
             *state.v6_paint.borrow_mut() = Some(p);
@@ -297,7 +297,7 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
             for (w, h) in [(80u16, 25u16), (120, 40)] {
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
-                state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
                 if tag == "cell" {
                     // Force the CELL path: SQ-0895 removed frameless, which was the
                     // deliberate route in. Dropping the picker is the substitute whose
@@ -305,7 +305,7 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
                     // image. (A modal overlay also lands on the cell path, but it
                     // additionally suppresses the inlined input line, which shifts row
                     // counts.)
-                    state.game_picker = None;
+                    state.set_game_picker(None);
                 } else {
                     state.config.v6_render = app::config::V6RenderMode::Hybrid;
                 }
@@ -369,7 +369,7 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
         ] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             state.config.v6_render = mode;
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, 80, 25);
@@ -396,7 +396,7 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.honor_game_colours = honor;
         if let Some(p) = Engine::paint_surface(&session) {
             *state.v6_paint.borrow_mut() = Some(p);
@@ -471,14 +471,14 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
             for (w, h) in [(80u16, 25u16), (100, 40)] {
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
-                state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
                 // Force the CELL path: SQ-0895 removed frameless, which was the
                 // deliberate route in. Dropping the picker is the substitute whose
                 // ONLY effect is the one frameless contributed here — draw no game
                 // image. (A modal overlay also lands on the cell path, but it
                 // additionally suppresses the inlined input line, which shifts row
                 // counts.)
-                state.game_picker = None;
+                state.set_game_picker(None);
                 state.config.honor_game_colours = honor;
                 app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
                 let area = Rect::new(0, 0, w, h);
@@ -545,7 +545,7 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         state.config.honor_game_colours = honor;
         app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
@@ -596,7 +596,7 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Raster;
         state.config.honor_game_colours = honor;
         app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
@@ -665,7 +665,7 @@ fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
         for honor in [true, false] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             // FRAMELESS forces the cell path for a game that would otherwise take
             // the hybrid pixel ring — that path is where the placement rule lives.
             // Force the CELL path: SQ-0895 removed frameless, which was the
@@ -674,7 +674,7 @@ fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
             // image. (A modal overlay also lands on the cell path, but it
             // additionally suppresses the inlined input line, which shifts row
             // counts.)
-            state.game_picker = None;
+            state.set_game_picker(None);
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, 80, 25);
             let mut buf = Buffer::empty(area);
