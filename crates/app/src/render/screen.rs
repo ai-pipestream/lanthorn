@@ -338,6 +338,7 @@ fn render_story_pane_frame(
         // Unlike the multi-window path below, this one never opens a graphics
         // window — but an inline transcript image's eviction still queues a
         // delete here (SQ-1190), so it needs the same flush.
+        #[cfg(feature = "terminal")]
         state.graphics_render.borrow_mut().flush_kitty_deletes(area, buf);
         return StoryPaneMetrics {
             scrollbar: t.scrollbar,
@@ -424,9 +425,10 @@ fn render_story_pane_frame(
     // Prune the graphics protocol cache to only the windows still live in the
     // tree, so a closed window's stale cache entry can't be matched by a
     // reopened window reusing the same id (SQ-0174).
-    let mut live = std::collections::HashSet::new();
-    collect_graphics_ids(&model.root, &mut live);
+    #[cfg(feature = "terminal")]
     {
+        let mut live = std::collections::HashSet::new();
+        collect_graphics_ids(&model.root, &mut live);
         let mut gr = state.graphics_render.borrow_mut();
         gr.retain_live(&live);
         // Closing the last graphics window leaves no placement to carry the deletes
@@ -793,6 +795,49 @@ fn hybrid_painted_menu_takeover_route(
     has_menu && hybrid && !menu_over_art
 }
 
+/// The detailed-canvas branch of a graphics window: hand it to the terminal's image
+/// protocol. `false` means nothing was drawn and the caller approximates the canvas as
+/// cells instead (SQ-0520): no picker, or a modal dialog over a sixel/iTerm2 bitmap.
+#[cfg(feature = "terminal")]
+fn paint_graphics_through_protocol(
+    state: &AppState,
+    gw: &crate::engine::GraphicsWindow,
+    area: Rect,
+    buf: &mut Buffer,
+) -> bool {
+    if state.any_modal_overlay_open()
+        && state.game_picker().is_some_and(crate::render::graphics::protocol_paints_over_cells)
+    {
+        // SQ-1796: a dialog may have no graphics-free region to sit in (an
+        // all-art screen with the map off — see `dialog_bounds`), so it goes
+        // over the art; a sixel/iTerm2 bitmap would then cover it. Approximate
+        // the art as cells while the dialog is up, exactly as the v6 path does
+        // (see the `Layered` arm). Kitty needs none of this: its image IS cells.
+        return false;
+    }
+    let Some(picker) = state.game_picker() else { return false };
+    let letterbox = state.colors.theme.get("graphics").style;
+    if state.glk_stretch {
+        // Design mode: fill exactly the window's cell rect (SQ-1703 P3).
+        state.graphics_render.borrow_mut().render_stretched(picker, gw, area, letterbox, buf);
+    } else {
+        state.graphics_render.borrow_mut().render(picker, gw, area, letterbox, buf);
+    }
+    true
+}
+
+/// A build without the `terminal` feature has no image protocol (SQ-1804): the
+/// caller draws the canvas as cells.
+#[cfg(not(feature = "terminal"))]
+fn paint_graphics_through_protocol(
+    _state: &AppState,
+    _gw: &crate::engine::GraphicsWindow,
+    _area: Rect,
+    _buf: &mut Buffer,
+) -> bool {
+    false
+}
+
 /// Recursively render a tree node into `area`. Returns the primary buffer's
 /// metrics when this subtree contains it. Grid-window hyperlink cells are pushed
 /// into `links` (the primary buffer's own links ride on its returned metrics).
@@ -932,24 +977,7 @@ fn render_node(
             // canvas falls through to the image protocol (or a plain fill). (SQ-0332)
             if state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, false) {
                 // painted as cells
-            } else if state.any_modal_overlay_open()
-                && state.game_picker().is_some_and(crate::render::graphics::protocol_paints_over_cells)
-            {
-                // SQ-1796: a dialog may have no graphics-free region to sit in (an
-                // all-art screen with the map off — see `dialog_bounds`), so it goes
-                // over the art; a sixel/iTerm2 bitmap would then cover it. Approximate
-                // the art as cells while the dialog is up, exactly as the v6 path does
-                // (see the `Layered` arm). Kitty needs none of this: its image IS cells.
-                state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, true);
-            } else if let Some(picker) = state.game_picker() {
-                let letterbox = state.colors.theme.get("graphics").style;
-                if state.glk_stretch {
-                    // Design mode: fill exactly the window's cell rect (SQ-1703 P3).
-                    state.graphics_render.borrow_mut().render_stretched(picker, gw, area, letterbox, buf);
-                } else {
-                    state.graphics_render.borrow_mut().render(picker, gw, area, letterbox, buf);
-                }
-            } else {
+            } else if !paint_graphics_through_protocol(state, gw, area, buf) {
                 // No image protocol: approximate the detailed canvas as colour
                 // cells rather than blanking it (SQ-0520).
                 state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, true);
@@ -1008,6 +1036,7 @@ fn render_node(
             // move — which re-tidies the map and starts its animation — dropped the
             // whole v6 pixel path for the duration, and Arthur's header art vanished
             // with it.
+            #[cfg(feature = "terminal")]
             if !state.any_modal_overlay_open() && !takeover_route {
             if let Some(picker) = state.game_picker() {
                 let (default_fg, default_bg) = v6_host_pair(state);
@@ -2511,6 +2540,7 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, state
 /// [`GraphicsRender::retain_live`] that no window was live, so every such frame
 /// cleared the whole cache: a full re-encode each frame, and under kitty a full
 /// re-transmit under a NEW id whose predecessors were never deleted.
+#[cfg(feature = "terminal")]
 fn collect_graphics_ids(node: &WinNode, out: &mut std::collections::HashSet<u32>) {
     match node {
         WinNode::Graphics(gw) => {
@@ -2827,6 +2857,7 @@ fn fill_style(area: Rect, buf: &mut Buffer, style: ratatui::style::Style) {
 }
 
 /// Resolve a themed style's colour to an opaque RGBA for the pixel canvas.
+#[cfg(feature = "terminal")]
 fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
     match style.fg {
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
@@ -2837,6 +2868,7 @@ fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// Resolve a themed style's background colour to an opaque RGBA for the pixel
 /// canvas (the `default_bg` fallback for chrome reverse-video and the story
 /// background fill — see [`crate::render::v6_layout::build_chrome_canvas`]).
+#[cfg(feature = "terminal")]
 fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
     match style.bg {
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
@@ -2943,6 +2975,7 @@ fn v6_host_pair_with(state: &AppState, machine: Option<(u32, u32)>) -> (image::R
 /// since SQ-0510; hybrid needs the same answer the moment a backend that cannot
 /// carry alpha starts shipping the ring bands, and a second derivation of "the
 /// page" is exactly how the two modes come to disagree about the same frame.
+#[cfg(feature = "terminal")]
 pub(crate) fn v6_composite_page(
     story: Option<&crate::engine::PositionedWindow>,
     default_bg: image::Rgba<u8>,
@@ -2957,6 +2990,7 @@ pub(crate) fn v6_composite_page(
 /// Gated on the LIVE honor config: a mid-game `/set-game-colours off` leaves the
 /// recorded pair in the model, and a composite must fall back to the host pair
 /// rather than keep resolving onto the game's page.
+#[cfg(feature = "terminal")]
 pub(crate) fn v6_game_page(
     story: Option<&crate::engine::PositionedWindow>,
     state: &AppState,
@@ -3975,6 +4009,7 @@ fn grow_canvas_rows(src: image::RgbaImage, height: u32) -> image::RgbaImage {
 /// everywhere the composite is transparent (the chrome ring's clear pixels).
 /// Drawn first, so the ring, the story viewport and the raster image all paint
 /// over it.
+#[cfg(feature = "terminal")]
 fn fill_pane_page(area: Rect, page: image::Rgba<u8>, buf: &mut Buffer) {
     let style = ratatui::style::Style::new().bg(ratatui::style::Color::Rgb(page[0], page[1], page[2]));
     for y in area.y..area.bottom() {
@@ -4022,6 +4057,7 @@ fn fill_pane_page(area: Rect, page: image::Rgba<u8>, buf: &mut Buffer) {
 ///   advances (the raster key carries no face fact at all — this carries more).
 /// - `GraphicsWindow::upscale`: a Scott/Glulx rendering hint the v6 layered
 ///   path never reads.
+#[cfg(feature = "terminal")]
 pub fn v6_hybrid_gen(
     items: &[PositionedWindow],
     state: &AppState,
@@ -4121,6 +4157,7 @@ pub fn v6_hybrid_gen(
 /// frame, so nothing here may borrow it); stored in
 /// [`crate::render::graphics::GraphicsRender`]'s `hybrid` slot and keyed by
 /// [`v6_hybrid_gen`].
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
 pub(crate) struct HybridFrame {
     pub(crate) key: u64,
     /// The finished chrome canvas (art + rasterised non-glyph text + pages),
@@ -4161,6 +4198,7 @@ pub(crate) struct HybridFrame {
 /// renderer or any published `Cell` — those all belong to the draw half, which
 /// runs every frame (cached or not).
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "terminal")]
 fn build_hybrid_frame(
     hkey: u64,
     layout: &crate::render::v6_layout::V6Layout<'_>,
@@ -6823,6 +6861,7 @@ fn story_slot_overlay_runs(
 /// ground arrived (SQ-0706): that surface rides BESIDE the window tree, not
 /// inside it, so a game whose drawing lands there alone moved no input this key
 /// was reading. It is folded in below.
+#[cfg(feature = "terminal")]
 pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, picker: &ratatui_image::picker::Picker) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -7868,6 +7907,7 @@ pub fn picture_takeover_reason(
 /// gameplay screen, checked first and cheaply — the frame is built only for
 /// the rare Grid-story-slot case), this pane is downscaling, or the grid's
 /// columns fit anyway.
+#[cfg(feature = "terminal")]
 fn story_slot_grid_wider_than_viewport(
     layout: &crate::render::v6_layout::V6Layout<'_>,
     story: &crate::engine::PositionedWindow,
@@ -10563,6 +10603,7 @@ fn decompose_chrome_strips<'a>(
 /// The transmitted PAYLOAD on the first frame is byte for byte the same 618,240 —
 /// 14 tiles of 43,008 plus one of 16,128 — because the tiles crop from the same scaled
 /// canvas. The 3,565-byte difference is entirely per-image framing.
+#[cfg(feature = "terminal")]
 const BAND_TILE_COLS: u16 = 8;
 
 /// Partition `band` into at most `tile_cols`-wide column tiles (SQ-0818), left to
@@ -10643,6 +10684,7 @@ fn band_tiles(band: Rect, tile_cols: u16) -> Vec<Rect> {
 /// So the capability is absent on three of the four backends, for two different
 /// reasons, and present on the one where it is not optional. That is why this is a
 /// predicate and not a config key: there is nothing left for a player to choose.
+#[cfg(feature = "terminal")]
 fn backend_layers_glyphs_over_art(picker: &ratatui_image::picker::Picker) -> bool {
     matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
 }
@@ -10665,6 +10707,7 @@ fn backend_layers_glyphs_over_art(picker: &ratatui_image::picker::Picker) -> boo
 /// game's page instead of the terminal's own ground. Sixel hands `to_rgba8()` to
 /// its encoder and has not been measured here; it keeps today's behaviour until
 /// it is.
+#[cfg(feature = "terminal")]
 fn backend_flattens_alpha_to_black(picker: &ratatui_image::picker::Picker) -> bool {
     matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
 }
@@ -10676,6 +10719,7 @@ fn backend_flattens_alpha_to_black(picker: &ratatui_image::picker::Picker) -> bo
 /// The native x rides along because the colour rule is asked per glyph (SQ-1060)
 /// and the over-art probe needs game pixels, while the first two are pane cells.
 /// Grouping by run remains, because a run's STYLE bits are the run's.
+#[cfg(feature = "terminal")]
 type StampedCells = Vec<(u16, u16, char, u32)>;
 
 /// Stamp the runs a game printed ON its artwork as terminal glyphs, over the art
@@ -10703,6 +10747,7 @@ type StampedCells = Vec<(u16, u16, char, u32)>;
 /// background keeps that background, opaque, exactly as the pixels would; a run
 /// with inherited colours gets the sampled ground and sits in the picture.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "terminal")]
 fn stamp_runs_over_art(
     runs: &[&crate::engine::PxText],
     art_rects: &[Rect],
@@ -10822,6 +10867,7 @@ fn stamp_runs_over_art(
     }
 }
 
+#[cfg(feature = "terminal")]
 fn draw_chrome_text_strip(
     runs: &[&crate::engine::PxText],
     rect: Rect,

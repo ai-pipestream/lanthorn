@@ -23,8 +23,11 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Rect, Size};
+use ratatui::layout::Rect;
+#[cfg(feature = "terminal")]
+use ratatui::layout::Size;
 use ratatui::style::Style;
+#[cfg(feature = "terminal")]
 use ratatui_image::protocol::Protocol;
 
 use crate::data_roots::DataRoots;
@@ -220,13 +223,16 @@ impl Pager {
 }
 
 /// The area (columns, rows) and cell size (px) a protocol was fitted for.
+#[cfg(feature = "terminal")]
 type FitKey = (u16, u16, u16, u16);
 
 /// An image document: decoded once, its protocol rebuilt only when the area it
 /// is fitted to (or the terminal's cell size) changes.
 pub struct ImageView {
     pub name: String,
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     img: Arc<image::DynamicImage>,
+    #[cfg(feature = "terminal")]
     proto: RefCell<Option<(FitKey, Protocol)>>,
     /// The kitty upload last placed, so closing the view can free it.
     placed: Cell<Option<u32>>,
@@ -521,6 +527,7 @@ impl DocumentsTab {
                 self.view = DocView::Image(ImageView {
                     name: entry.id.clone(),
                     img: Arc::new(img),
+                    #[cfg(feature = "terminal")]
                     proto: RefCell::new(None),
                     placed: Cell::new(None),
                     last_rect: Cell::new(Rect::default()),
@@ -617,7 +624,9 @@ pub fn answer_spoiler(state: &mut AppState, open: bool) {
 
 /// Close the viewer and free its terminal image.
 pub fn close_viewer(state: &mut AppState) {
-    if let Some(id) = state.documents_tab.close_viewer() {
+    let _placed = state.documents_tab.close_viewer();
+    #[cfg(feature = "terminal")]
+    if let Some(id) = _placed {
         state.graphics_render.borrow_mut().queue_external_deletes([id]);
     }
 }
@@ -625,7 +634,9 @@ pub fn close_viewer(state: &mut AppState) {
 /// Free the image view's terminal upload without closing the view: the Journal
 /// moved to another tab, so nothing re-places it until the tab is back.
 pub fn release_image(state: &mut AppState) {
-    if let Some(id) = state.documents_tab.release_image() {
+    let _placed = state.documents_tab.release_image();
+    #[cfg(feature = "terminal")]
+    if let Some(id) = _placed {
         state.graphics_render.borrow_mut().queue_external_deletes([id]);
     }
 }
@@ -961,8 +972,17 @@ fn draw_pager(p: &Pager, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut D
     }
 }
 
+// Without the `terminal` feature (SQ-1804) there is no image protocol to place the
+// picture with: the title row is all this draws, and a host shows the image itself.
+#[cfg_attr(not(feature = "terminal"), allow(unused_variables))]
 fn draw_image(state: &AppState, v: &ImageView, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut DocHits) {
     draw_title(&v.name, st, area, buf, hits);
+    #[cfg(feature = "terminal")]
+    draw_image_protocol(state, v, area, buf);
+}
+
+#[cfg(feature = "terminal")]
+fn draw_image_protocol(state: &AppState, v: &ImageView, area: Rect, buf: &mut Buffer) {
     let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
     let Some(picker) = state.game_picker().filter(|_| body.width > 0 && body.height > 0) else {
         return;

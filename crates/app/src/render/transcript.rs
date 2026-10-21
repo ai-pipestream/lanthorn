@@ -46,6 +46,7 @@ pub(crate) struct WrappedRow {
 /// The fields are read by the Task 8 blitter (`render/inline_image.rs`); bands
 /// are only constructed under `images_enabled`.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
 pub(crate) struct ImageBand {
     pub image: crate::inline_image::InlineImage,
     pub cols: u16,
@@ -2878,6 +2879,7 @@ fn render_middle(
     // fresh entry with below; a missing picker (nothing can be drawn this frame)
     // falls back to `(0, 0)`, which no real cell size ever is, so a live image's
     // stale entries are dropped rather than kept on a guess.
+    #[cfg(feature = "terminal")]
     let current_cell = state
         .game_imaging()
         .map(|g| (g.cell_px.0.max(1), g.cell_px.1.max(1)))
@@ -2885,12 +2887,15 @@ fn render_middle(
     // Every evicted band's kitty upload must be freed in the terminal, not
     // merely forgotten (SQ-1190) — `InlineImageRender` has no `GraphicsRender`
     // of its own, so route the ids it hands back into the sibling field's queue.
-    let evicted_bands = state.inline_image_render.borrow_mut().retain_live(
-        &entry.live_bands,
-        current_cell,
-        crate::render::inline_image::float_page(state),
-    );
-    state.graphics_render.borrow_mut().queue_external_deletes(evicted_bands);
+    #[cfg(feature = "terminal")]
+    {
+        let evicted_bands = state.inline_image_render.borrow_mut().retain_live(
+            &entry.live_bands,
+            current_cell,
+            crate::render::inline_image::float_page(state),
+        );
+        state.graphics_render.borrow_mut().queue_external_deletes(evicted_bands);
+    }
     // Window the cached rows to the visible viewport (cheap; no re-wrap). The
     // top-anchor only applies at the bottom, handled inside `window_wrapped_rows`.
     // Captured before windowing (same inputs, mirrored condition) so the pager

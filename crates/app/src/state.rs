@@ -3821,10 +3821,14 @@ pub struct AppState {
     /// Private: written only by [`AppState::set_game_picker`], which also
     /// derives `game_imaging`, so the two cannot drift (SQ-1804). Read through
     /// [`AppState::game_picker`].
+    #[cfg(feature = "terminal")]
     game_picker: Option<ratatui_image::picker::Picker>,
-    /// The plain facts (cell px, protocol) of `game_picker`, for core code that
-    /// must not name `ratatui_image` (SQ-1804). `Some` exactly when
-    /// `game_picker` is. Read through [`AppState::game_imaging`].
+    /// The plain facts (cell px, protocol) of the image backend, for core code
+    /// that must not name `ratatui_image` (SQ-1804). With the `terminal` feature
+    /// it is derived from `game_picker` whenever one is installed (`Some`
+    /// exactly when the picker is), so the two cannot disagree; a host with no
+    /// picker states it directly through [`AppState::set_game_imaging`]. Read
+    /// through [`AppState::game_imaging`].
     game_imaging: Option<crate::imaging::GameImaging>,
     /// Whether `game_picker`'s LAUNCH-time build got any answer at all from a
     /// real stdio query (SQ-1511). `false` when `--image-protocol halfblocks`
@@ -3919,6 +3923,7 @@ pub struct AppState {
     /// Cached graphics-window protocols (interior-mutable for the render pass).
     pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
     /// Inline-image band blitter (interior-mutable for the render pass).
+    #[cfg(feature = "terminal")]
     pub inline_image_render: std::cell::RefCell<crate::render::inline_image::InlineImageRender>,
 
     /// Set when a gvm runtime fault has halted the VM (as opposed to a clean
@@ -4202,6 +4207,7 @@ impl Default for AppState {
             input_deadline: None,
             glulx_timer_next_fire: None,
             picture_pace_next: None,
+            #[cfg(feature = "terminal")]
             game_picker: None,
             game_imaging: None,
             game_picker_query_answered: false,
@@ -4212,6 +4218,7 @@ impl Default for AppState {
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             query_sweep: crate::query_sweep::QuerySweep::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),
+            #[cfg(feature = "terminal")]
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
             game_ended: false,
@@ -4231,6 +4238,7 @@ impl AppState {
     /// `game_picker`: it derives `game_imaging` from the same value, so core
     /// code reading the plain facts can never disagree with the picker
     /// (SQ-1804).
+    #[cfg(feature = "terminal")]
     pub fn set_game_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
         self.game_imaging = picker.as_ref().map(crate::imaging::GameImaging::from);
         self.game_picker = picker;
@@ -4239,12 +4247,27 @@ impl AppState {
     /// The real picker, for the code that builds and encodes protocols. Core
     /// code that only wants "images on / cell px / protocol" reads
     /// [`AppState::game_imaging`] instead.
+    #[cfg(feature = "terminal")]
     pub fn game_picker(&self) -> Option<&ratatui_image::picker::Picker> {
         self.game_picker.as_ref()
     }
 
-    /// The plain image-backend facts derived from the picker (`Some` exactly
-    /// when game images are on). SQ-1804.
+    /// Install (or clear) the image-backend facts for a host that has no terminal
+    /// picker (SQ-1804). Always available. With the `terminal` feature it also
+    /// CLEARS `game_picker`, so the invariant "if a picker is present, the
+    /// imaging is derived from it" holds whichever setter ran last: imaging
+    /// stated here means imaging without a terminal picker.
+    pub fn set_game_imaging(&mut self, imaging: Option<crate::imaging::GameImaging>) {
+        #[cfg(feature = "terminal")]
+        {
+            self.game_picker = None;
+        }
+        self.game_imaging = imaging;
+    }
+
+    /// The plain image-backend facts (`Some` exactly when game images are on).
+    /// Derived from the picker when there is one, stated by the host otherwise.
+    /// SQ-1804.
     pub fn game_imaging(&self) -> Option<crate::imaging::GameImaging> {
         self.game_imaging
     }
@@ -5268,6 +5291,7 @@ impl AppState {
     /// Poll the background v6 raster encode (SQ-0469): install a completed
     /// protocol and report whether a redraw is warranted. Called once per loop
     /// tick so an off-thread encode surfaces within a poll interval.
+    #[cfg(feature = "terminal")]
     pub fn poll_v6_encode_job(&self) -> bool {
         self.graphics_render.borrow_mut().poll_v6_job()
     }
@@ -6702,6 +6726,31 @@ mod tests {
         assert_eq!(g.cell_px, (f.width, f.height));
 
         s.set_game_picker(None);
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+    }
+
+    /// SQ-1804: imaging stated without a picker clears any picker, so "a picker
+    /// is present => the imaging is derived from it" holds whichever setter ran
+    /// last, in both directions.
+    #[test]
+    fn set_game_imaging_and_set_game_picker_never_leave_a_stale_picker() {
+        use crate::imaging::{GameImaging, ImageProtocol};
+        let stated = GameImaging { cell_px: (11, 23), protocol: ImageProtocol::Sixel };
+        let mut s = AppState::default();
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        s.set_game_imaging(Some(stated));
+        assert!(s.game_picker().is_none(), "stated imaging means imaging without a picker");
+        assert_eq!(s.game_imaging(), Some(stated));
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        assert_eq!(
+            s.game_imaging(),
+            Some(GameImaging { cell_px: (9, 19), protocol: ImageProtocol::Kitty }),
+            "a picker installed after stated imaging replaces it"
+        );
+
+        s.set_game_imaging(None);
         assert!(s.game_picker().is_none() && s.game_imaging().is_none());
     }
 

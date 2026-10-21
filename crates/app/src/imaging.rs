@@ -10,8 +10,9 @@
 //! `ratatui-image`, so core code must be able to ask these questions without
 //! naming it. This module therefore imports nothing from `ratatui_image`; the
 //! one conversion from a `Picker` lives beside the picker code
-//! (`render::graphics`), and `AppState::set_game_picker` is the only place
-//! that stores both so they cannot drift.
+//! (`render::graphics`), and `AppState::set_game_picker` /
+//! `AppState::set_game_imaging` are the only writers, so the picker and the
+//! facts cannot drift.
 
 /// Which terminal graphics protocol paints the game's images. Mirrors
 /// `ratatui_image::picker::ProtocolType` variant for variant.

@@ -26,6 +26,7 @@ doctest = false
 [[bin]]
 name = "lanthorn"
 path = "src/main.rs"
+required-features = ["terminal"]
 
 # SQ-1306: the static map generator — draws a story's whole map from the story
 # file with nothing played. Named explicitly rather than left to `src/bin/`
@@ -36,6 +37,151 @@ path = "src/main.rs"
 [[bin]]
 name = "lanthorn-mapgen"
 path = "src/bin/lanthorn_mapgen.rs"
+
+# SQ-1804: the integration suites and examples drive the terminal-graphics
+# renderer (`Picker`, the protocol caches), so they build only with the
+# `terminal` feature. Declared explicitly because cargo's auto-discovered
+# targets cannot carry `required-features`; a new top-level `tests/*.rs` or
+# example needs its own entry here.
+[[test]]
+name = "dumps"
+path = "tests/dumps.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "engines"
+path = "tests/engines.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "mapper_ui"
+path = "tests/mapper_ui.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "pty"
+path = "tests/pty.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_arthur_advent"
+path = "tests/v6_arthur_advent.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_journey"
+path = "tests/v6_journey.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_render"
+path = "tests/v6_render.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_scopa"
+path = "tests/v6_scopa.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_shogun"
+path = "tests/v6_shogun.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_state"
+path = "tests/v6_state.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_windows"
+path = "tests/v6_windows.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "v6_zork0"
+path = "tests/v6_zork0.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "zmachine_screen"
+path = "tests/zmachine_screen.rs"
+required-features = ["terminal"]
+
+[[test]]
+name = "zork_classic"
+path = "tests/zork_classic.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "border_preview"
+path = "examples/border_preview.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "cast"
+path = "examples/cast.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "flank_shape"
+path = "examples/flank_shape.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "font_scout"
+path = "examples/font_scout.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "guidance_scan"
+path = "examples/guidance_scan.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "hint_probe"
+path = "examples/hint_probe.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "location_scan"
+path = "examples/location_scan.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "pty_capture"
+path = "examples/pty_capture.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "return_probe_cost"
+path = "examples/return_probe_cost.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "return_probe_trace"
+path = "examples/return_probe_trace.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "ring_scout"
+path = "examples/ring_scout.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "scroll_bench"
+path = "examples/scroll_bench.rs"
+required-features = ["terminal"]
+
+[[example]]
+name = "v6_mode_digest"
+path = "examples/v6_mode_digest.rs"
+required-features = ["terminal"]
 
 # `cargo binstall lanthorn` (SQ-1250) fetches a prebuilt release archive
 # instead of compiling. `release.yml` names archives
@@ -69,6 +215,9 @@ pkg-url = "{ repo }/releases/download/v{ version }/lanthorn-{ version }-windows-
 pkg-fmt = "zip"
 bin-dir = "lanthorn-{ version }-windows-x86_64/{ bin }{ binary-ext }"
 
+# SQ-1804: every `t-*` group implies `terminal` — the in-crate tests build
+# `Picker`s and drive the protocol caches, and none of them is meaningful
+# without it.
 # SQ-1242: `app`'s ~3,271 in-crate `#[test]`s (all under `#[cfg(test)] mod tests`
 # blocks, one per source file) are gated behind these marker features instead of
 # bare `cfg(test)`, so `cargo check -p app --lib --tests` with no features on
@@ -89,18 +238,31 @@ bin-dir = "lanthorn-{ version }-windows-x86_64/{ bin }{ binary-ext }"
 # PCM decoders (`audio::decode_aiff`, `audio::tone`, `audio::render_mod`) need
 # no device either way. `mod-music` is ProTracker MOD decoding (pure Rust),
 # separate so it can stay on without playback.
-default = ["playback", "mod-music"]
+default = ["terminal", "playback", "mod-music"]
+# SQ-1804: terminal graphics — everything that encodes or uploads the kitty,
+# sixel and iTerm2 image protocols or falls back to halfblocks through
+# `ratatui-image` (the game/inline/cover/document image caches, the protocol
+# probe and `AppState::game_picker`). On by default, and the TUI and every test
+# need it. A non-terminal embedding host (a GUI app, including its Android and
+# iOS builds) depends on lanthorn with `default-features = false, features =
+# ["mod-music"]`: ratatui-image's kitty shared-memory path enables rustix's
+# `shm`, which rustix's libc backend cannot provide on Android, so the crate
+# does not build there at all. The protocol-free paths a host draws with
+# (`compose_v6_frame`, `build_hybrid_frame_with`, the cell path, click maps,
+# `cover::cover_bytes`) compile either way; the feature is purely additive.
+# CI (`no-terminal` job) checks the lib for the host, Android and iOS targets.
+terminal = ["dep:ratatui-image"]
 playback = ["audio/playback"]
 mod-music = ["audio/mod-music"]
-t-input = []    # input.rs, keymap, slash(_dispatch), browser, complete, pixel/pane mouse
-t-render = []   # render/*, plus the model layer it draws (graphics, layout, fonts, list_scroll, pager, clipboard, cell_dump)
-t-picker = []   # picker*, ifdb*, ifiction, ifid, fetch_worker, cover*, story_info/menu/pick/url, launch_options*, metadata_import
-t-session = []  # session/glulx_session/scott_session, engine*, probe*, turn, glk_backend, glulx_debug/roomlock, interpreter, inventory, machine_boot, reload, reset, startup
-t-guidance = [] # vocab, reveal (word reveal), assist, hints, hint_download
-t-persist = []  # archive*, history, storage, config*, styles, aux/vfs/persist stores, garglk_ini, ingame_io, pcset_store
-t-theme = []    # theme/*, colors, style, term_colors, period
-t-state = []    # state.rs, overlays, debug_panel, mapper glue (map_dump, roomid, export*, tidy, symbols)
-t-misc = []     # everything with no closer home: anim, assets, docs_reference, lifecycle, loop_tick, main, native_sound, notify, query_sweep, stderr_redirect, terminal_dump, trace, watch, corpus, lib.rs's own palette-guard self-test
+t-input = ["terminal"]    # input.rs, keymap, slash(_dispatch), browser, complete, pixel/pane mouse
+t-render = ["terminal"]   # render/*, plus the model layer it draws (graphics, layout, fonts, list_scroll, pager, clipboard, cell_dump)
+t-picker = ["terminal"]   # picker*, ifdb*, ifiction, ifid, fetch_worker, cover*, story_info/menu/pick/url, launch_options*, metadata_import
+t-session = ["terminal"]  # session/glulx_session/scott_session, engine*, probe*, turn, glk_backend, glulx_debug/roomlock, interpreter, inventory, machine_boot, reload, reset, startup
+t-guidance = ["terminal"] # vocab, reveal (word reveal), assist, hints, hint_download
+t-persist = ["terminal"]  # archive*, history, storage, config*, styles, aux/vfs/persist stores, garglk_ini, ingame_io, pcset_store
+t-theme = ["terminal"]    # theme/*, colors, style, term_colors, period
+t-state = ["terminal"]    # state.rs, overlays, debug_panel, mapper glue (map_dump, roomid, export*, tidy, symbols)
+t-misc = ["terminal"]     # everything with no closer home: anim, assets, docs_reference, lifecycle, loop_tick, main, native_sound, notify, query_sweep, stderr_redirect, terminal_dump, trace, watch, corpus, lib.rs's own palette-guard self-test
 t-all = ["t-input", "t-render", "t-picker", "t-session", "t-guidance", "t-persist", "t-theme", "t-state", "t-misc"]
 
 [dependencies]
@@ -125,7 +287,8 @@ blorb = { package = "lanthorn-blorb", path = "../blorb", version = "0.9.7" }
 audio = { package = "lanthorn-audio", path = "../audio", version = "0.9.7", default-features = false }
 ratatui = { version = "0.30", features = ["crossterm_0_29"] }
 crossterm = "0.29"
-ratatui-image = { version = "12.0.0-rc.0", default-features = false }
+# Optional (SQ-1804): the `terminal` feature below owns it.
+ratatui-image = { version = "12.0.0-rc.0", default-features = false, optional = true }
 # gif: IFDB and the IFComp archive serve some covers as GIF; without the
 # decoder those fetches were dropped as "does not decode" (13 of 29 in one
 # curated import, two of them IFDB's own).

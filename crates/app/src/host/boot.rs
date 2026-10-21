@@ -117,8 +117,18 @@ impl From<&Cli> for LaunchFlags {
 /// default is the honest answer for a host that is not one.
 #[derive(Default)]
 pub struct TerminalFacts {
+    /// The plain facts of the image backend (cell px, protocol) for a host that
+    /// has NO terminal picker (SQ-1804) — always present, so a build without the
+    /// `terminal` feature can still say "images are on, at this cell size".
+    /// **Precedence:** when a [`TerminalFacts::game_picker`] is given (needs the
+    /// `terminal` feature) the imaging is derived from it and this field is
+    /// ignored; this is the answer only when there is no picker. `None` with
+    /// neither means game images are off.
+    pub game_imaging: Option<crate::imaging::GameImaging>,
     /// The in-game image-protocol picker (`None` with `--images off`, when the
-    /// terminal draws no images, or when there is no terminal).
+    /// terminal draws no images, or when there is no terminal). Takes precedence
+    /// over [`TerminalFacts::game_imaging`]. Needs the `terminal` feature.
+    #[cfg(feature = "terminal")]
     pub game_picker: Option<ratatui_image::picker::Picker>,
     /// Whether the picker's query got any answer at all (SQ-1511).
     pub game_picker_query_answered: bool,
@@ -543,6 +553,8 @@ pub(super) fn bump_dim_for_floor(current: u16, floor: u16, probe: impl Fn(u16) -
 pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<BootedStory, BootError> {
     let BootRequest { story_path, disk_entry, overrides, mut cfg, roots, flags, terminal, fresh_start } = req;
     let TerminalFacts {
+        game_imaging: stated_imaging,
+        #[cfg(feature = "terminal")]
         game_picker,
         game_picker_query_answered,
         term_default_colors,
@@ -551,9 +563,15 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         min_story_screen,
         glk_cell_px,
     } = terminal;
-    // Core boot code reads only these plain facts of the picker (SQ-1804); the
-    // picker itself is stored on the state below.
-    let game_imaging = game_picker.as_ref().map(crate::imaging::GameImaging::from);
+    // Core boot code reads only the plain facts of the image backend (SQ-1804).
+    // The ONE precedence rule: a picker, when the host has one, outranks the
+    // imaging it states, which is then derived from it — see
+    // `TerminalFacts::game_imaging`. The state install below applies the same
+    // rule through `AppState`'s two setters.
+    #[cfg(feature = "terminal")]
+    let game_imaging = game_picker.as_ref().map(crate::imaging::GameImaging::from).or(stated_imaging);
+    #[cfg(not(feature = "terminal"))]
+    let game_imaging = stated_imaging;
 
     // `disk_entry` is which story on the image the browser row stood for
     // (SQ-0859) — `None` for every loose file and every single-story floppy, and
@@ -1548,7 +1566,13 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     }
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_status_bar = cfg.show_status_bar;
-    state.set_game_picker(game_picker);
+    #[cfg(feature = "terminal")]
+    match game_picker {
+        Some(picker) => state.set_game_picker(Some(picker)),
+        None => state.set_game_imaging(game_imaging),
+    }
+    #[cfg(not(feature = "terminal"))]
+    state.set_game_imaging(game_imaging);
     state.game_picker_query_answered = game_picker_query_answered;
     state.glk_cell_px = glk_cell_px;
     // SQ-1703 P3: a story with a `.cfg` design size lays out at it and is

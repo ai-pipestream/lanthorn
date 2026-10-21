@@ -992,6 +992,8 @@ pub(crate) fn boot_story(
         .and_then(|mut g| g.take())
         .unwrap_or_else(|| app::query_sweep::QuerySweep::settled(Vec::new()));
     let terminal = app::host::TerminalFacts {
+        // The TUI always has a real picker (or none); imaging is derived from it.
+        game_imaging: None,
         game_picker,
         game_picker_query_answered,
         term_default_colors,

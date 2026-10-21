@@ -11,15 +11,22 @@
 //! gallery grid's per-tile resize + protocol encode.
 //! Every failure resolves to `None` — the picker simply shows no cover.
 
+#[cfg(feature = "terminal")]
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "terminal")]
 use std::sync::Arc;
 
+#[cfg(feature = "terminal")]
 use ratatui::buffer::Buffer;
+#[cfg(feature = "terminal")]
 use ratatui::layout::{Rect, Size};
+#[cfg(feature = "terminal")]
 use ratatui_image::picker::Picker;
+#[cfg(feature = "terminal")]
 use ratatui_image::protocol::Protocol;
 
+#[cfg(feature = "terminal")]
 use crate::render::graphics::KittyDeleteQueue;
 
 /// Widest/tallest image [`decode`] will accept, in pixels (SQ-1728). Far past
@@ -125,6 +132,7 @@ pub fn load_cover(path: &Path, game_dir: Option<&Path>) -> Option<image::Dynamic
 /// (SQ-0374). 96 MiB holds a full gallery screen of typical (~1 MiB) covers
 /// with headroom for several of the largest ones seen, while capping
 /// worst-case memory to under a third of the old count cap's.
+#[cfg(feature = "terminal")]
 const COVER_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 
 /// How many built tile protocols `CoverState` keeps for the gallery view
@@ -134,6 +142,7 @@ const COVER_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 /// decoded cover's does — a count cap is the right bound for this cache, sized
 /// to a screenful of gallery tiles so scrolling never evicts a still-visible
 /// one.
+#[cfg(feature = "terminal")]
 const TILE_CAP: usize = 128;
 
 /// Selection-scoped cover state: a byte-budgeted LRU map of decoded images (one
@@ -142,6 +151,7 @@ const TILE_CAP: usize = 128;
 /// panel, and a bounded LRU of tile protocols for the cover-gallery grid (many
 /// on screen at once).
 #[derive(Default)]
+#[cfg(feature = "terminal")]
 pub struct CoverState {
     /// The decoded image is behind an `Arc` (SQ-1199) so a gallery tile's
     /// resize + encode can be handed to [`TileEncoder`]'s worker without
@@ -185,6 +195,7 @@ pub struct CoverState {
 /// the font size moved can be recognised as stale and dropped, instead of
 /// landing in the cache fitted to a cell that no longer exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg(feature = "terminal")]
 pub struct TileKey {
     pub path: PathBuf,
     pub cols: u16,
@@ -192,6 +203,7 @@ pub struct TileKey {
     pub cell: (u16, u16),
 }
 
+#[cfg(feature = "terminal")]
 impl TileKey {
     /// The key for `path`'s cover fitted into `area`, as measured against
     /// `picker`'s cell.
@@ -209,6 +221,7 @@ impl TileKey {
 /// One built gallery tile: the geometry it was built for, the raster, and the
 /// kitty image id it was last placed under (`None` off-kitty, or before the
 /// first placement) so an eviction can free the upload (SQ-1190).
+#[cfg(feature = "terminal")]
 struct TileEntry {
     key: TileKey,
     proto: Protocol,
@@ -226,6 +239,7 @@ struct TileEntry {
 /// drawing with. (Kitty image ids come from `rand::random()` inside the crate,
 /// not from any counter the `Picker` owns, so two threads encoding at once
 /// cannot collide over one.)
+#[cfg(feature = "terminal")]
 pub struct TileRequest {
     pub key: TileKey,
     pub img: Arc<image::DynamicImage>,
@@ -234,6 +248,7 @@ pub struct TileRequest {
 
 /// A finished gallery-tile encode: the key it was asked for under, and the
 /// raster (`None` when the encode failed).
+#[cfg(feature = "terminal")]
 pub type TileResponse = (TileKey, Option<Protocol>);
 
 /// Background gallery-tile encoder (SQ-1199), the same shape as [`CoverDecoder`]
@@ -252,6 +267,7 @@ pub type TileResponse = (TileKey, Option<Protocol>);
 /// re-requests nothing — the picker redraws every 16ms while any tile is
 /// pending, which without the dedupe would queue the same encode dozens of
 /// times over.
+#[cfg(feature = "terminal")]
 pub struct TileEncoder {
     req_tx: std::sync::mpsc::Sender<TileRequest>,
     /// Kept only in the worker-less [`Self::detached`] form, where the harness
@@ -270,6 +286,7 @@ pub struct TileEncoder {
     _worker: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "terminal")]
 impl TileEncoder {
     /// Spawn the encode worker. It exits cleanly when the `TileEncoder` is
     /// dropped (dropping `req_tx` makes the worker's `recv()` err).
@@ -395,12 +412,14 @@ impl TileEncoder {
     }
 }
 
+#[cfg(feature = "terminal")]
 impl Default for TileEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "terminal")]
 impl CoverState {
     /// SQ-0988: the terminal's CELL changed size, so every built protocol was
     /// fitted against the wrong aspect ratio. The decoded IMAGES are unaffected —

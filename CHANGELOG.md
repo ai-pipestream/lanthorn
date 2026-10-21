@@ -27,6 +27,13 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Added
+
+- **For embedding hosts: the library builds without terminal graphics.** Depend on lanthorn
+  with `default-features = false, features = ["mod-music"]` and the terminal image protocols
+  (and `ratatui-image` with them) are left out, which is what makes Android and iOS builds
+  possible. The terminal app is unchanged.
+
 ## v0.9.7 — 2026-10-19
 
 ### Highlights

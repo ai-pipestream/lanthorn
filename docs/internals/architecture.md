@@ -189,6 +189,29 @@ caller of it: there is one copy of each rule.
   (`decode_aiff`, `tone`/`bleep`, `render_mod` → `Pcm` → `Pcm::to_wav`) are
   what such a host's sink works with. CI's `no-playback` job builds that
   configuration on Linux with no `libasound2-dev` installed.
+- **Terminal graphics are a feature too** (SQ-1804) — `app`'s default-on
+  `terminal` feature owns `ratatui-image` and everything that builds, encodes or
+  uploads the kitty / sixel / iTerm2 protocols (or the halfblocks fallback): the
+  game, inline, cover and document image caches, `AppState::game_picker` and its
+  setter, and the whole `render::graphics::terminal` submodule (re-exported from
+  `render::graphics`, so old paths hold when the feature is on). A host that
+  draws images itself depends on lanthorn with `default-features = false,
+  features = ["mod-music"]` (add `playback` on desktop if it wants the device
+  sink). It exists because ratatui-image's kitty shared-memory path enables
+  rustix's `shm`, which rustix's libc backend cannot provide on Android, so the
+  crate cannot build there at all; `ratatui` and `crossterm` stay in the core.
+  What a host reaches without the feature: `compose_v6_frame`,
+  `build_hybrid_frame_with`, the cell path (`render_graphics_as_cells`,
+  `record_cell_path_click_map`, `V6ClickMap`), `GraphicsRender::default()`,
+  `cover::cover_bytes`. Image-backend facts travel as the plain
+  `imaging::GameImaging`: a host without a picker states it with
+  `TerminalFacts::game_imaging` at boot or `AppState::set_game_imaging` later
+  (which also clears any picker); with the feature on, a picker outranks stated
+  imaging and the imaging is derived from it. Features are additive — nothing
+  disappears when `terminal` is on. The bin, the examples and the integration
+  suites `required-features = ["terminal"]`, and every in-crate `t-*` group
+  implies it. CI's `no-terminal` job checks the library for the Linux host,
+  `aarch64-linux-android` and `aarch64-apple-ios`.
 - **The rest of a session** (SQ-1539) — `host::clock`: `refresh_input` re-arms the
   timed-input and Glk-timer deadlines, `next_deadline` says when to wake,
   `fire_due(now)` fires what is due (interrupt routines, Glk timers, sound
