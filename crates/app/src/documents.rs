@@ -516,11 +516,37 @@ fn write_index(dir: &Path, index: &Index) -> io::Result<()> {
     crate::storage::atomic_write(&dir.join(INDEX_NAME), &bytes)
 }
 
-/// The exclusive advisory lock every index writer holds; released on drop.
-fn lock_dir(dir: &Path) -> io::Result<std::fs::File> {
+/// The exclusive advisory lock every index writer holds; released on drop. `None`
+/// means the filesystem has no advisory locks and the writer carries on unlocked.
+type DirLock = Option<std::fs::File>;
+
+/// Whether a failed `lock()` means "this filesystem has no advisory locks" rather
+/// than a real failure. Android's shared storage (`/storage/emulated/0`, a FUSE
+/// mount by MediaProvider) answers `flock` with ENOSYS, and some network mounts
+/// with EOPNOTSUPP.
+fn lock_unsupported(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EOPNOTSUPP)) {
+        return true;
+    }
+    e.kind() == io::ErrorKind::Unsupported
+}
+
+/// Take the folder's index lock. Where the filesystem cannot lock at all (Android
+/// shared storage, see [`lock_unsupported`]) this carries on UNLOCKED instead of
+/// failing every import: with no lock available there is nothing to serialise on,
+/// and a failed lock would block the write outright. Any other lock error fails.
+fn lock_dir(dir: &Path) -> io::Result<DirLock> {
+    lock_dir_with(dir, |f| f.lock())
+}
+
+fn lock_dir_with(dir: &Path, try_lock: impl FnOnce(&std::fs::File) -> io::Result<()>) -> io::Result<DirLock> {
     let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join(".import.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    match try_lock(&lock) {
+        Ok(()) => Ok(Some(lock)),
+        Err(e) if lock_unsupported(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn entry_for(path: PathBuf, size: u64, meta: Option<&DocMeta>) -> Option<DocEntry> {
@@ -764,6 +790,31 @@ mod tests {
             std::fs::read_dir(root).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
         v.sort();
         v
+    }
+
+    #[test]
+    fn an_unsupported_lock_lets_the_index_write_go_ahead() {
+        let dir = crate::scratch_dir("doc-lock-unsupported");
+        let mut failures = vec![io::Error::from(io::ErrorKind::Unsupported)];
+        #[cfg(unix)]
+        failures.extend([io::Error::from_raw_os_error(libc::ENOSYS), io::Error::from_raw_os_error(libc::EOPNOTSUPP)]);
+        for e in failures {
+            let lock = lock_dir_with(&dir, |_| Err(e)).expect("an unsupported lock is tolerated");
+            assert!(lock.is_none(), "carries on unlocked");
+            let mut index = Index::new();
+            index.insert("a.pdf".into(), DocMeta::default());
+            write_index(&dir, &index).unwrap();
+            assert!(read_index(&dir).contains_key("a.pdf"));
+        }
+    }
+
+    #[test]
+    fn a_real_lock_failure_still_fails() {
+        let dir = crate::scratch_dir("doc-lock-denied");
+        let err = lock_dir_with(&dir, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(lock_dir_with(&dir, |_| Ok(())).unwrap().is_some(), "a granted lock is held");
+        assert!(lock_dir(&dir).unwrap().is_some());
     }
 
     #[test]

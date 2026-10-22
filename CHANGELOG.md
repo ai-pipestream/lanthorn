@@ -34,6 +34,10 @@ while any such tag, or this Unreleased section, still exists.*
   (and `ratatui-image` with them) are left out, which is what makes Android and iOS builds
   possible. The terminal app is unchanged.
 
+### Fixed
+
+- Documents can now be downloaded and saved on Android storage that does not support file locks, instead of failing with "Function not implemented".
+
 ## v0.9.7 — 2026-10-19
 
 ### Highlights
