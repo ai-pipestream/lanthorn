@@ -19,18 +19,6 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
-
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
-
-### Fixed
-
-- Restoring a save on a narrower screen no longer leaves a stray second row under the status bar (Hitchhiker's Guide and other games with a fixed-width status line); saves that already carry the stray row are cleaned up when loaded.
-
 ## v0.9.8 — 2026-10-23
 
 ### Added
@@ -45,6 +33,7 @@ while any such tag, or this Unreleased section, still exists.*
 - Documents can now be downloaded and saved on Android storage that does not support file locks, instead of failing with "Function not implemented".
 - Restoring an older save no longer leaves a blank row under the status bar.
 - **For embedding hosts: a game's own RESTORE answered through the file prompt now reports where the game's reply begins**, after the restored history, instead of an empty outcome.
+- Restoring a save on a narrower screen no longer leaves a stray second row under the status bar (Hitchhiker's Guide and other games with a fixed-width status line); saves that already carry the stray row are cleaned up when loaded.
 
 ## v0.9.7 — 2026-10-19
 
