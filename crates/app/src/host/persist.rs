@@ -297,6 +297,9 @@ pub struct Loaded {
     pub quit: bool,
     /// A pending in-game `@restore` was answered, so a game turn ran.
     pub answered_game: bool,
+    /// That game turn's own outcome (its `paging.first_line` is where the game's
+    /// reply begins, after the restored history); default when no turn ran.
+    pub outcome: TurnOutcome,
 }
 
 /// Load a save the player picked from this story's saves (`path`, shown as
@@ -323,7 +326,7 @@ pub fn load_save(
     let ingame_restore_pending = state.ingame_io == Some(crate::session::PendingIo::Restore);
     if ingame_restore_pending && trigger.is_portable() {
         let out = answer_ingame_restore(session, mapper, state, Some((path, name)), game_dir, ifid, map_view);
-        return Loaded { quit: out.quit, answered_game: true };
+        return Loaded { quit: out.quit, answered_game: true, outcome: out };
     }
     match restore_file(session, mapper, state, path, map_view) {
         Ok(Restored::GameSave { with_session }) => {
@@ -347,7 +350,7 @@ pub fn load_save(
             state.push_notice(&format!("[Load failed: {}]", e));
             if ingame_restore_pending {
                 let out = answer_ingame_restore(session, mapper, state, None, game_dir, ifid, map_view);
-                return Loaded { quit: out.quit, answered_game: true };
+                return Loaded { quit: out.quit, answered_game: true, outcome: out };
             }
         }
     }

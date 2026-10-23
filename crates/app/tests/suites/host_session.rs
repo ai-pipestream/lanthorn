@@ -345,6 +345,42 @@ fn a_game_save_answered_by_name_is_what_a_later_restore_reads() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// SQ-1807: the outcome of a RESTORE answered through the file prompt carries the
+/// restore turn's own paging, so a host reading turns aloud knows where the
+/// restored history ends and the game's reply ("Ok.") begins.
+#[test]
+fn an_ingame_restore_answered_by_name_reports_where_the_reply_begins() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-restore-outcome");
+    let mut b = boot(story, &home);
+    let _ = command(&mut b, "save");
+    assert_eq!(pending_file_prompt(&b.state), Some(FilePrompt::Save));
+    let _ = answer_file_prompt(
+        &mut *b.session, &mut b.mapper, &mut b.state, &b.game_dir, &b.ifid, Some("first"), None,
+    );
+    let _ = command(&mut b, "open mailbox");
+
+    let _ = command(&mut b, "restore");
+    assert_eq!(pending_file_prompt(&b.state), Some(FilePrompt::Restore));
+    let out = answer_file_prompt(
+        &mut *b.session, &mut b.mapper, &mut b.state, &b.game_dir, &b.ifid, Some("first"), None,
+    );
+    assert_eq!(pending_file_prompt(&b.state), None);
+    let first = out.paging.first_line;
+    let tail = b.state.transcript[first.min(b.state.transcript.len())..].join("\n");
+    assert!(first > 0, "the reply starts past the restored history, not at line 0");
+    assert!(tail.contains("Ok."), "first_line points at the game's reply: {tail:?}");
+    assert!(
+        !tail.contains("West of House"),
+        "and nothing of the restored history is on or after it: {tail:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// Cancelling the game's prompt tells the game it failed, and the game goes on.
 #[test]
 fn a_cancelled_game_save_resumes_the_game() {

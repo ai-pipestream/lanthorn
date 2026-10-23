@@ -30,6 +30,7 @@ while any such tag, or this Unreleased section, still exists.*
 ### Fixed
 
 - Restoring an older save no longer leaves a blank row under the status bar.
+- **For embedding hosts: a game's own RESTORE answered through the file prompt now reports where the game's reply begins**, after the restored history, instead of an empty outcome.
 
 ## v0.9.8 — 2026-10-22
 
