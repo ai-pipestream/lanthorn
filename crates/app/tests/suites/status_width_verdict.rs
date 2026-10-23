@@ -160,3 +160,112 @@ fn a_pinned_virtual_screen_wins_over_every_mode() {
         assert_eq!(cfg.effective_status_width(), StatusWidth::Pane, "a pin is what the story is told");
     }
 }
+
+// ── SQ-1811: a hint visit in a narrow pane cannot change the told width ─────
+//
+// The Solid Gold built-in InvisiClues re-read header $21 each time a hint screen
+// opens and refresh the game's cached width from it. Before SQ-1809 a resize
+// followed by a hint visit relaid the status line out for the new width (the
+// `0 2st of House` garble at 45 columns). A fixed-80 game reads 80 throughout.
+
+use app::engine::{GridWindow, WinNode};
+use app::session::{screen_model_from_machine, InputKind};
+
+fn model_grid(s: &GameSession) -> GridWindow {
+    match screen_model_from_machine(&s.machine).root {
+        WinNode::Pair { first, .. } => match *first {
+            WinNode::Grid(g) => g,
+            other => panic!("expected a Grid, got {other:?}"),
+        },
+        other => panic!("expected a Pair root, got {other:?}"),
+    }
+}
+
+fn grid_row(g: &GridWindow, r: u16) -> String {
+    (1..=g.cols).map(|c| g.cell(r, c).ch).collect()
+}
+
+fn step(s: &mut GameSession, cmd: &str) {
+    let r = match s.pending_input() {
+        InputKind::Line => s.submit(cmd),
+        InputKind::Char => s.submit_char(13),
+        InputKind::Event => s.submit(""),
+    };
+    assert!(r.fault.is_none(), "fault: {:?}", r.fault);
+    assert!(!r.quit, "{cmd:?} quit the game");
+}
+
+/// Boot at an 80-column pane, `look`, shrink to 45 and `look` (2 turns), visit the
+/// hints (`hint`, `hint` = menu; Enter = a second hint screen), check `$21` and
+/// the title while they are up, leave with `q` presses, then `look` (3 turns).
+/// Returns the session and the status row after the last turn.
+fn hint_visit(name: &str, mode: StatusWidth) -> Option<(GameSession, String)> {
+    let mut s = boot_mode(name, 80, mode)?;
+    step(&mut s, "look");
+    resize_and_play(&mut s, 45);
+    step(&mut s, "hint");
+    step(&mut s, "hint");
+    let menu = model_grid(&s);
+    let all: String = (1..=menu.active_rows).map(|r| grid_row(&menu, r)).collect::<Vec<_>>().join("\n");
+    assert!(all.contains("INVISICLUES"), "{name}: non-vacuity, the hint menu opened:\n{all}");
+    assert_eq!(s.pending_input(), InputKind::Char, "{name}: a menu reads a key");
+    let during_menu = s.machine.mem.read_byte(0x21);
+    step(&mut s, ""); // Enter: the first topic's own screen, a second entry
+    let during_topic = s.machine.mem.read_byte(0x21);
+    if mode == StatusWidth::Auto {
+        assert_eq!(during_menu, 80, "{name}: $21 while the menu is up");
+        assert_eq!(during_topic, 80, "{name}: $21 while a topic is up");
+    }
+    for _ in 0..6 {
+        if s.pending_input() == InputKind::Line {
+            break;
+        }
+        let r = s.submit_char(b'q');
+        assert!(r.fault.is_none());
+    }
+    assert_eq!(s.pending_input(), InputKind::Line, "{name}: back at the story's prompt");
+    step(&mut s, "look");
+    let g = model_grid(&s);
+    let row = grid_row(&g, 1);
+    Some((s, row))
+}
+
+fn reference_row(name: &str) -> Option<String> {
+    let mut s = boot(name, 80)?;
+    for _ in 0..3 {
+        step(&mut s, "look");
+    }
+    Some(grid_row(&model_grid(&s), 1))
+}
+
+fn hint_visit_pins(name: &str, release: &str, room: &str) {
+    let Some((s, row)) = hint_visit(name, StatusWidth::Auto) else { return };
+    let want = reference_row(name).unwrap();
+    let ctx = format!("{name} ({release}), 3 look turns around a hint visit, 45-column pane");
+    assert_eq!(s.fixed_cols(), Some(80), "{ctx}");
+    assert_eq!(s.machine.mem.read_byte(0x21), 80, "{ctx}: $21 after the visit");
+    assert!(row.trim_start().starts_with(room), "{ctx}: the room leads: {row:?}");
+    assert!(row.contains("Score:") && row.contains("Moves:"), "{ctx}: {row:?}");
+    assert_eq!(row, want, "{ctx}: same bar as a fresh 80-column session");
+}
+
+#[test]
+fn zork1_r52_hint_visit_keeps_the_status_row_at_80() {
+    hint_visit_pins("zork1-invclues-r52-s871125.z5", "Zork I r52", "West of House");
+}
+
+#[test]
+fn hitchhiker_r31_hint_visit_keeps_the_status_row_at_80() {
+    hint_visit_pins("hitchhiker-invclues-r31-s871119.z5", "Hitchhiker's r31", "");
+}
+
+/// Control (the way SQ-0679's restore control is kept): told the pane, the same
+/// sequence does not reproduce the 80-column bar.
+#[test]
+fn zork1_r52_hint_visit_with_pane_width_differs_from_the_reference() {
+    let name = "zork1-invclues-r52-s871125.z5";
+    let Some((s, row)) = hint_visit(name, StatusWidth::Pane) else { return };
+    let want = reference_row(name).unwrap();
+    eprintln!("pane-mode $21={} row={row:?}\nreference={want:?}", s.machine.mem.read_byte(0x21));
+    assert_ne!(row, want, "control: the old behaviour must differ, or the pin proves nothing");
+}
