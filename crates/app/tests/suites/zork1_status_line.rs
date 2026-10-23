@@ -228,9 +228,13 @@ fn zork1_status_bar_text_is_exact() {
         );
 
         let (narrow, _) = status_bar_at(honor, 60).expect("story present");
+        // SQ-1809: a narrow pane no longer clips the RIGHT of the bar off (the
+        // fields were laid out for 80 columns and fell outside a 60-column pane);
+        // the blank gap between room and fields is dropped from the middle out, so
+        // both ends of the same bar survive.
         assert!(
-            OPENING_BAR.starts_with(narrow.trim_end()),
-            "a narrow pane clips the RIGHT of the same bar, nothing else \
+            narrow.contains("Score: 0") && narrow.trim_end().ends_with("Moves: 1"),
+            "a narrow pane drops the bar's blank middle, keeping its fields \
              (honor={honor}): {narrow:?}"
         );
         assert!(
@@ -296,11 +300,13 @@ fn zork1_status_bar_lays_out_for_a_pre_boot_seeded_narrow_pane() {
         // space, exactly as `zork1_status_bar_text_is_exact` already pins.
         let mut unseeded = boot_with_host_screen(honor, None).expect("story present");
         let (unseeded_bar, _) = play_and_render_status_bar(&mut unseeded, honor, PANE_W);
+        // SQ-1809: an unseeded bar (laid out for 80 columns) used to lose its
+        // fields off the right of a 60-column pane; the column plan now drops the
+        // blank gap instead, so both bars show their fields.
         assert!(
-            !unseeded_bar[14..].chars().any(|c| c.is_ascii_digit()),
-            "without the pre-boot seed the fields are laid out for 80 columns \
-             and clipped entirely off a 60-column pane — the pre-existing clip \
-             this test falsifies against (honor={honor}): {unseeded_bar:?}"
+            unseeded_bar.contains("Score: 0") && unseeded_bar.trim_end().ends_with("Moves: 1"),
+            "the 80-column bar keeps its fields in a 60-column pane, its blank \
+             middle dropped (honor={honor}): {unseeded_bar:?}"
         );
         assert_ne!(
             seeded_bar.trim_end(),

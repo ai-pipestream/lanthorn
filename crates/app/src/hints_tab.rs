@@ -41,6 +41,16 @@ pub const CMD_DOWNLOAD: &str = "download-hints";
 const DOWNLOAD_LABEL: &str = " [ Download hints… ] ";
 const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in the game.";
 /// Lines scrolled per PageUp/PageDown while the session has the keyboard.
+/// The narrowest width a standalone hint program is told (SQ-1809). The `*inv`
+/// InvisiClues programs lay their menus out from header byte $21 on every screen
+/// entry and collide below this: `stationinv`'s 39-column submenu title meets the
+/// 33-column right-aligned legend on one row and breaks at 70, `spellbinv` clips
+/// its question rows until 76 and is clean at 72 (measured on SQ-1809 with
+/// `crates/zvm/examples/hint_probe.rs`; the `*izm` programs are clean at 60).
+/// A panel narrower than this still shows the program laid out at 72, drawn
+/// through the upper window's column plan (`render::upper_window::column_plan`),
+/// which removes the blank gap between title and legend.
+pub const HINTS_MIN_COLS: u16 = 72;
 const HINT_PAGE_LINES: i32 = 10;
 
 /// The dictionary the built-in-HINT check reads: empty when the story's `HINT`
@@ -139,11 +149,11 @@ impl HintsTab {
 
     /// Where the last draw put things.
     /// The `(rows, cols)` the hint program should be laid out at: the panel the last
-    /// draw gave it, less the input row. `None` before the tab has been drawn at all
+    /// draw gave it, less the input row, the width floored at [`HINTS_MIN_COLS`]. `None` before the tab has been drawn at all
     /// (SQ-1753).
     pub fn panel_screen(&self) -> Option<(u16, u16)> {
         let area = self.hits.borrow().area;
-        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width))
+        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(HINTS_MIN_COLS)))
     }
 
     pub fn hits(&self) -> HintsHits {
@@ -983,16 +993,16 @@ mod tests {
         assert!(!sync_screen_dims(&mut state));
 
         let _ = screen_rows(60, 20, &state);
-        assert_eq!(state.hints_tab.panel_screen(), Some((17, 58)), "the framed panel less its input row");
+        assert_eq!(state.hints_tab.panel_screen(), Some((17, HINTS_MIN_COLS)), "the framed panel less its input row, width floored (SQ-1809)");
         assert!(sync_screen_dims(&mut state), "the header changes to the panel's size");
         let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
-        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (17, 58));
+        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (17, HINTS_MIN_COLS as u8));
         assert!(!sync_screen_dims(&mut state), "a second call has nothing to change");
 
         let _ = screen_rows(50, 14, &state);
         assert!(sync_screen_dims(&mut state), "a later resize is re-declared");
         let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
-        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (11, 48));
+        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (11, HINTS_MIN_COLS as u8));
     }
 
     #[test]

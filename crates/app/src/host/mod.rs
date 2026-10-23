@@ -60,6 +60,10 @@ pub use turn::{
     apply_game_driven_result, finish_command_turn, finish_resumed_turn, Paging, TurnCtx,
     TurnOutcome,
 };
+// The upper window's column plan (SQ-1809): which game columns the TUI draws when the pane
+// is narrower than the grid, and the inverse a click or drawn cursor needs. A host that draws
+// the grid itself reads this instead of restating the rule.
+pub use crate::render::upper_window::{column_plan, grid_column_plan, ColumnPlan, ColumnStrategy};
 
 use crate::engine::Engine;
 

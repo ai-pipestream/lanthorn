@@ -968,8 +968,25 @@ I'm in a chapel
   re-measures it on every terminal resize. A game's full-width form therefore lines
   up column-for-column with the prose beside it instead of floating in a fixed
   80-column box. Pin a fixed screen with `virtual_screen_cols`/`virtual_screen_rows`
-  if you want a game's original layout back; when the pane is smaller than a pinned
-  screen, the viewport auto-follows the cursor. The virtual window is themeable
+  if you want a game's original layout back. When the pane is smaller than the grid
+  the game was told (a pinned screen, or a game that baked an 80-column layout),
+  `render::upper_window::column_plan` (SQ-1809) decides what is drawn, display-only
+  and the same columns on every row: columns blank on every row go first (nearest
+  the centre, alternating right and left, keeping one blank between words until it
+  must not); then, only when every non-blank row is a status band (one reverse run
+  across the full width), content columns middle-out; anything else (a quote box, a
+  menu such as the Solid Gold InvisiClues, a form, Beyond Zork's panels) falls back
+  to the contiguous viewport, which auto-follows the cursor while it is the
+  player's. While the game reads input in the grid, the cursor's column and the
+  field around it are never dropped. A wider pane centres the grid and extends each
+  row's first/last cell styling into the side margins, so a reverse band spans the
+  pane. `ColumnPlan::game_col` / `nearest_kept` are the inverse for clicks and a
+  drawn cursor (a dropped column lands on its nearest kept neighbour, ties left),
+  and `host::column_plan` / `grid_column_plan` hand a host the same answer
+  (`grid_viewport` is now derived from it). Standalone InvisiClues hint programs in
+  the Hints tab are told at least `hints_tab::HINTS_MIN_COLS` (72) columns and drawn
+  through the same plan. Screen readers and narration still read the game's full
+  grid. The virtual window is themeable
   from `[elements]`: `upper_window` inks its cells, and `upper_window_border`
   both colours and shapes the frame around them. That frame is off by default —
   the bar sits flush against the story and the game keeps every row and column

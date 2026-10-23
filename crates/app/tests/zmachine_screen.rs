@@ -46,6 +46,8 @@ mod transcript_follow_ease;
 mod transparent_backdrop_audit;
 #[path = "suites/upper_grid_resize.rs"]
 mod upper_grid_resize;
+#[path = "suites/sq1809_narrow_upper_columns.rs"]
+mod sq1809_narrow_upper_columns;
 #[path = "suites/upper_window_border_style.rs"]
 mod upper_window_border_style;
 #[path = "suites/upper_window_terminal_bg.rs"]

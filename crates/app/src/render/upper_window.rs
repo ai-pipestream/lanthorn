@@ -219,6 +219,12 @@ pub fn grid_content_x_span(upper: &GridWindow, colors: &ColorScheme, area: Rect)
 /// route but always the same number, since both are `upper.cols` plus border
 /// columns, clamped to `area.width`.
 ///
+/// **Since SQ-1809 this is derived from [`grid_column_plan`]**: the first shown
+/// column and how many are shown. That is a contiguous range only when the
+/// plan's strategy is `Fits` or `Viewport`; a pane narrower than the grid may
+/// instead drop columns, and a host must then read [`grid_column_plan`] itself
+/// (its `kept` list and `strategy`) to draw what the TUI draws.
+///
 /// Only the COLUMN offset is covered (SQ-1594's scope: the horizontal
 /// auto-follow of an in-place form). Row scrolling (`draw_grid`'s
 /// `row_offset`) is a separate, unrelated fact this function does not report.
@@ -229,10 +235,8 @@ pub fn grid_viewport(
     cursor: (u16, u16),
     show_cursor: bool,
 ) -> (u16, u16) {
-    let (_, width) = grid_content_x_span(upper, colors, area);
-    let ccol = cursor.1.saturating_sub(1); // 1-based -> 0-based
-    let col_offset = col_follow_offset(ccol, width, show_cursor);
-    (col_offset + 1, width)
+    let plan = grid_column_plan(upper, colors, area, cursor, show_cursor);
+    (plan.kept.first().copied().unwrap_or(1), plan.kept.len() as u16)
 }
 
 /// The column-follow rule itself, shared by [`grid_viewport`] and `draw_grid`:
@@ -245,6 +249,231 @@ fn col_follow_offset(ccol: u16, content_width: u16, show_cursor: bool) -> u16 {
     } else {
         0
     }
+}
+
+/// Which rule [`column_plan`] applied (SQ-1809).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnStrategy {
+    /// The grid fits the visible width: every column is kept.
+    Fits,
+    /// Columns blank on EVERY active row were dropped, nearest the centre first.
+    DropBlank,
+    /// Blank columns were not enough and every non-blank row is a status band,
+    /// so content columns were dropped middle-out too.
+    DropStatusBand,
+    /// The grid holds something that is not a status band (a quote box, a menu,
+    /// a form, panels) or the cursor's field would not survive dropping: a
+    /// contiguous horizontal viewport over the ORIGINAL columns, following the
+    /// cursor while it is the player's ([`col_follow_offset`]).
+    Viewport,
+}
+
+/// The game columns an upper-window grid shows when the pane is narrower than
+/// the grid, in screen order (SQ-1809). Display-only: the game's grid is never
+/// touched, and every row shows the SAME columns so multi-row status areas,
+/// forms and panels stay aligned.
+///
+/// One answer for [`draw_grid`], [`grid_viewport`] and every embedding host
+/// (a host that draws the grid itself reads `kept` and `strategy` instead of
+/// restating the rule), and for the inverse a click or drawn cursor needs:
+/// [`game_col`](Self::game_col) and [`nearest_kept`](Self::nearest_kept).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnPlan {
+    /// 1-based game columns shown, ascending; screen column `i` (0-based, from
+    /// the content area's left edge) shows game column `kept[i]`.
+    pub kept: Vec<u16>,
+    pub strategy: ColumnStrategy,
+}
+
+impl ColumnPlan {
+    /// The game column (1-based) shown at 0-based content screen column
+    /// `screen_col`; past the last shown column, the last one.
+    pub fn game_col(&self, screen_col: u16) -> u16 {
+        let i = usize::from(screen_col).min(self.kept.len().saturating_sub(1));
+        self.kept.get(i).copied().unwrap_or(1)
+    }
+
+    /// The 0-based content screen column showing game column `game_col`, or
+    /// `None` when that column is not shown.
+    pub fn screen_col(&self, game_col: u16) -> Option<u16> {
+        self.kept.binary_search(&game_col).ok().map(|i| i as u16)
+    }
+
+    /// The shown game column nearest `game_col` (itself when shown; a tie goes
+    /// to the LEFT neighbour). A click on a dropped column lands here.
+    pub fn nearest_kept(&self, game_col: u16) -> u16 {
+        let i = self.kept.partition_point(|&c| c < game_col);
+        match (i.checked_sub(1).map(|j| self.kept[j]), self.kept.get(i).copied()) {
+            (Some(l), Some(r)) => {
+                if game_col - l <= r - game_col { l } else { r }
+            }
+            (Some(l), None) => l,
+            (None, Some(r)) => r,
+            (None, None) => game_col,
+        }
+    }
+}
+
+fn cell_is_blank(c: &GridCell) -> bool {
+    c.ch.is_whitespace() || c.ch.is_control()
+}
+
+fn cell_is_styled(c: &GridCell) -> bool {
+    c.style != 0 || c.fg != 0 || c.bg != 0
+}
+
+/// Drop order for `cands` (1-based columns of a `cols`-wide grid): nearest the
+/// centre first, alternating right then left of it. Returns up to `n` columns.
+fn middle_out(cands: &[u16], cols: u16, n: usize) -> Vec<u16> {
+    let half = cols / 2;
+    let mut left: Vec<u16> = cands.iter().copied().filter(|&c| c <= half).collect();
+    let mut right: Vec<u16> = cands.iter().copied().filter(|&c| c > half).collect();
+    left.sort_unstable_by(|a, b| b.cmp(a));
+    right.sort_unstable();
+    let (mut l, mut r) = (left.into_iter(), right.into_iter());
+    let mut out = Vec::with_capacity(n);
+    let mut take_right = true;
+    while out.len() < n {
+        let next = if take_right { r.next().or_else(|| l.next()) } else { l.next().or_else(|| r.next()) };
+        match next {
+            Some(c) => out.push(c),
+            None => break,
+        }
+        take_right = !take_right;
+    }
+    out
+}
+
+/// Decide which columns of `upper`'s first `rows` rows are shown in `width`
+/// visible columns (SQ-1809). `cursor` is the 1-based grid cursor and
+/// `show_cursor` says it is the player's (the game is reading input in this
+/// grid: Bureaucracy's forms).
+///
+/// 1. **Fits** — every column.
+/// 2. **Drop blank columns** — blank on every row (glyph only, style ignored: a
+///    reverse band's gap spaces are exactly what should go), nearest the centre
+///    first, alternating right/left.
+/// 3. **Drop content columns middle-out** — only when every non-blank row is a
+///    status band (one non-default style across the full grid width).
+/// 4. **Viewport** — anything else: the contiguous viewport over the original
+///    columns, as before SQ-1809.
+///
+/// While `show_cursor`, the cursor's column and the contiguous non-blank or
+/// styled run around it on its row are never dropped; if the grid then cannot
+/// fit, the viewport applies. A Glk grid (`win != 0`) never drops columns.
+pub fn column_plan(
+    upper: &GridWindow,
+    rows: u16,
+    width: u16,
+    cursor: (u16, u16),
+    show_cursor: bool,
+) -> ColumnPlan {
+    let cols = upper.cols;
+    if cols <= width {
+        return ColumnPlan { kept: (1..=cols).collect(), strategy: ColumnStrategy::Fits };
+    }
+    let viewport = || {
+        let first = col_follow_offset(cursor.1.saturating_sub(1), width, show_cursor) + 1;
+        ColumnPlan {
+            kept: (first..=cols.min(first.saturating_add(width.saturating_sub(1)))).collect(),
+            strategy: ColumnStrategy::Viewport,
+        }
+    };
+    if upper.win != 0 || width == 0 {
+        return viewport();
+    }
+    let rows = rows.min(upper.rows);
+    let mut blank = vec![true; usize::from(cols) + 1];
+    let mut band_or_blank = true;
+    for r in 1..=rows {
+        let first = upper.cell(r, 1);
+        let mut row_blank = true;
+        let mut uniform = cell_is_styled(&first);
+        for c in 1..=cols {
+            let cell = upper.cell(r, c);
+            if !cell_is_blank(&cell) {
+                blank[usize::from(c)] = false;
+                row_blank = false;
+            }
+            uniform &= (cell.style, cell.fg, cell.bg) == (first.style, first.fg, first.bg);
+        }
+        if !row_blank && !uniform {
+            band_or_blank = false;
+        }
+    }
+    // Cursor protection: its column and the non-blank/styled run around it.
+    let mut protect = vec![false; usize::from(cols) + 1];
+    if show_cursor && cursor.0 >= 1 && cursor.0 <= rows && cursor.1 >= 1 && cursor.1 <= cols {
+        let live = |c: u16| {
+            let cell = upper.cell(cursor.0, c);
+            !cell_is_blank(&cell) || cell_is_styled(&cell)
+        };
+        protect[usize::from(cursor.1)] = true;
+        let mut c = cursor.1;
+        while c > 1 && live(c - 1) {
+            c -= 1;
+            protect[usize::from(c)] = true;
+        }
+        let mut c = cursor.1;
+        while c < cols && live(c + 1) {
+            c += 1;
+            protect[usize::from(c)] = true;
+        }
+    }
+    let need = usize::from(cols - width);
+    let blank_cands: Vec<u16> =
+        (1..=cols).filter(|&c| blank[usize::from(c)] && !protect[usize::from(c)]).collect();
+    let (dropped, strategy) = if blank_cands.len() >= need {
+        // The first column of a blank run that sits BETWEEN ink (a word gap, the
+        // space in `Score: 0`) is the last to go, so dropping the gap between a
+        // room name and its fields never fuses the words either side of it.
+        let is_sep = |c: u16| {
+            let ink = |c: u16| c >= 1 && c <= cols && !blank[usize::from(c)];
+            let mut l = c;
+            while l > 1 && blank[usize::from(l - 1)] {
+                l -= 1;
+            }
+            let mut r = c;
+            while r < cols && blank[usize::from(r + 1)] {
+                r += 1;
+            }
+            c == l && ink(l.wrapping_sub(1)) && ink(r + 1)
+        };
+        let (seps, firsts): (Vec<u16>, Vec<u16>) = blank_cands.iter().partition(|&&c| is_sep(c));
+        let mut d = middle_out(&firsts, cols, need);
+        if d.len() < need {
+            d.extend(middle_out(&seps, cols, need - d.len()));
+        }
+        (d, ColumnStrategy::DropBlank)
+    } else if band_or_blank {
+        let content: Vec<u16> =
+            (1..=cols).filter(|&c| !blank[usize::from(c)] && !protect[usize::from(c)]).collect();
+        let need2 = need - blank_cands.len();
+        if content.len() < need2 {
+            return viewport();
+        }
+        let mut d = blank_cands;
+        d.extend(middle_out(&content, cols, need2));
+        (d, ColumnStrategy::DropStatusBand)
+    } else {
+        return viewport();
+    };
+    let kept = (1..=cols).filter(|c| !dropped.contains(c)).collect();
+    ColumnPlan { kept, strategy }
+}
+
+/// [`column_plan`] for the rows the grid has active, at the content width
+/// [`draw_grid`] would draw `upper` at inside `area` — the entry point for a
+/// host (and for [`grid_viewport`]).
+pub fn grid_column_plan(
+    upper: &GridWindow,
+    colors: &ColorScheme,
+    area: Rect,
+    cursor: (u16, u16),
+    show_cursor: bool,
+) -> ColumnPlan {
+    let (_, width) = grid_content_x_span(upper, colors, area);
+    column_plan(upper, upper.active_rows, width, cursor, show_cursor)
 }
 
 // ── Core grid renderer ────────────────────────────────────────────────────────
@@ -355,22 +584,12 @@ pub fn draw_grid(
     } else {
         0
     };
-    // Col viewport offset: scroll right so the cursor column is visible — but
-    // ONLY while the cursor is the player's (`show_cursor`: the game is waiting
-    // on a keypress in this grid, an in-place form). (SQ-0679)
-    //
-    // Otherwise the left of the row wins. A grid wider than the pane is almost
-    // always a status bar, and its content — the room name — starts at column 1
-    // while the cursor is parked wherever the game's last print left it, out to
-    // the right. Following that parked cursor scrolled the room name off the
-    // left edge and showed the score/moves fields floating alone. Nobody is
-    // typing there; there is no caret to keep on screen.
-    //
-    // Shared with the public `grid_viewport` (SQ-1594) — one place this
-    // arithmetic lives, so a host reproducing this follow behaviour reads the
-    // same answer this draw acts on rather than a restatement of it.
-    let (first_visible_col, _) = grid_viewport(upper, colors, area, cursor, show_cursor);
-    let col_offset: u16 = first_visible_col - 1;
+    // Which game columns are drawn (SQ-1809): all of them, centred, when the grid
+    // fits; otherwise the blank-then-status-band column dropping, or the
+    // cursor-following viewport (SQ-0679: the follow is for a live caret only,
+    // otherwise the left of the row wins). [`column_plan`] is the one place that
+    // rule lives, shared with `grid_viewport` and every embedding host.
+    let plan = column_plan(upper, upper_rows, content.width, cursor, show_cursor);
 
     // Fill content area with background style.
     for dy in 0..content.height {
@@ -391,10 +610,7 @@ pub fn draw_grid(
             break;
         }
         for dx in 0..content.width {
-            let grid_col = dx + col_offset + 1; // 1-based
-            if grid_col > upper.cols {
-                break;
-            }
+            let Some(&grid_col) = plan.kept.get(usize::from(dx)) else { break };
             let cell = upper.cell(grid_row, grid_col);
             let bx = content.x + dx;
             let by = content.y + dy;
@@ -436,20 +652,49 @@ pub fn draw_grid(
     // buffer cell's modifier first to make the cursor's style authoritative —
     // otherwise REVERSED painted by the game-cell loop above would persist when
     // the XOR removes it (cursor on an already-reverse cell).
-    if show_cursor && crow >= row_offset && ccol >= col_offset {
+    if show_cursor && crow >= row_offset {
         let cur_dy = crow - row_offset;
-        let cur_dx = ccol - col_offset;
-        if cur_dy < content.height && cur_dx < content.width {
-            let grid_row = cur_dy + row_offset + 1; // 1-based
-            let grid_col = cur_dx + col_offset + 1; // 1-based
-            let cur_cell = upper.cell(grid_row, grid_col);
-            let mut cur_zvm = grid_cell_to_zvm(cur_cell);
-            cur_zvm.style ^= 0x01; // toggle reverse bit
-            let style = cell_style(cur_zvm, cur_cell.glk_style, colors, honor_game_colours, upper.bg, upper.fg, is_glk_grid);
-            if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
-                c.modifier = ratatui::style::Modifier::empty(); // clear before re-apply
-                c.set_style(style);
+        if let Some(cur_dx) = plan.screen_col(ccol + 1).filter(|&dx| dx < content.width) {
+            if cur_dy < content.height {
+                let grid_row = cur_dy + row_offset + 1; // 1-based
+                let grid_col = ccol + 1; // 1-based
+                let cur_cell = upper.cell(grid_row, grid_col);
+                let mut cur_zvm = grid_cell_to_zvm(cur_cell);
+                cur_zvm.style ^= 0x01; // toggle reverse bit
+                let style = cell_style(cur_zvm, cur_cell.glk_style, colors, honor_game_colours, upper.bg, upper.fg, is_glk_grid);
+                if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
+                    c.modifier = ratatui::style::Modifier::empty(); // clear before re-apply
+                    c.set_style(style);
+                }
             }
+        }
+    }
+
+    // A grid narrower than the pane is centred; a row's own styling runs on into
+    // the side margins so a reverse status band spans the pane (SQ-1809): the left
+    // margin takes the style of the row's first cell, the right that of its last.
+    // A plain (default-style) cell leaves its margin untouched, and a framed grid
+    // keeps its frame as the edge.
+    if border_cols == 0 && plan.strategy == ColumnStrategy::Fits {
+        for dy in 0..content.height {
+            let grid_row = dy + row_offset + 1;
+            if grid_row > upper_rows {
+                break;
+            }
+            let edge = |grid_col: u16, x0: u16, x1: u16, buf: &mut Buffer| {
+                let cell = upper.cell(grid_row, grid_col);
+                if !cell_is_styled(&cell) {
+                    return;
+                }
+                let style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, upper.bg, upper.fg, is_glk_grid);
+                for x in x0..x1 {
+                    if let Some(c) = buf.cell_mut((x, content.y + dy)) {
+                        c.set_symbol(" ").set_style(style);
+                    }
+                }
+            };
+            edge(1, area.x, content.x, buf);
+            edge(upper.cols, content.right(), area.right(), buf);
         }
     }
 
@@ -1259,7 +1504,9 @@ mod tests {
 
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 1, (1, 20), false, &colors, area, &mut buf, true, &mut Vec::new());
-        assert_eq!(row(&buf), "ROOM NAME ", "a parked cursor does not scroll the row");
+        // SQ-1809: the blank columns go (nearest the centre first), the ink stays —
+        // the room name still starts at the left edge, whatever the cursor did.
+        assert_eq!(row(&buf), "ROOM NAME#", "a parked cursor does not scroll the row");
 
         // The same grid while the game awaits a keypress here: the caret wins.
         let mut buf = Buffer::empty(area);
@@ -1279,6 +1526,9 @@ mod tests {
     #[test]
     fn grid_viewport_matches_draw_grid_column_follow() {
         let mut upper = GridWindow::default();
+        // A Glk grid keeps the contiguous viewport (a Z-machine grid drops columns
+        // instead since SQ-1809 — see the plan_* tests).
+        upper.win = 1;
         upper.resize(1, 20);
         for (i, ch) in "ROOM NAME".chars().enumerate() {
             upper.put(1, i as u16 + 1, ch, 0);
@@ -1449,5 +1699,174 @@ mod tests {
             c.modifier.contains(Modifier::REVERSED),
             "cursor on a default (Reset/Reset) cell must carry REVERSED so it stays visible"
         );
+    }
+
+    // ── SQ-1809: the column plan ────────────────────────────────────────────
+
+    /// A grid of `rows.len()` rows, `cols` wide; each row is laid down from
+    /// column 1 in `style` (a space is written as a space in that style).
+    fn grid_of(cols: u16, rows: &[(&str, u8)]) -> GridWindow {
+        let mut g = GridWindow::default();
+        g.resize(rows.len() as u16, cols);
+        g.active_rows = rows.len() as u16;
+        for (r, (text, style)) in rows.iter().enumerate() {
+            for c in 1..=cols {
+                let ch = text.chars().nth(usize::from(c) - 1).unwrap_or(' ');
+                g.put(r as u16 + 1, c, ch, *style);
+            }
+        }
+        g
+    }
+
+    fn shown(g: &GridWindow, plan: &ColumnPlan, row: u16) -> String {
+        plan.kept.iter().map(|&c| g.cell(row, c).ch).collect()
+    }
+
+    #[test]
+    fn plan_fits_keeps_every_column() {
+        let g = grid_of(10, &[("ABCDEFGHIJ", 0)]);
+        let p = column_plan(&g, 1, 10, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::Fits);
+        assert_eq!(p.kept, (1..=10).collect::<Vec<u16>>());
+        let p = column_plan(&g, 1, 40, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::Fits);
+        assert_eq!(p.kept.len(), 10, "a wider pane keeps the grid whole (it is centred, not stretched)");
+    }
+
+    #[test]
+    fn plan_drops_blank_columns_alternating_out_from_the_centre() {
+        // 20 columns, ink only at 1-2 and 19-20; 12 visible, so 8 blanks go.
+        let g = grid_of(20, &[("AB                YZ", 0)]);
+        let p = column_plan(&g, 1, 12, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::DropBlank);
+        // right of centre first (11), then left (10), alternating outward.
+        assert_eq!(p.kept, vec![1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20]);
+        assert_eq!(shown(&g, &p, 1), "AB        YZ");
+    }
+
+    #[test]
+    fn plan_keeps_one_blank_between_words_until_it_must_not() {
+        // `West of House` + a wide gap + `Score: 0 Moves: 1`: the gap shrinks to
+        // a single column, the word spaces inside the fields stay.
+        let g = grid_of(46, &[("West of House               Score: 0 Moves: 1", 1)]);
+        let p = column_plan(&g, 1, 31, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::DropBlank);
+        let row = shown(&g, &p, 1);
+        assert!(row.contains("House Score: 0 Moves: 1"), "{row:?}");
+        assert!(row.starts_with("West of House"), "{row:?}");
+    }
+
+    #[test]
+    fn plan_blank_is_judged_on_every_row() {
+        // Column 3 is blank on row 1 but inked on row 2: it must stay.
+        let g = grid_of(8, &[("A      B", 0), ("  X     ", 0)]);
+        let p = column_plan(&g, 2, 6, (1, 1), false);
+        assert!(p.kept.contains(&3), "{:?}", p.kept);
+        assert_eq!(p.kept.len(), 6);
+    }
+
+    #[test]
+    fn plan_drops_content_middle_out_on_a_single_status_band() {
+        let g = grid_of(10, &[("ABCDEFGHIJ", 1)]);
+        let p = column_plan(&g, 1, 6, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::DropStatusBand);
+        assert_eq!(shown(&g, &p, 1), "ABCHIJ");
+    }
+
+    #[test]
+    fn plan_two_row_band_loses_the_same_columns_on_both_rows() {
+        let g = grid_of(10, &[("ABCDEFGHIJ", 1), ("klmnopqrst", 1)]);
+        let p = column_plan(&g, 2, 6, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::DropStatusBand);
+        assert_eq!(shown(&g, &p, 1), "ABCHIJ");
+        assert_eq!(shown(&g, &p, 2), "klmrst");
+    }
+
+    #[test]
+    fn plan_quote_box_under_a_band_takes_the_viewport() {
+        let g = grid_of(20, &[("ABCDEFGHIJKLMNOPQRST", 1), ("it was a dark and storm", 0)]);
+        let p = column_plan(&g, 2, 8, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::Viewport);
+        assert_eq!(p.kept, (1..=8).collect::<Vec<u16>>());
+        // following a live caret scrolls it, over the ORIGINAL columns
+        let p = column_plan(&g, 2, 8, (2, 15), true);
+        assert_eq!(p.strategy, ColumnStrategy::Viewport);
+        assert_eq!(p.kept, (8..=15).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn plan_never_drops_the_cursor_column_or_its_field() {
+        // A form row: label, gap, an underlined (style 2) field the caret sits in.
+        let mut g = grid_of(30, &[("Name:                         ", 0)]);
+        for c in 15..=22 {
+            g.put(1, c, ' ', 2); // styled blanks: the field
+        }
+        let p = column_plan(&g, 1, 20, (1, 18), true);
+        for c in 15..=22 {
+            assert!(p.kept.contains(&c), "field column {c} dropped: {:?}", p.kept);
+        }
+        assert_eq!(p.kept.len(), 20);
+        assert_eq!(p.strategy, ColumnStrategy::DropBlank);
+        // ...and when the protected run leaves too little to drop: viewport.
+        let p = column_plan(&g, 1, 6, (1, 18), true);
+        assert_eq!(p.strategy, ColumnStrategy::Viewport);
+        assert!(p.kept.contains(&18));
+    }
+
+    #[test]
+    fn plan_inverse_maps_screen_to_game_and_dropped_to_nearest() {
+        let p = ColumnPlan { kept: vec![1, 2, 3, 8, 9, 10], strategy: ColumnStrategy::DropStatusBand };
+        assert_eq!(p.game_col(0), 1);
+        assert_eq!(p.game_col(3), 8);
+        assert_eq!(p.game_col(99), 10, "past the end clamps");
+        assert_eq!(p.screen_col(9), Some(4));
+        assert_eq!(p.screen_col(5), None);
+        assert_eq!(p.nearest_kept(2), 2);
+        assert_eq!(p.nearest_kept(4), 3);
+        assert_eq!(p.nearest_kept(7), 8);
+        assert_eq!(p.nearest_kept(5), 3, "a tie goes to the left neighbour");
+        assert_eq!(p.nearest_kept(6), 8);
+    }
+
+    #[test]
+    fn plan_glk_grid_keeps_the_viewport() {
+        let mut g = grid_of(20, &[("A                  Z", 0)]);
+        g.win = 3;
+        let p = column_plan(&g, 1, 10, (1, 1), false);
+        assert_eq!(p.strategy, ColumnStrategy::Viewport);
+    }
+
+    #[test]
+    fn draw_grid_draws_the_planned_columns() {
+        let g = grid_of(20, &[("AB                YZ", 0)]);
+        let mut colors = make_colors();
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buf = Buffer::empty(area);
+        draw_grid(&g, 1, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
+        let row: String = (0..12).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
+        assert_eq!(row, "AB        YZ");
+    }
+
+    #[test]
+    fn draw_grid_extends_a_reverse_band_into_both_margins_but_not_a_plain_row() {
+        for honor in [true, false] {
+            let g = grid_of(10, &[("ROOM   9/9 ", 1), ("plain      ", 0)]);
+            let mut colors = make_colors();
+            colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+            let area = Rect::new(0, 0, 30, 2);
+            let mut buf = Buffer::empty(area);
+            draw_grid(&g, 2, (1, 1), false, &colors, area, &mut buf, honor, &mut Vec::new());
+            for x in [0u16, 5, 9, 20, 25, 29] {
+                assert!(
+                    buf.cell((x, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+                    "honor={honor}: band cell {x} must be reversed"
+                );
+                assert!(
+                    !buf.cell((x, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+                    "honor={honor}: plain row cell {x} stays plain"
+                );
+            }
+        }
     }
 }

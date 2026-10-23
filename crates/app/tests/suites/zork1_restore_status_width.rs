@@ -220,11 +220,18 @@ fn restoring_an_80_column_save_into_a_narrower_session_keeps_the_bar_intact() {
             // nothing numeric belongs anywhere in the name region. A dropped
             // `set_cursor` leaves the digits at the cursor's home instead, which
             // is what " North of House0 2" — the reported garble — looks like.
-            let name_region = &bar[..bar.len().min(40)];
+            // (SQ-1809: the blank gap is dropped for display, so the fields sit
+            // nearer the name than column 52 — the name itself is what is checked,
+            // and the fields are asserted whole below.)
+            let name_region = &bar[..bar.len().min(15)];
             assert!(
                 !name_region.chars().any(|c| c.is_ascii_digit()),
                 "no field digit may land on the room name — the SQ-0679/0681 garble \
                  (honor={honor}, pane={pane_w}): {bar:?}"
+            );
+            assert!(
+                bar.contains("Score: 0") && bar.trim_end().ends_with("Moves: 2"),
+                "both fields survive in the narrow pane (honor={honor}, pane={pane_w}): {bar:?}"
             );
             assert!(
                 all_rev,
