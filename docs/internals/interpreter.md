@@ -984,7 +984,8 @@ I'm in a chapel
   drawn cursor (a dropped column lands on its nearest kept neighbour, ties left),
   and `host::column_plan` / `grid_column_plan` hand a host the same answer
   (`grid_viewport` is now derived from it). Standalone InvisiClues hint programs in
-  the Hints tab are told at least `hints_tab::HINTS_MIN_COLS` (72) columns and drawn
+  the Hints tab are told at least `hints_tab::HINTS_MIN_COLS` (72) columns, or
+  `HINTS_MIN_COLS_IZM` (60) for an `*izm` program (chosen from the loaded file's name), and drawn
   through the same plan. Screen readers and narration still read the game's full
   grid. The virtual window is themeable
   from `[elements]`: `upper_window` inks its cells, and `upper_window_border`

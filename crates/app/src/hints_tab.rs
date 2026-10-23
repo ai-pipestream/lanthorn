@@ -46,11 +46,49 @@ const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in th
 /// entry and collide below this: `stationinv`'s 39-column submenu title meets the
 /// 33-column right-aligned legend on one row and breaks at 70, `spellbinv` clips
 /// its question rows until 76 and is clean at 72 (measured on SQ-1809 with
-/// `crates/zvm/examples/hint_probe.rs`; the `*izm` programs are clean at 60).
+/// `crates/zvm/examples/hint_probe.rs`). The `*izm` programs have their own,
+/// smaller floor, [`HINTS_MIN_COLS_IZM`]; this one is for every other program.
 /// A panel narrower than this still shows the program laid out at 72, drawn
 /// through the upper window's column plan (`render::upper_window::column_plan`),
 /// which removes the blank gap between title and legend.
 pub const HINTS_MIN_COLS: u16 = 72;
+/// The narrowest width an `*izm` hint program (a file stem ending in `izm`, the
+/// side-panel family) is told (SQ-1812). Measured on SQ-1809: the `*izm` programs
+/// lay out cleanly from 40 to 60 columns, and the worst five (`arthrizm`,
+/// `bzorkizm`, `cutthizm`, `infdlizm`, `journizm`) need 60.
+pub const HINTS_MIN_COLS_IZM: u16 = 60;
+
+/// The width floor for the hint program called `program` (its file name; `None`
+/// when not known yet): [`HINTS_MIN_COLS_IZM`] for an `*izm` file stem, else
+/// [`HINTS_MIN_COLS`], so an unknown program stays on the safe side.
+fn min_cols_for(program: Option<&str>) -> u16 {
+    let stem = program.map(|p| Path::new(p).file_stem().and_then(|s| s.to_str()).unwrap_or(p));
+    match stem {
+        Some(s) if s.to_ascii_lowercase().ends_with("izm") => HINTS_MIN_COLS_IZM,
+        _ => HINTS_MIN_COLS,
+    }
+}
+
+/// The file name of the hint program a start will open, known before it boots so the
+/// boot width can use its floor: the pick, else what the resolver finds.
+fn program_name(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    picked: Option<&Path>,
+    index: &crate::hints::HintIndex,
+) -> Option<String> {
+    use crate::hints::HintResolution;
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    if let Some(p) = picked {
+        return name(p);
+    }
+    match crate::hints::resolve_hint_source_with_tuid(story_path, story, tuid, index) {
+        HintResolution::File(p) => name(&p),
+        HintResolution::ZipEntry { entry, .. } => entry.rsplit('/').next().map(str::to_owned),
+        _ => None,
+    }
+}
 const HINT_PAGE_LINES: i32 = 10;
 
 /// The dictionary the built-in-HINT check reads: empty when the story's `HINT`
@@ -149,11 +187,12 @@ impl HintsTab {
 
     /// Where the last draw put things.
     /// The `(rows, cols)` the hint program should be laid out at: the panel the last
-    /// draw gave it, less the input row, the width floored at [`HINTS_MIN_COLS`]. `None` before the tab has been drawn at all
-    /// (SQ-1753).
-    pub fn panel_screen(&self) -> Option<(u16, u16)> {
+    /// draw gave it, less the input row, the width floored at [`HINTS_MIN_COLS`], or at
+    /// [`HINTS_MIN_COLS_IZM`] when `program` (the hint file's name) is an `*izm` program
+    /// (SQ-1812). `None` before the tab has been drawn at all (SQ-1753).
+    pub fn panel_screen(&self, program: Option<&str>) -> Option<(u16, u16)> {
         let area = self.hits.borrow().area;
-        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(HINTS_MIN_COLS)))
+        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(min_cols_for(program))))
     }
 
     pub fn hits(&self) -> HintsHits {
@@ -236,7 +275,9 @@ pub fn ensure_started_in_with_tuid(
     state.hints_tab.phase = Phase::NotStarted;
     let index = crate::hints::load_hint_index(&state.config.user_dir);
     state.hints_tab.status = game_hint_status_with_tuid(story_path, story, tuid, &index);
-    match start_with_tuid(story_path, story, tuid, picked.as_deref(), running.as_deref(), builtin_hint_words(state), &state.config, state.hints_tab.panel_screen()) {
+    let program = program_name(story_path, story, tuid, picked.as_deref(), &index);
+    let screen = state.hints_tab.panel_screen(program.as_deref());
+    match start_with_tuid(story_path, story, tuid, picked.as_deref(), running.as_deref(), builtin_hint_words(state), &state.config, screen) {
         HintStart::Started(session) => {
             state.overlays.hints = Some(*session);
             state.hints_tab.phase = Phase::Running;
@@ -259,7 +300,8 @@ pub fn ensure_started_in_with_tuid(
 /// redraws and wrapping in step.
 pub fn sync_screen_dims(state: &mut AppState) -> bool {
     use crate::engine::Engine;
-    let Some((rows, cols)) = state.hints_tab.panel_screen() else { return false };
+    let program = state.overlays.hints.as_ref().map(|hs| hs.label.clone());
+    let Some((rows, cols)) = state.hints_tab.panel_screen(program.as_deref()) else { return false };
     let Some(HintSession { source: HintSource::Zcode(vm), .. }) = state.overlays.hints.as_mut() else {
         return false;
     };
@@ -989,11 +1031,11 @@ mod tests {
             builtin_hint: false,
         };
         let mut state = tab_state(hs);
-        assert_eq!(state.hints_tab.panel_screen(), None, "nothing drawn yet, so no size to give");
+        assert_eq!(state.hints_tab.panel_screen(None), None, "nothing drawn yet, so no size to give");
         assert!(!sync_screen_dims(&mut state));
 
         let _ = screen_rows(60, 20, &state);
-        assert_eq!(state.hints_tab.panel_screen(), Some((17, HINTS_MIN_COLS)), "the framed panel less its input row, width floored (SQ-1809)");
+        assert_eq!(state.hints_tab.panel_screen(Some("Hints: X")), Some((17, HINTS_MIN_COLS)), "the framed panel less its input row, width floored (SQ-1809)");
         assert!(sync_screen_dims(&mut state), "the header changes to the panel's size");
         let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
         assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (17, HINTS_MIN_COLS as u8));
@@ -1003,6 +1045,21 @@ mod tests {
         assert!(sync_screen_dims(&mut state), "a later resize is re-declared");
         let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
         assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (11, HINTS_MIN_COLS as u8));
+    }
+
+    /// SQ-1812: the floor follows the program's family: `*izm` programs (side-panel
+    /// hints) are told 60, everything else, `*inv` included, keeps 72.
+    #[test]
+    fn an_izm_program_is_floored_at_60_and_an_inv_program_at_72() {
+        let tab = HintsTab::default();
+        tab.hits.borrow_mut().area = ratatui::layout::Rect::new(0, 0, 50, 18);
+        assert_eq!(tab.panel_screen(Some("arthrizm.z5")), Some((17, HINTS_MIN_COLS_IZM)));
+        assert_eq!(tab.panel_screen(Some("ARTHRIZM.Z5")), Some((17, 60)), "case-insensitive");
+        assert_eq!(tab.panel_screen(Some("stationinv.z5")), Some((17, HINTS_MIN_COLS)));
+        assert_eq!(tab.panel_screen(Some("Hints: X")), Some((17, 72)), "an unknown program stays on the safe side");
+        assert_eq!(tab.panel_screen(None), Some((17, 72)), "no program known yet");
+        tab.hits.borrow_mut().area = ratatui::layout::Rect::new(0, 0, 66, 18);
+        assert_eq!(tab.panel_screen(Some("arthrizm.z5")), Some((17, 66)), "a wider panel is told its own width");
     }
 
     #[test]

@@ -226,15 +226,15 @@ fn bureaucracy_form_keeps_the_typed_field_visible_at_45_columns() {
     }
 }
 
-// ── The Hints tab: standalone InvisiClues programs are told at least 72 ─────
+// ── The Hints tab: standalone hint programs are told at least 72 (*inv) or 60 (*izm) ─────
 
 #[test]
 fn hints_tab_floors_a_narrow_panel_at_72_and_draws_through_the_column_plan() {
-    use app::hints_tab::{self, HINTS_MIN_COLS};
+    use app::hints_tab::{self, HINTS_MIN_COLS, HINTS_MIN_COLS_IZM};
     use app::journal::JournalTab;
     use app::state::{AppState, HintSource};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories");
-    for file in ["stationinv.z5", "spellbinv.z5"] {
+    for (file, floor) in [("stationinv.z5", HINTS_MIN_COLS), ("spellbinv.z5", HINTS_MIN_COLS), ("arthrizm.z5", HINTS_MIN_COLS_IZM)] {
         let path = root.join(file);
         if !path.is_file() {
             eprintln!("SKIP: gitignored story missing at {}", path.display());
@@ -249,18 +249,25 @@ fn hints_tab_floors_a_narrow_panel_at_72_and_draws_through_the_column_plan() {
         let outer = Rect::new(0, 0, 52, 40);
         let mut buf = Buffer::empty(outer);
         hints_tab::draw(&st, outer, &mut buf);
-        let (_, cols) = st.hints_tab.panel_screen().expect("drawn");
-        assert_eq!(cols, HINTS_MIN_COLS, "{file}: a 50-column panel is told the floor");
+        let (_, cols) = st.hints_tab.panel_screen(Some(file)).expect("drawn");
+        assert_eq!(cols, floor, "{file}: a 50-column panel is told the floor");
         hints_tab::sync_screen_dims(&mut st);
-        // Past the banner into the topic menu (turn count: one keypress).
+        // Into the topic menu at the new width (turn count: one keypress). An *inv program
+        // is on its banner, so Enter; an *izm program has skipped its banner and is already
+        // in the menu, where Enter would open Credits, so `n` (next item) redraws it instead.
         {
             let HintSource::Zcode(vm) = &mut st.overlays.hints.as_mut().unwrap().source;
-            step(vm, "");
+            if file.ends_with("izm.z5") {
+                assert!(vm.submit_char(b'n').fault.is_none());
+            } else {
+                step(vm, "");
+            }
         }
         let HintSource::Zcode(vm) = &st.overlays.hints.as_ref().unwrap().source;
         let g = model_grid(vm);
-        assert_eq!(g.cols, HINTS_MIN_COLS, "{file}: the program laid itself out at the floor");
-        assert!(hline(&g, 1).contains("N=Next"), "{file}: non-vacuity, the title/legend row: {:?}", hline(&g, 1));
+        assert_eq!(g.cols, floor, "{file}: the program laid itself out at the floor");
+        let legend = if file.ends_with("izm.z5") { "N = next item" } else { "N=Next" };
+        assert!(hline(&g, 2).contains(legend) || hline(&g, 1).contains(legend), "{file}: non-vacuity, the legend row: {:?} / {:?}", hline(&g, 1), hline(&g, 2));
         let mut buf = Buffer::empty(outer);
         hints_tab::draw(&st, outer, &mut buf);
         let hits = st.hints_tab.hits();

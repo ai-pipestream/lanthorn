@@ -34,6 +34,9 @@ while any such tag, or this Unreleased section, still exists.*
   Bureaucracy and their kin) or redraws it for the width it is told (modern Inform games), and
   gives the first kind a steady 80 columns that no resize or restored save can upset. A new
   `status_width` setting (`"auto"`, `"fixed"` or `"pane"`, also per game) overrides the check.
+- **Hint files lay out in a narrower side panel.** The Hints tab used to give every hint file at
+  least 72 columns; the smaller `*izm` hint files now get as little as 60, and the InvisiClues
+  `*inv` files keep 72.
 
 ## v0.9.8 — 2026-10-23
 
