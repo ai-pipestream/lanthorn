@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Fixed
+
+- **Text that an older Infocom game centred or indented for an 80-column screen now keeps its shape on a narrow one.** AMFV's opening quotation no longer breaks up with its attribution stranded on a row of its own: a block of indented lines that would stick out past the right edge slides left as one piece (as far as its least-indented line allows), and goes back to the game's own layout when the window widens again. Inventory lists and similar indented blocks get the same treatment.
+
 ### Changed
 
 - **Older Infocom games keep a full 80-column status line at any window size.** lanthorn now

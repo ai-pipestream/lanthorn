@@ -40,6 +40,8 @@ mod sq1410_restore_degradation_notice;
 mod sq1411_splash_resume_pager;
 #[path = "suites/sq1434_glulx_opening_pager.rs"]
 mod sq1434_glulx_opening_pager;
+#[path = "suites/sq1810_hand_laid_block_shift.rs"]
+mod sq1810_hand_laid_block_shift;
 #[path = "suites/status_width_verdict.rs"]
 mod status_width_verdict;
 #[path = "suites/transcript_follow_ease.rs"]

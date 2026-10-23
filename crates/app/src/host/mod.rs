@@ -64,6 +64,10 @@ pub use turn::{
 // is narrower than the grid, and the inverse a click or drawn cursor needs. A host that draws
 // the grid itself reads this instead of restating the rule.
 pub use crate::render::upper_window::{column_plan, grid_column_plan, ColumnPlan, ColumnStrategy};
+// The lower window's block shift (SQ-1810): how far to move each hard-broken line left so text a
+// width-caching story laid out for its told width by hand still fits a narrower pane. A host that
+// reflows window 0 itself calls this with the same inputs instead of restating the rule.
+pub use crate::render::hand_layout::{block_shifts, is_hand_laid, shift_line_left};
 
 use crate::engine::Engine;
 

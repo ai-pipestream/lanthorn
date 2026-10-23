@@ -3146,6 +3146,13 @@ pub struct AppState {
     /// sit beside. Following the art instead is what made Zork Zero's drop-cap
     /// eight rows tall beside the four-line paragraph it opens.
     pub v6_hybrid_ring: std::cell::Cell<bool>,
+    /// The width a width-caching Z-machine story (v4/v5/v7/v8) was TOLD, when that
+    /// is not the pane's (`GameSession::fixed_cols`, SQ-1809) — `None` for every
+    /// other story and engine. Published each pass by
+    /// `host::screen::sync_zvm_screen_dims`, read by `render_transcript` for the
+    /// lower window's block shift (SQ-1810, `render::hand_layout`), and part of the
+    /// wrap cache's key since it moves where lines sit.
+    pub story_told_cols: std::cell::Cell<Option<u16>>,
     /// The per-axis density of the artwork this launch mounted —
     /// [`crate::graphics::PictSource::art_scale`], resolved once at boot by
     /// `startup.rs` (and again by an `@restart`, `reset.rs`) from the archive's own
@@ -4120,6 +4127,7 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_hybrid_ring: std::cell::Cell::new(false),
+            story_told_cols: std::cell::Cell::new(None),
             v6_art_scale: (crate::session::V6_ART_SCALE, crate::session::V6_ART_SCALE),
             v6_scale_lock_fallback: std::cell::Cell::new(false),
             v6_scale_lock_inapplicable: std::cell::Cell::new(false),

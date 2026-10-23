@@ -2201,6 +2201,30 @@ pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
     }
 }
 
+/// Does a hand-laid block (SQ-1810) still sit open just before raw transcript line
+/// `from`, so that lines arriving at `from` could join it and move its shift?
+///
+/// Walks back over lines the filter hides and over blank story lines (a block
+/// survives those) to the nearest line that decides it: a story line that is a
+/// block candidate means yes; anything else, no.
+fn hand_block_open_before(state: &AppState, from: usize, told: u16) -> bool {
+    for i in (0..from.min(state.transcript.len())).rev() {
+        let kind = state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+        if !transcript_filter_matches(state.transcript_filter, kind) {
+            continue;
+        }
+        if kind != TranscriptKind::Story {
+            return false;
+        }
+        let line = &state.transcript[i];
+        if line.trim_end_matches(' ').is_empty() {
+            continue;
+        }
+        return crate::render::hand_layout::is_hand_laid(line, told);
+    }
+    false
+}
+
 /// Draw the status bar into `region`.
 ///
 /// Each segment in `state.colors.statusbar_layout` is resolved (placeholders
@@ -2578,6 +2602,19 @@ fn render_middle(
         Some(c) => (c.key.plan(state, body_area.width), c.key.shape.clear_anchor, c.clear_anchor_filtered),
         None => (WrapPlan::Rebuild, None, None),
     };
+    // The lower window's block shift (SQ-1810) makes a line's rows depend on its
+    // NEIGHBOURS: a line that arrives now can join a hand-laid block already
+    // wrapped, and move the shift of lines the cache holds. So an append or a
+    // repair that lands where such a block is still open starts over.
+    let told_cols = state.story_told_cols.get();
+    let plan = match (plan, told_cols) {
+        (WrapPlan::Append { from } | WrapPlan::Repair { at: from }, Some(told))
+            if hand_block_open_before(state, from, told) =>
+        {
+            WrapPlan::Rebuild
+        }
+        (p, _) => p,
+    };
     if plan != WrapPlan::Reuse {
         // The source lines this frame has to wrap: all of them on a rebuild;
         // only the ones that just arrived on an append; from the old cached
@@ -2691,10 +2728,37 @@ fn render_middle(
             .iter()
             .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
             .collect();
-        let filtered_para: Vec<ParaFmt> = visible_indices
+        let mut filtered_para: Vec<ParaFmt> = visible_indices
             .iter()
             .map(|&i| state.transcript_para.get(i).copied().unwrap_or_default())
             .collect();
+        // Block shift (SQ-1810): text a width-caching story laid out by hand for its
+        // told width is moved left to fit a narrower pane — on THESE per-frame copies,
+        // never in the stored transcript, so a wider pane gets the game's own indents
+        // back. Everything downstream (wrap, selection, links, the scrollbar) then
+        // sees the shifted rows. `plan` was widened above so a block is always
+        // wrapped from its first line.
+        let mut filtered_lines = filtered_lines;
+        let mut filtered_runs = filtered_runs;
+        if let Some(told) = told_cols {
+            let probe: Vec<&str> = filtered_lines
+                .iter()
+                .zip(&filtered_kinds)
+                .map(|(l, k)| if *k == TranscriptKind::Story { l.as_str() } else { "-" })
+                .collect();
+            let shifts = crate::render::hand_layout::block_shifts(&probe, told, body_area.width);
+            for (n, &sh) in shifts.iter().enumerate() {
+                if sh == 0 {
+                    continue;
+                }
+                let (text, runs) = crate::render::hand_layout::shift_line_left(&filtered_lines[n], &filtered_runs[n], sh);
+                filtered_lines[n] = text;
+                filtered_runs[n] = runs;
+                if let Some(nw) = filtered_para[n].nowrap_from.as_mut() {
+                    *nw = nw.saturating_sub(u32::from(sh));
+                }
+            }
+        }
         // Inline images parallel the filtered lines, indexed by the SAME visible
         // indices. Bands are only emitted when a game Picker is present (images
         // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.

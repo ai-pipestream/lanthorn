@@ -97,6 +97,9 @@ pub(crate) struct WrapShape {
     /// The raster wrap breaks by PIXEL (SQ-1009), so the face is a wrap input and
     /// not merely a drawing one.
     pub face: u64,
+    /// The width a width-caching story is told (`AppState::story_told_cols`), which
+    /// decides what the lower window's block shift treats as hand-laid text (SQ-1810).
+    pub told_cols: Option<u16>,
 }
 
 impl WrapShape {
@@ -126,6 +129,7 @@ impl WrapShape {
             period_look: state.period_look,
             hybrid_ring: state.v6_hybrid_ring.get(),
             face: state.v6_text.wrap_fingerprint(),
+            told_cols: state.story_told_cols.get(),
         }
     }
 }

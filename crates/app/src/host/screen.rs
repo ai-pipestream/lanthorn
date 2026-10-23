@@ -44,6 +44,7 @@ use crate::state::AppState;
 ///
 /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
 pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, rows): (u16, u16)) -> bool {
+    state.story_told_cols.set(None);
     let Some(gs) = session.as_any().downcast_ref::<crate::session::GameSession>() else {
         return false;
     };
@@ -59,6 +60,9 @@ pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, r
     ) else {
         return false;
     };
+    // The width the story is told, when it is not the pane's: the lower window's block
+    // shift (SQ-1810) needs it to tell hand-laid text from prose.
+    state.story_told_cols.set(gs.fixed_cols().map(|_| cols.min(255)));
     let current = (
         gs.machine.mem.read_byte(0x20) as u16,
         gs.machine.mem.read_byte(0x21) as u16,
