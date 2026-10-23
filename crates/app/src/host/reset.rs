@@ -226,7 +226,15 @@ pub fn reset_game(
                 // (`--interpreter-version`), so it is the one the launch pinned.
                 machine_palette,
                 state.config.interpreter_version,
-            );
+            )
+            // SQ-1809: the session's own verdict, reused rather than probed
+            // again — whether a story caches the screen width is a property of
+            // the story, and this is the same story. A forced `status_width`
+            // (or a pinned `virtual_screen_cols`) still wins, as at launch.
+            .with_status_width(match state.config.effective_status_width() {
+                crate::config::StatusWidth::Auto => zvm_session_mut(session).status_width_decided(),
+                forced => forced,
+            });
             // Republish the render's copy for the same reason `v6_art_scale` is
             // republished above: a restart may have landed on a different archive,
             // and the pen's scale rides on that.

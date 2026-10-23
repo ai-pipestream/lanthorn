@@ -202,6 +202,7 @@ pub mod resources;
 pub mod screen;
 pub mod screen_snapshot;
 pub mod text;
+pub mod width_probe;
 pub mod world;
 
 pub use objects::ObjectSnapshot;

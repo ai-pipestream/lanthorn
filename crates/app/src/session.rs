@@ -1085,63 +1085,30 @@ pub struct GameSession {
     /// existed. They keep the pre-SQ-0567 behaviour: stale palette, right
     /// layering.
     unreplayable: std::collections::HashSet<u8>,
-    /// The width (in columns) the story image now in memory was laid out for —
-    /// the boot width of the session that produced it.
+    /// `Some(cols)` when this story CACHES the screen width (SQ-1809): a v4+ story
+    /// that lays its status line out once, at boot, from header byte $21 and
+    /// thereafter only moves the cursor to the columns it derived then (Infocom's
+    /// own v4/v5 games). Such a story is told `cols` for the whole session
+    /// (80, [`zvm::screen::DEFAULT_SCREEN_COLS`], unless a restored save was laid
+    /// out wider — see [`note_restored_screen_cols`](Self::note_restored_screen_cols))
+    /// and never sees the pane's width change, because any change would move the
+    /// columns it baked in outside its window. Rows still follow the pane.
     ///
-    /// At construction that is THIS session's boot: the `host_screen` column
-    /// count seeded into `new_with_trace` (SQ-0680), or
-    /// [`zvm::screen::DEFAULT_SCREEN_COLS`] when boot was unseeded (`None`, or
-    /// a construction path that bypasses `new_with_trace` entirely).
+    /// `None` means the story is told the pane's width and told again whenever it
+    /// changes: a story that re-reads $21 and lays out from it (Inform's library),
+    /// a pinned `virtual_screen_cols`, `status_width = "pane"`, and every version
+    /// this does not apply to (v1–3 have no such header field, v6 has a pixel
+    /// screen).
     ///
-    /// [`declared_story_screen_dims`]'s floor used to assume every v4+ story
-    /// booted at the fixed 80-column default; now that boot itself can be
-    /// seeded with the real pane, the floor has to track whatever THIS session
-    /// actually booted at instead, or a pane narrower than 80 would have its
-    /// correct pre-boot seed silently overwritten back to 80 on the very next
-    /// poll (`loop_tick::poll_zvm_screen_dims`).
-    ///
-    /// A RESTORE swaps that image out for one some other session booted, and
-    /// with it the baked-in status-bar columns — so every restore raises this
-    /// through [`note_restored_screen_cols`](Self::note_restored_screen_cols)
-    /// to the restored game's own frame of reference (SQ-0681). It only ever
-    /// grows: a session whose own boot was wider keeps its width, because the
-    /// header it booted with is still the wider one.
+    /// Decided ONCE, before the boot, by [`zvm::width_probe`] (or forced by
+    /// `status_width`), and a property of the story rather than of the terminal —
+    /// so it is not in the save archive: every restore follows a boot of the same
+    /// story, which already decided. `@restart` reuses it
+    /// ([`status_width_decided`](Self::status_width_decided)) rather than asking
+    /// again. [`declared_story_screen_dims`] reads it.
     ///
     /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
-    pub boot_screen_cols: u16,
-    /// While `Some`, a restore has raised [`boot_screen_cols`](Self::boot_screen_cols)
-    /// above the pane this session booted at and nobody yet knows whether the
-    /// running story needs that floor. The value is the pane width to give back
-    /// if it does not (SQ-1604, reworked SQ-1778).
-    ///
-    /// The SQ-0681 floor is a blunt protection: it holds the restored save's
-    /// width for the rest of the session. Right for Zork 1 r52, which computes
-    /// its status columns once (52 and 65) and keeps drawing there; wrong for
-    /// Lost Pig, which lays the line out afresh from the width it is told.
-    /// A READ of header byte $21 does not tell them apart (r52 reads it every
-    /// turn and still draws at fixed columns), so
-    /// [`settle_width_floor`](Self::settle_width_floor) asks the story directly:
-    /// at the first line read with text in the upper window it replays the
-    /// player's own command on a throwaway copy whose $21 is this pane width and
-    /// counts the cursor moves that fall outside it. None outside means the
-    /// story adapts and the floor is released; any means the layout is baked and
-    /// the floor stays. Cleared once a verdict is in.
-    pre_restore_screen_cols: Option<u16>,
-    /// The story file as loaded, kept so the shadow width check can boot a
-    /// throwaway copy (the live image is dirtied by play and by restores).
-    story: std::sync::Arc<Vec<u8>>,
-    /// The floor was a guess (a bare Quetzal `.qzl` carries no screen width, so
-    /// [`note_bare_quetzal_width`](crate::engine_helpers::note_bare_quetzal_width)
-    /// assumes 80). A baked verdict then refines it to the width the story's
-    /// furthest status column implies instead of keeping the guess.
-    floor_is_guess: bool,
-    /// What the shadow width check concluded about this story, remembered for
-    /// the session so a later restore does not ask again (SQ-1778).
-    width_verdict: Option<WidthVerdict>,
-    /// Inconclusive shadow checks so far (a turn that moved no upper-window
-    /// cursor says nothing); capped so a story that never draws a status line
-    /// does not boot a shadow for every command.
-    width_check_tries: u8,
+    fixed_cols: Option<u16>,
     /// The pre-loaded text (ZMSD §15 `read`, v5+ — TerpEtude option 12,
     /// Beyond Zork's "AGAIN") `zvm` reported for the CURRENTLY pending line
     /// read, empty when nothing is pre-loaded (the overwhelmingly common
@@ -1160,24 +1127,6 @@ pub struct GameSession {
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
-
-/// What the shadow width check learned about a story (SQ-1778).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WidthVerdict {
-    /// Every upper-window cursor move fit the narrower width: the story lays its
-    /// status line out for the width it is told.
-    Adapts,
-    /// Some moves fell outside it: the columns are baked in.
-    Baked,
-}
-
-/// What a throwaway turn at a given header width reported.
-struct ShadowWidthReport {
-    moves: u32,
-    overreach: u32,
-    /// Furthest non-blank upper-window column after the turn.
-    extent: u16,
-}
 
 impl GameSession {
     /// Build a new session from raw story bytes.
@@ -1254,7 +1203,7 @@ impl GameSession {
         if let Some((r, c)) = host_screen {
             config = config.with_screen_grid(r.clamp(1, 255) as u8, c.clamp(1, 255) as u8);
         }
-        Self::from_boot_config(story, config, trace_from_boot)
+        Self::from_boot_config(story, config, trace_from_boot, None)
     }
 
     /// Boot a story on a machine, told what that machine is in ONE argument
@@ -1286,10 +1235,20 @@ impl GameSession {
         random_seed: Option<u32>,
         boot: &crate::machine_boot::MachineBoot,
     ) -> Result<GameSession, ZError> {
+        // SQ-1809: which width this story is told, decided BEFORE the real boot
+        // because a story that caches the width caches whatever it is given then.
+        // The one place both the TUI launch and an embedding host's boot (and a
+        // restart) reach, so there is one probe and not two copies of it.
+        let fixed_cols = Self::decide_fixed_cols(&story, honor_game_colours, sound_available, &picture_dims, host_screen, random_seed, boot);
+        let host_screen = match fixed_cols {
+            Some(cols) => Some((host_screen.map_or(zvm::screen::DEFAULT_SCREEN_ROWS as u16, |(r, _)| r), cols)),
+            None => host_screen,
+        };
         let mut s = Self::from_boot_config(
             story,
             boot.boot_config(honor_game_colours, sound_available, picture_dims, host_screen, random_seed),
             trace_from_boot,
+            fixed_cols,
         )?;
         // SQ-1071, and set AFTER the boot run rather than inside `BootConfig`:
         // this is the wrap regime a story's TEXT is laid out under, and moving it
@@ -1320,6 +1279,74 @@ impl GameSession {
         Ok(s)
     }
 
+    /// Decide whether this v4/v5/v7/v8 story CACHES the screen width and so must
+    /// be told a fixed one for the whole session (SQ-1809). `Some(cols)` is the
+    /// width it is told; `None` leaves it following the pane.
+    ///
+    /// `boot.status_width` says how: `Pane` never fixes, `Fixed` always does, and
+    /// `Auto` plays a throwaway copy ([`zvm::width_probe`]) booted exactly as the
+    /// real one would be — except at 80 columns, so a story that refuses a narrow
+    /// pane (Bureaucracy's `[Screen too small.]`) is judged on its play and not on
+    /// its refusal. Versions 1–3 (no such header field) and 6 (pixel screen) are
+    /// never fixed.
+    fn decide_fixed_cols(
+        story: &[u8],
+        honor_game_colours: bool,
+        sound_available: bool,
+        picture_dims: &[(u16, u16, u16)],
+        host_screen: Option<(u16, u16)>,
+        random_seed: Option<u32>,
+        boot: &crate::machine_boot::MachineBoot,
+    ) -> Option<u16> {
+        use crate::config::StatusWidth;
+        // The conventional Infocom v4+ screen. No `InterpreterProfile` states a
+        // different width for any machine today, so there is nothing to take it
+        // from; a profile that differed would say so here.
+        let told = zvm::screen::DEFAULT_SCREEN_COLS as u16;
+        if !matches!(story.first(), Some(4 | 5 | 7 | 8)) {
+            return None;
+        }
+        match boot.status_width {
+            StatusWidth::Pane => None,
+            StatusWidth::Fixed => Some(told),
+            StatusWidth::Auto => {
+                let rows = host_screen.map_or(zvm::screen::DEFAULT_SCREEN_ROWS as u16, |(r, _)| r);
+                let config = boot.boot_config(
+                    honor_game_colours,
+                    sound_available,
+                    picture_dims.to_vec(),
+                    Some((rows, told)),
+                    random_seed,
+                );
+                match zvm::width_probe::probe_status_width(story.to_vec(), config) {
+                    Some(p) if p.verdict == zvm::width_probe::WidthVerdict::Adapts => None,
+                    // A story that caches, one that gave no evidence either way,
+                    // and one the probe could not load: told 80, which is what
+                    // such a story has always been given on an 80-column screen.
+                    _ => Some(told),
+                }
+            }
+        }
+    }
+
+    /// The width this story is told regardless of the pane, when it caches the
+    /// width (SQ-1809); `None` while it follows the pane.
+    pub fn fixed_cols(&self) -> Option<u16> {
+        self.fixed_cols
+    }
+
+    /// The decision this session settled on, as a [`StatusWidth`] a restart can
+    /// hand its new boot so it neither re-probes nor re-decides (SQ-1809).
+    ///
+    /// [`StatusWidth`]: crate::config::StatusWidth
+    pub fn status_width_decided(&self) -> crate::config::StatusWidth {
+        if self.fixed_cols.is_some() {
+            crate::config::StatusWidth::Fixed
+        } else {
+            crate::config::StatusWidth::Pane
+        }
+    }
+
     /// **Private since SQ-1021, and one argument since SQ-1396.** Every machine
     /// fact as a separate positional argument is the shape this codebase kept
     /// getting wrong — four callers omitted one, including `reset.rs` in
@@ -1343,24 +1370,14 @@ impl GameSession {
         story: Vec<u8>,
         config: zvm::cpu::exec::BootConfig,
         trace_from_boot: bool,
+        fixed_cols: Option<u16>,
     ) -> Result<GameSession, ZError> {
-        let story_image = std::sync::Arc::new(story.clone());
         let mem = Memory::new(story)?;
         // Both read BEFORE the config is handed over, because it is consumed by
         // the boot. `resolved_art_scale` is the same number `BootConfig` scaled
         // the picture table by, asked for rather than recomputed — the renderer
         // composites in that space (SQ-0479, SQ-0715, SQ-0790).
         let art_scale = config.resolved_art_scale(mem.version());
-        // SQ-0680: the width actually declared to the story at boot — the seeded
-        // pane column count, or the zvm fallback `init_caps` used absent a seed.
-        // `declared_story_screen_dims`'s floor reads this back so it never
-        // re-widens a correctly-seeded narrow boot to the old hardcoded default.
-        // A v6 story is never told a grid, so it always takes the fallback.
-        let boot_screen_cols = config
-            .screen_grid()
-            .filter(|_| mem.version() != 6)
-            .map(|(_, c)| c as u16)
-            .unwrap_or(zvm::screen::DEFAULT_SCREEN_COLS as u16);
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::boot(mem, sink, config);
         // Trace from the very first instruction when requested, so the opening
@@ -1394,12 +1411,7 @@ impl GameSession {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: story_image,
+            fixed_cols,
             line_preload,
             line_preload_seeded: false,
         })
@@ -1869,7 +1881,6 @@ impl GameSession {
     /// known prefix is stripped back off here first — passing the untouched
     /// `command` through unchanged would double it.
     pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u8) -> TurnResult {
-        self.settle_width_floor(command, terminator);
         self.echo_style = self.read_input_style();
         let typed = command.strip_prefix(self.line_preload.as_str()).unwrap_or(command);
         self.machine.supply_line(typed, terminator);
@@ -1991,145 +2002,25 @@ impl GameSession {
         self.finish_turn(stop)
     }
 
-    /// Raise [`boot_screen_cols`](Self::boot_screen_cols) to the width the game
-    /// memory a restore just installed was laid out for (SQ-0681).
+    /// A restore brought in memory laid out for `cols` columns; keep a width-caching
+    /// story told at least that many (SQ-0681, reduced by SQ-1809).
     ///
-    /// The SQ-0679 floor keeps a v4/v5 story's one-shot status layout inside the
-    /// window it was computed for, and SQ-0680 keyed that floor to THIS session's
-    /// boot width. A restore breaks the assumption behind both: the memory image
-    /// now running is one another session booted, at ITS width, and the field
-    /// columns baked into it answer to that width alone. Restoring an 80-column
-    /// Save State into a 60-column session left the floor at 60, so the app
-    /// declared 60, the game's `set_cursor` to column 73 became illegal
-    /// (ZMSD §8.7.2.3), the interpreter dropped it and the score digits printed
-    /// at column 1 over the room name — the SQ-0679 garble, re-manifested every
-    /// turn by a save file.
+    /// A story that caches the screen width ([`fixed_cols`](Self::fixed_cols)) is
+    /// told 80. A save made where it was told MORE than that — a `.lanthorn`
+    /// archived by an older build that told it the pane, or a host save from one —
+    /// carries status columns baked for that wider screen, and 80 would put them
+    /// outside the window (ZMSD §8.7.2.3 makes the move illegal, the digits land
+    /// over the room name). So the told width becomes `max(80, cols)` for the
+    /// rest of the session. It only ever grows.
     ///
-    /// Only ever grows (`max`): a session that booted WIDER than the save keeps
-    /// its own width, since its header — which the restored game reads next —
-    /// still reports the wider screen, and the restored layout fits inside it.
-    ///
-    /// Exempt: v1–3 and v6, the versions [`declared_story_screen_dims`] does not
-    /// floor at all (no §8.4 header fields / a native pixel screen), so the field
-    /// keeps reporting the boot width for them.
-    ///
-    /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
+    /// A story that follows the pane has nothing baked to protect: it relays out
+    /// from the next width it reads. A bare Quetzal from another interpreter
+    /// carries no screen width at all and is taken as 80, so it changes nothing
+    /// here. Exempt: v1–3 and v6, which are never fixed.
     pub fn note_restored_screen_cols(&mut self, cols: u16) {
-        let version = self.machine.mem.version();
-        if version < 4 || version == 6 {
-            return;
+        if let Some(fixed) = self.fixed_cols.as_mut() {
+            *fixed = (*fixed).max(cols.min(255));
         }
-        if cols > self.boot_screen_cols {
-            match self.width_verdict {
-                // A story already shown to lay itself out for the width it is
-                // told has no baked columns to protect (SQ-1778).
-                Some(WidthVerdict::Adapts) => return,
-                // Already shown to bake them: raise the floor, nothing to ask.
-                Some(WidthVerdict::Baked) => {}
-                // Unknown: raise it, and remember the pane width so the first
-                // qualifying moment can ask the story (`settle_width_floor`).
-                None => {
-                    if self.pre_restore_screen_cols.is_none() {
-                        self.pre_restore_screen_cols = Some(self.boot_screen_cols);
-                    }
-                }
-            }
-        }
-        self.boot_screen_cols = self.boot_screen_cols.max(cols);
-    }
-
-    /// [`note_restored_screen_cols`](Self::note_restored_screen_cols) for a
-    /// width that is only a guess (a bare Quetzal save carries none).
-    pub fn note_guessed_screen_cols(&mut self, cols: u16) {
-        let before = self.boot_screen_cols;
-        self.note_restored_screen_cols(cols);
-        if self.boot_screen_cols > before && self.pre_restore_screen_cols.is_some() {
-            self.floor_is_guess = true;
-        }
-    }
-
-    /// Whether the upper window holds any text at all.
-    fn upper_window_holds_text(&self) -> bool {
-        self.machine.screen.upper.cells.iter().any(|c| !c.ch.is_whitespace())
-    }
-
-    /// Replay one command on a throwaway copy of this session whose header
-    /// width is `cols`, and report where the story aimed its upper-window
-    /// cursor (SQ-1778). Nothing here touches `self`, its screen or the host.
-    fn shadow_width_turn(&self, command: &str, terminator: u8, cols: u16) -> Option<ShadowWidthReport> {
-        let rows = self.machine.mem.read_byte(0x20) as u16;
-        let interp = self.machine.mem.read_byte(0x1E);
-        let save = Engine::save_state(self);
-        let mut sh = GameSession::new_with_trace(
-            (*self.story).clone(),
-            false,
-            false,
-            Some(interp),
-            false,
-            Vec::new(),
-            None,
-            None,
-            Some((rows, cols)),
-        )
-        .ok()?;
-        Engine::restore_state(&mut sh, &save).ok()?;
-        sh.machine.screen = self.machine.screen.clone();
-        Engine::set_screen_dims(&mut sh, rows, cols);
-        if sh.pending != InputKind::Line {
-            return None;
-        }
-        let _ = sh.machine.take_upper_cursor_moves();
-        let typed = command.strip_prefix(self.line_preload.as_str()).unwrap_or(command);
-        sh.machine.supply_line(typed, terminator);
-        let _ = sh.advance_after_input(false);
-        let (moves, overreach) = sh.machine.take_upper_cursor_moves();
-        let u = &sh.machine.screen.upper;
-        let extent = (1..=u.cols)
-            .rev()
-            .find(|&c| (1..=u.rows).any(|r| !u.cell(r, c).ch.is_whitespace()))
-            .unwrap_or(0);
-        Some(ShadowWidthReport { moves, overreach, extent })
-    }
-
-    /// Decide, at the first qualifying moment after a restore, whether the
-    /// SQ-0681 floor still protects anything (SQ-1778).
-    ///
-    /// Qualifying: a floor is on trial, the game is at a LINE read (not a key
-    /// wait, so a Save State taken at an intro just keeps its width through the
-    /// intro) and its upper window holds text (the status line has been drawn).
-    /// Then the player's own command is replayed on a throwaway copy whose
-    /// header says the pane width; the live screen never sees it. A turn that
-    /// aimed no cursor at the upper window is no evidence and the floor stays
-    /// on trial.
-    fn settle_width_floor(&mut self, command: &str, terminator: u8) {
-        let Some(narrow) = self.pre_restore_screen_cols else { return };
-        if self.pending != InputKind::Line || !self.upper_window_holds_text() || self.width_check_tries >= 4 {
-            return;
-        }
-        let Some(report) = self.shadow_width_turn(command, terminator, narrow) else { return };
-        if report.moves == 0 {
-            self.width_check_tries += 1;
-            return;
-        }
-        let rows = self.machine.mem.read_byte(0x20) as u16;
-        if report.overreach == 0 {
-            self.width_verdict = Some(WidthVerdict::Adapts);
-            self.boot_screen_cols = narrow;
-        } else {
-            self.width_verdict = Some(WidthVerdict::Baked);
-            if self.floor_is_guess {
-                // The save said nothing about its width: take it from where the
-                // story draws when nothing stops it.
-                if let Some(wide) = self.shadow_width_turn(command, terminator, 255) {
-                    self.boot_screen_cols = narrow.max(wide.extent);
-                }
-            }
-        }
-        self.pre_restore_screen_cols = None;
-        self.floor_is_guess = false;
-        // Do not wait for the host's next poll: this very turn must run at the
-        // settled width.
-        Engine::set_screen_dims(self, rows, self.boot_screen_cols);
     }
 
     /// Build the `TurnResult` from a `RunStop` and drain the VM's per-turn
@@ -5641,7 +5532,7 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
         machine.screen.current_bg = bg;
     }
     session.note_restored_screen_cols(restored_cols);
-    reconcile_restored_screen_size(&mut session.machine, session.boot_screen_cols);
+    reconcile_restored_screen_size(&mut session.machine, session.fixed_cols);
 }
 
 /// Make a restored screen follow the terminal it is being restored ON, not the
@@ -5687,15 +5578,14 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
 /// than the floor is re-applied by that poll rather than here.
 ///
 /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
-fn reconcile_restored_screen_size(machine: &mut Machine, floor_cols: u16) {
+fn reconcile_restored_screen_size(machine: &mut Machine, fixed_cols: Option<u16>) {
     if machine.mem.version() == 6 {
         return;
     }
     let (rows, cols) = (machine.mem.read_byte(0x20), machine.mem.read_byte(0x21));
-    let cols = if machine.mem.version() >= 4 {
-        cols.max(floor_cols.clamp(1, 255) as u8)
-    } else {
-        cols
+    let cols = match fixed_cols {
+        Some(fixed) if machine.mem.version() >= 4 => fixed.clamp(1, 255) as u8,
+        _ => cols,
     };
     if rows > 0 && cols > 0 {
         machine.set_screen_dims(rows, cols);
@@ -8704,36 +8594,37 @@ mod tests {
     }
 
     /// A screen saved on one terminal, restored on another (SQ-0589, amended by
-    /// SQ-0681).
+    /// SQ-0681 and again by SQ-1809).
     ///
     /// `restore_screen` installs the saved `ScreenState` wholesale, so without
-    /// reconciliation the upper window keeps the SAVED terminal's width while
-    /// the header (already re-stamped by `post_restore_fixups`) reports this
-    /// one — the mismatch that leaves a short status bar in a wide pane.
+    /// reconciliation the upper window keeps the SAVED terminal's width while the
+    /// header (already re-stamped by `post_restore_fixups`) reports this one.
     ///
-    /// The width GROWS to the host pane and never shrinks below the restored
-    /// game's own layout width: the same asymmetry `declared_story_screen_dims`
-    /// applies to a live resize (SQ-0679). SQ-0589 originally refit both ways,
-    /// which is what re-manifested the garbled bar when an 80-column save met a
-    /// 60-column session (SQ-0681) — every coordinate the saved game baked in is
-    /// still legal inside a wider screen, and none of them are inside a narrower
-    /// one. In a pane too narrow the pane clips the right of the bar instead.
+    /// What "this one" is depends on the story, decided at its boot (SQ-1809): a
+    /// story that follows the pane (`fixed_cols == None`) has its grid refit to the
+    /// host pane both ways — it relays out from the width it reads next; a story
+    /// that caches the width is told its fixed one, so the grid is that width
+    /// whatever the pane, raised to the save's own width when the save was laid out
+    /// wider (an older build told it the pane).
     #[test]
-    fn a_restore_refits_the_upper_window_to_the_host_pane_not_the_saved_one() {
-        // (host pane, expected grid width, label)
-        for (host_cols, want_cols, label) in [
-            (120u8, 120u16, "wider host: the grid follows the pane"),
-            (60u8, 80u16, "narrower host: the grid holds the restored game's width"),
+    fn a_restore_refits_the_upper_window_to_what_the_story_is_told() {
+        // (fixed, host header cols, saved grid cols, expected grid width, label)
+        for (fixed, host_cols, saved_cols, want_cols, label) in [
+            (None, 120u8, 80u16, 120u16, "following the pane, wider host: the grid follows the pane"),
+            (None, 60, 80, 60, "following the pane, narrower host: the grid follows it down too"),
+            (Some(80u16), 80, 80, 80, "caching, told 80: an 80-wide save fits exactly"),
+            (Some(80), 80, 100, 100, "caching, told 80, save laid out at 100: raised to the save's width"),
         ] {
             let mut s = GameSession::new_with_trace(v5_stub_story(), false, false, None, false, Vec::new(), None, None, None)
                 .expect("v5 session");
-            // The pane we are restoring INTO, as `post_restore_fixups` leaves it.
+            s.fixed_cols = fixed;
+            // The width we are restoring INTO, as `post_restore_fixups` leaves it.
             s.machine.set_screen_dims(40, host_cols);
 
-            // A screen saved on an 80-column terminal with a one-row status line.
+            // A one-row status line saved on a terminal `saved_cols` wide.
             let mut saved = s.machine.screen.clone();
             saved.upper_window_rows = 1;
-            saved.upper.resize(1, 80);
+            saved.upper.resize(1, saved_cols);
             for (i, ch) in "West of House".chars().enumerate() {
                 saved.upper.put(1, i as u16 + 1, ch, 0, ZColour::Default, ZColour::Default);
             }
@@ -9681,12 +9572,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9764,12 +9650,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9842,12 +9723,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -9909,12 +9785,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10019,12 +9890,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10088,12 +9954,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10141,12 +10002,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10208,12 +10064,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10313,12 +10164,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10376,12 +10222,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         };
@@ -10993,12 +10834,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             unreplayable: std::collections::HashSet::new(),
-            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            pre_restore_screen_cols: None,
-            floor_is_guess: false,
-            width_verdict: None,
-            width_check_tries: 0,
-            story: std::sync::Arc::new(Vec::new()),
+            fixed_cols: None,
             line_preload: String::new(),
             line_preload_seeded: false,
         }

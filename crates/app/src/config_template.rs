@@ -572,6 +572,16 @@ const INTERPRETER: &[Row] = &[
         ],
     ),
     ex("virtual_screen_rows", "24", &["The height half of the same override; set it alongside the width."]),
+    d(
+        "status_width",
+        "\"auto\"",
+        &[
+            "What width a v4+ Z-machine game is told: \"auto\" plays a throwaway copy",
+            "first and tells a game that lays its status line out once (older Infocom)",
+            "80 columns for the whole session, and one that re-reads the width the",
+            "pane's; \"fixed\" is always 80; \"pane\" is always the pane's.",
+        ],
+    ),
 ];
 
 const SOUND: &[Row] = &[

@@ -680,6 +680,47 @@ impl ColourSource {
     }
 }
 
+/// What width a Version 4+ Z-machine story is told, `status_width` in
+/// `config.toml` and the per-game sidecar (SQ-1809).
+///
+/// A story caches whatever width it is told at boot (Infocom's own v4/v5 games
+/// lay their status line out once) or re-reads it as it plays (Inform's library).
+/// `Auto` finds out by playing a throwaway copy before the real boot
+/// ([`zvm::width_probe`]); the other two force the answer for a misjudged title.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum StatusWidth {
+    /// Probe the story before booting it: a story that re-reads the width is
+    /// told the pane's, one that does not is told 80 for the whole session.
+    #[default]
+    Auto,
+    /// Always told 80 columns, whatever the pane does.
+    Fixed,
+    /// Always told the pane's width, and told again whenever it changes.
+    Pane,
+}
+
+impl StatusWidth {
+    /// The `status_width` token for this mode — one spelling for the file and
+    /// the sidecar.
+    pub fn key(self) -> &'static str {
+        match self {
+            StatusWidth::Auto => "auto",
+            StatusWidth::Fixed => "fixed",
+            StatusWidth::Pane => "pane",
+        }
+    }
+
+    /// The mode a `status_width` token names, or `None` for anything else.
+    pub fn from_key(token: &str) -> Option<StatusWidth> {
+        match token {
+            "auto" => Some(StatusWidth::Auto),
+            "fixed" => Some(StatusWidth::Fixed),
+            "pane" => Some(StatusWidth::Pane),
+            _ => None,
+        }
+    }
+}
+
 /// Terminal image protocol for cover art. `Auto` detects the best available
 /// (falling back to half-blocks); the rest force a specific mode for testing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -1327,6 +1368,14 @@ where
     Ok(crate::glk_cfg::GlkFitMode::from_key(&s).unwrap_or_default())
 }
 
+fn deserialize_status_width<'de, D>(d: D) -> Result<StatusWidth, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(StatusWidth::from_key(&s).unwrap_or_default())
+}
+
 fn deserialize_v6_render<'de, D>(d: D) -> Result<V6RenderMode, D::Error>
 where
     D: Deserializer<'de>,
@@ -1918,6 +1967,12 @@ pub struct Config {
     /// the upper window will be drawn centred inside the pane. (SQ-0532/A-F1)
     #[serde(default)]
     pub virtual_screen_cols: Option<u16>,
+    /// What width a v4+ Z-machine story is told: `"auto"` (default, probe the
+    /// story), `"fixed"` (always 80 columns) or `"pane"` (always the pane's
+    /// width). A pinned `virtual_screen_cols` wins over all three. A per-game
+    /// `status_width` in the sidecar wins over this (SQ-1809).
+    #[serde(default, deserialize_with = "deserialize_status_width")]
+    pub status_width: StatusWidth,
     /// OVERRIDE for the screen height (in lines) reported in header byte $20.
     /// Unset (the default) follows the story pane — see `virtual_screen_cols`.
     #[serde(default)]
@@ -2172,6 +2227,17 @@ pub struct Config {
 }
 
 impl Config {
+    /// The `status_width` mode a boot acts on (SQ-1809): the configured one, except
+    /// that a pinned `virtual_screen_cols` is explicit intent and wins over all
+    /// three modes, so it counts as `Pane` (the pin is what the story is told).
+    pub fn effective_status_width(&self) -> StatusWidth {
+        if self.virtual_screen_cols.is_some() {
+            StatusWidth::Pane
+        } else {
+            self.status_width
+        }
+    }
+
     /// The folder `style.toml` (and the shared `config.toml`) live in (SQ-1722):
     /// the config root, or [`Config::user_dir`] for a `Config` built without one.
     pub fn config_root(&self) -> &std::path::Path {
@@ -2509,6 +2575,7 @@ impl Default for Config {
             show_status_bar: true,
             search: SearchConfig::default(),
             virtual_screen_cols: None,
+            status_width: StatusWidth::Auto,
             virtual_screen_rows: None,
             split_ratio: default_split_ratio(),
             command_band: CommandBandConfig::default(),
@@ -2867,6 +2934,7 @@ fn resolve_config_layers(
             cfg.volume = from_file.volume;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
+            cfg.status_width = from_file.status_width;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
             cfg.split_ratio = from_file.split_ratio;
             cfg.command_band = from_file.command_band;
@@ -3219,6 +3287,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
     // this session's terminal into a permanent override. (SQ-0532/A-F1)
     doc.put_or_remove("virtual_screen_cols", cfg.virtual_screen_cols.map(|n| i64::from(n).into()), def.virtual_screen_cols.map(|n| i64::from(n).into()));
+    doc.put("status_width", cfg.status_width.key().into(), cfg.status_width == def.status_width);
     doc.put_or_remove("virtual_screen_rows", cfg.virtual_screen_rows.map(|n| i64::from(n).into()), def.virtual_screen_rows.map(|n| i64::from(n).into()));
     doc.put("split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
     doc.put(
@@ -4549,6 +4618,7 @@ use_defaults = false
             volume: 100,
             search: SearchConfig::default(),
             virtual_screen_cols: None,
+            status_width: StatusWidth::Auto,
             virtual_screen_rows: None,
             split_ratio: 70,
             command_band: CommandBandConfig::default(),

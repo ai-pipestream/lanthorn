@@ -37,11 +37,10 @@ use crate::state::AppState;
 /// rather than measured from it, and for v1–3, which have no such header fields.
 ///
 /// What is declared is [`declared_story_screen_dims`], not the raw pane
-/// measurement: the width is floored at the columns the story booted with
-/// (SQ-0679) — whatever `GameSession::boot_screen_cols` says THIS session
-/// actually booted at, 80 by default or a narrower/wider pre-boot-seeded pane
-/// (SQ-0680) — so narrowing the pane can never move a v4/v5 status routine's
-/// baked-in field columns outside the window.
+/// measurement: the width is the fixed one for a story that caches it
+/// (`GameSession::fixed_cols`, settled before the boot — SQ-1809), so a pane
+/// resize, wider or narrower, never moves a v4/v5 status routine's baked-in field
+/// columns relative to its window. A story that re-reads $21 is told the pane.
 ///
 /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
 pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, rows): (u16, u16)) -> bool {
@@ -56,7 +55,7 @@ pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, r
         Rect::new(0, 0, cols, rows),
         state,
         version,
-        gs.boot_screen_cols,
+        gs.fixed_cols(),
     ) else {
         return false;
     };

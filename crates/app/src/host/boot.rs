@@ -716,6 +716,10 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         cfg.interpreter_number = Some(n);
         cfg.one_run.pin(crate::config::keys::INTERPRETER_NUMBER, n);
     }
+    // SQ-1809: this game's own `status_width` outranks the global one.
+    if let Some(w) = crate::styles::read_per_game_status_width(&game_dir) {
+        cfg.status_width = w;
+    }
     // Ride with the story for the session: the restart path re-resolves artwork
     // and has no other way to know which game on the disc this is (SQ-0876).
     cfg.disk_entry = disk_entry.map(str::to_string);
@@ -1250,7 +1254,11 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 // before the constructor rather than facts of this boot.
                 machine_palette,
                 cfg.interpreter_version,
-            );
+            )
+            // SQ-1809: what width a v4+ story is told — probed inside
+            // `new_for_machine`, unless the config (or a pinned
+            // `virtual_screen_cols`) already says.
+            .with_status_width(cfg.effective_status_width());
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
             // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and

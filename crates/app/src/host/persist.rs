@@ -262,14 +262,6 @@ pub fn answer_ingame_restore(
                     Ok(ac) => apply_archive_state(ac, session, mapper, state),
                     Err(e) => state.push_notice(&format!("[Save State sidecars unreadable: {}]", e)),
                 }
-            } else {
-                // A bare .qzl carries no screen, so the restored
-                // game's layout width has to be assumed
-                // (`note_bare_quetzal_width`, SQ-0681). Raised on
-                // the attempt: `resume_restore` reports a refused
-                // save only as the game's own "Failed.", and the
-                // guard only ever widens the declared screen.
-                crate::engine_helpers::note_bare_quetzal_width(session);
             }
             state.push_notice(&format!("[Game restored from {}]", name));
             session.resume_restore(Some(&bytes))
