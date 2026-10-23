@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Fixed
+
+- Restoring an older save no longer leaves a blank row under the status bar.
+
 ## v0.9.8 — 2026-10-22
 
 ### Added
