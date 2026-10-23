@@ -234,7 +234,29 @@ pub fn decode(bytes: &[u8]) -> Result<ScreenState, ZError> {
     // split that DO hold paint are the game's own and stay; v6 is paint and its
     // `upper` is not consulted.
     if v6.is_none() {
-        let keep = upper.last_painted_row().max(upper_window_rows);
+        let mut keep = upper.last_painted_row().max(upper_window_rows);
+        // SQ-1808: a window-1 print that ran off the right edge used to WRAP
+        // onto a new row, leaving one styled space (the status bar's reverse
+        // video) at column 1 with the cursor just after it. That is paint to
+        // `last_painted_row`, so saves written by those builds carry a stray
+        // second status row. Recognise exactly that shape and nothing looser:
+        // the deepest painted row lies below the split, the cursor is on it at
+        // column 2, and its only painted cell is a whitespace glyph at column 1.
+        // Rows below the split carrying real text (quote boxes, menus) never
+        // match.
+        if keep > upper_window_rows && keep == upper.last_painted_row() && cursor_row == keep && cursor_col == 2 {
+            let lone_space = (1..=upper.cols).all(|c| {
+                let cell = upper.cell(keep, c);
+                if c == 1 {
+                    cell.ch.is_whitespace()
+                } else {
+                    cell.ch == ' ' && cell.style == 0
+                }
+            });
+            if lone_space {
+                keep = (1..keep).rev().find(|&r| (1..=upper.cols).any(|c| { let x = upper.cell(r, c); x.ch != ' ' || x.style != 0 })).unwrap_or(0).max(upper_window_rows);
+            }
+        }
         if upper.rows > keep {
             let cols = upper.cols;
             upper.resize_preserving(keep, cols);
@@ -583,6 +605,39 @@ mod tests {
         assert_eq!(back.upper.rows, 1);
         assert_eq!(back.upper.cells.len(), back.upper.cols as usize);
         assert_eq!(back.upper.cell(1, 1).ch, 'W');
+    }
+
+    /// SQ-1808: wrap residue written by older builds -- a lone reverse-video
+    /// space at column 1 of a row below the split, cursor just after it -- is
+    /// dropped on decode.
+    #[test]
+    fn wrap_residue_below_the_split_is_dropped_on_decode() {
+        let mut s = sample_v5_screen();
+        s.upper.resize(2, 6);
+        s.upper_window_rows = 1;
+        s.upper.put(1, 1, 'W', 1, ZColour::Default, ZColour::Default);
+        s.upper.put(2, 1, ' ', 1, ZColour::Default, ZColour::Default);
+        s.cursor_row = 2;
+        s.cursor_col = 2;
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 1);
+        assert_eq!(back.upper.cell(1, 1).ch, 'W');
+    }
+
+    /// SQ-1808: the same cursor on a row that carries real text (a quote box or
+    /// menu line) is not residue.
+    #[test]
+    fn text_rows_below_the_split_are_not_wrap_residue() {
+        let mut s = sample_v5_screen();
+        s.upper.resize(2, 6);
+        s.upper_window_rows = 1;
+        s.upper.put(1, 1, 'W', 1, ZColour::Default, ZColour::Default);
+        s.upper.put(2, 1, 'Q', 1, ZColour::Default, ZColour::Default);
+        s.cursor_row = 2;
+        s.cursor_col = 2;
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 2);
+        assert_eq!(back.upper.cell(2, 1).ch, 'Q');
     }
 
     #[test]

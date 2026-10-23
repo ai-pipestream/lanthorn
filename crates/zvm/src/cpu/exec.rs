@@ -717,7 +717,8 @@ pub struct Machine {
     /// How many `set_cursor` moves the story aimed at the UPPER window since the
     /// host last drained them, and how many of those named a column past the
     /// header's screen width ($21), which ZMSD §8.7.2.3 makes illegal and this
-    /// interpreter therefore drops. A host that narrows $21 on a throwaway copy
+    /// interpreter therefore drops. Every window-1
+    /// character printed past the right margin (clipped, SQ-1808) counts too. A host that narrows $21 on a throwaway copy
     /// and replays a turn reads these to learn whether the story re-lays its
     /// status line out for the width it is told (no overreach) or has the
     /// columns baked in (overreach). See [`Self::take_upper_cursor_moves`].
@@ -6097,6 +6098,18 @@ impl Machine {
         if self.screen.current_window == 1 {
             let style = self.screen.text_style;
             let cols = self.screen.upper.cols.max(1);
+            // SQ-1808: v4+ (v6 returned above) window 1 clips at the right
+            // margin instead of wrapping onto a new row. ZMSD §8.7.3.1: "The
+            // upper window should never be scrolled: it is legal for a
+            // character to be printed on the bottom right position of the
+            // upper window (but the position of the cursor after this
+            // operation is undefined: the author suggests that it stay put)."
+            // The Standard states this for the bottom-right cell; a character
+            // beyond the last column has no cell and, by the same "stay put"
+            // reading, is dropped rather than wrapped (wrapping would grow the
+            // grid, which §8.7.3.1 forbids for an unscrolled window). v3's
+            // status line keeps the old behaviour.
+            let clips_at_margin = self.mem.version() != 3;
             // Games may draw in the upper window at rows below the split height
             // (Inform's menu library does this — e.g. LostPig's HELP menu splits
             // to 7 rows then prints 5 items at rows 6–10). Real interpreters keep
@@ -6120,8 +6133,19 @@ impl Machine {
                 if r > self.screen.upper.rows && r <= screen_h {
                     self.screen.upper.grow_rows(r);
                 }
+                if clips_at_margin && c > cols {
+                    // SQ-1808: past the right margin nothing is drawn and the
+                    // cursor stays put. Counted as overreach: the story laid
+                    // this line out for a wider screen than the one it is told.
+                    self.upper_cursor_overreach += 1;
+                    continue;
+                }
                 self.screen.upper.put(r, c, out_ch, style, self.screen.current_fg, self.screen.current_bg);
-                if self.screen.cursor_col >= cols {
+                if clips_at_margin {
+                    // Rests one past the last column (still on the row), so the
+                    // next character is the one that gets clipped.
+                    self.screen.cursor_col = c + 1;
+                } else if self.screen.cursor_col >= cols {
                     self.screen.cursor_row += 1;
                     self.screen.cursor_col = 1;
                 } else {
@@ -12390,6 +12414,46 @@ pub(crate) mod tests {
         m.print_text("X");
         assert_eq!(m.screen.upper.cell(4, 1).ch, 'X', "write past split kept, not dropped");
         assert!(m.screen.upper.rows >= 4, "grid grew to include row 4");
+    }
+
+    #[test]
+    fn upper_window_print_past_the_right_edge_clips_instead_of_wrapping() {
+        // SQ-1808: ZMSD §8.7.3.1 -- the upper window never scrolls; a character
+        // past the last column is dropped, the cursor stays put, no new row.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None); // split_window 1
+        m.exec_var(0x0B, &[1], None, None); // set_window 1
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        let _ = m.take_upper_cursor_moves();
+        m.print_text("abcde"); // exactly fills the row
+        assert_eq!(m.take_upper_cursor_moves().1, 0, "filling the row is not overreach");
+        m.print_text("fg");
+        assert_eq!(m.screen.upper.rows, 1, "grid did not grow");
+        assert_eq!(m.screen.cursor_row, 1, "cursor stayed on the row");
+        assert_eq!(m.screen.cursor_col, 6, "cursor rests at the right margin");
+        assert_eq!(m.screen.upper.cell(1, 5).ch, 'e', "last column untouched by the overflow");
+        // A newline still moves down.
+        m.print_text("\n");
+        assert_eq!(m.screen.cursor_row, 2);
+        assert_eq!(m.screen.cursor_col, 1);
+    }
+
+    #[test]
+    fn upper_window_clipped_print_counts_as_overreach() {
+        // SQ-1808: the host's shadow turn reads clipped prints as a baked layout.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None);
+        m.exec_var(0x0B, &[1], None, None);
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 4;
+        let _ = m.take_upper_cursor_moves();
+        m.print_text("xyz"); // x at 4, y at 5, z past the edge
+        assert_eq!(m.take_upper_cursor_moves(), (0, 1));
     }
 
     #[test]

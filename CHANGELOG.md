@@ -27,6 +27,10 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Fixed
+
+- Restoring a save on a narrower screen no longer leaves a stray second row under the status bar (Hitchhiker's Guide and other games with a fixed-width status line); saves that already carry the stray row are cleaned up when loaded.
+
 ## v0.9.8 — 2026-10-23
 
 ### Added

@@ -153,3 +153,63 @@ fn restoring_a_narrower_save_into_a_wider_session_has_nothing_to_release() {
         "with nothing to release, the floor keeps reporting this session's own width"
     );
 }
+
+/// SQ-1808: Hitchhiker's Guide r31 (Solid Gold) bakes its status layout at the
+/// width it booted with. Restored into a narrower session, its status write ran
+/// one cell past the right edge: the shadow turn saw only a legal `set_cursor`
+/// (verdict Adapts, floor dropped to the narrow width) and window 1 then WRAPPED,
+/// growing a stray second row holding one reverse-video space.
+///
+/// The fix is twofold: window 1 clips at the right margin (never a new row), and
+/// that clipped print counts as overreach so the floor stays at the saved width.
+///
+/// Gitignored fixture (`stories/`): skips vacuously when absent.
+#[test]
+fn a_baked_status_layout_restored_narrower_keeps_one_row_and_its_floor() {
+    const SAVED: u16 = 48;
+    const NARROW: u16 = 45;
+    let Some(boot) = |cols: u16| -> Option<GameSession> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/hitchhiker-invclues-r31-s871119.z5");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored story missing at {}", path.display());
+            return None;
+        };
+        let mut s = GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, cols)))
+            .expect("HHG r31 boots");
+        let mut n = 0;
+        while s.pending_input() == InputKind::Char && n < 10 {
+            let _ = s.submit_char(13);
+            n += 1;
+        }
+        assert_eq!(s.pending_input(), InputKind::Line, "boot should reach a line prompt");
+        Some(s)
+    }(SAVED) else {
+        return;
+    };
+    let mut wide = boot;
+    let r = wide.submit("look");
+    assert!(r.fault.is_none() && !r.quit, "\"look\" faulted/quit: {:?}", r.fault);
+    assert_eq!(wide.machine.screen.upper.rows, 1, "the saved game has a one-row status bar");
+    let save = Engine::save_state(&wide);
+    let screen = wide.machine.screen.clone();
+
+    // A fresh session at the narrow pane, then the wide save restored into it.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/hitchhiker-invclues-r31-s871119.z5");
+    let bytes = std::fs::read(&path).expect("present: the wide boot just read it");
+    let mut narrow =
+        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, NARROW)))
+            .expect("HHG r31 boots narrow");
+    let mut n = 0;
+    while narrow.pending_input() == InputKind::Char && n < 10 {
+        let _ = narrow.submit_char(13);
+        n += 1;
+    }
+    Engine::restore_state(&mut narrow, &save).expect("the Save State restores");
+    app::session::restore_screen(&mut narrow, screen);
+    assert_eq!(narrow.boot_screen_cols, SAVED, "the floor starts at the saved width");
+
+    let r = narrow.submit("look");
+    assert!(r.fault.is_none() && !r.quit, "\"look\" faulted/quit: {:?}", r.fault);
+    assert_eq!(narrow.machine.screen.upper.rows, 1, "no stray second status row after one command");
+    assert_eq!(narrow.boot_screen_cols, SAVED, "a baked layout keeps its saved width as the floor");
+}
