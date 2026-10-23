@@ -798,6 +798,16 @@ re-seed the new template, or hand-write the new shape from
   than the pane is drawn centred, and a pinned width wider than it scrolls to
   follow the cursor. Version 6 stories ignore both: they lay out on their own
   fixed pixel screen, which lanthorn scales into whatever pane it has.
+- **Status width** — `status_width` (global `config.toml` and the per-game
+  `config.toml` beside the game) decides what width a v4/v5/v7/v8 game is told.
+  `"auto"` (default) plays a throwaway copy of the game before starting it
+  (`zvm::width_probe`, a few milliseconds) and watches whether it re-reads the
+  screen width: a game that does (Inform games, Border Zone) is told the pane's
+  width and told again on every resize; a game that lays its status line out once
+  (older Infocom) is told 80 columns for the whole session and never sees a
+  resize, with the grid narrowed or centred for display. `"fixed"` forces 80,
+  `"pane"` forces the pane's width, for a game the probe misjudged. A pinned
+  `virtual_screen_cols` outranks all three.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
 - **Random seed** — `random_seed` pins the number every engine's random-number

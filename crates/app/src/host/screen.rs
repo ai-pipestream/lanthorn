@@ -310,24 +310,15 @@ pub fn set_story_pane(session: &mut dyn Engine, state: &AppState, pane: (u16, u1
 /// differs by engine:
 /// - a v4+, non-v6 Z-machine session searches on the RAW
 ///   [`story_screen_dims`](crate::render::screen::story_screen_dims) for a
-///   candidate pane — not the header-floored
+///   candidate pane — not the
 ///   [`declared_story_screen_dims`](crate::render::screen::declared_story_screen_dims)
 ///   that [`sync_zvm_screen_dims`] itself applies when it actually WRITES the
 ///   header — searched one cell at a time via
 ///   [`boot::bump_dim_for_floor`](crate::host::boot::bump_dim_for_floor). This
-///   is deliberate, not an oversight: `declared_story_screen_dims` floors its
-///   result at `boot_screen_cols`, and a host that also seeds
-///   `TerminalFacts::min_story_screen` at boot has already widened the
-///   pre-boot terminal (via
-///   [`min_terminal_size_for_story_floor`](crate::host::boot::min_terminal_size_for_story_floor))
-///   until the RAW pre-boot pane clears the floor — so `boot_screen_cols`
-///   itself ends up at or above `floor_cols` from the moment the session
-///   boots. Probing with `declared_story_screen_dims` at a later live resize
-///   would then floor EVERY candidate's returned cols at `boot_cols >=
-///   floor_cols`, trivially "passing" on the very first candidate regardless
-///   of its actual raw width, and this search would return `real` completely
-///   unchanged even when the pane's real rendered grid is still narrower than
-///   `floor` (a follow-up to SQ-1606, found after the feature first shipped).
+///   is deliberate, not an oversight: the question here is "what pane makes
+///   the raw rendered grid at least this wide", and for a story that caches
+///   its width (told a fixed 80, SQ-1809) the declared width is the same at
+///   every candidate, so it could never answer it (SQ-1606 follow-up).
 ///   The header-floor subtraction still belongs in `sync_zvm_screen_dims`,
 ///   which genuinely must never let a WRITTEN header shrink below
 ///   `boot_cols` — but the SEARCH here is answering a different question

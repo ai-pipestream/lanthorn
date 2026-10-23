@@ -185,3 +185,41 @@ fn zork1_compact_bar_is_what_the_pane_override_gives_a_narrow_boot() {
         assert_ne!(pane_bar.trim_end(), auto_bar.trim_end(), "the override changes what the game paints");
     }
 }
+
+/// The whole chain at a narrow pane, the way a player sees it (SQ-1809): the game is
+/// told 80, paints its 80-column bar, and the DISPLAY path (`column_plan`) drops the
+/// blank middle so both ends of the same bar survive in a 50- and 60-column pane.
+#[test]
+fn zork1_status_bar_survives_a_narrow_pane_through_the_column_plan() {
+    use app::engine::{GridWindow, WinNode};
+    use app::render::paneframe::{BorderStyle, PaneSides};
+    for honor in [true, false] {
+        for pane_w in [50u16, 60] {
+            let Some(mut s) = boot(honor, Some((24, pane_w))) else {
+                eprintln!("SKIP: gitignored story missing");
+                return;
+            };
+            let _ = play_status_row(&mut s, pane_w);
+            let grid: GridWindow = match app::session::screen_model_from_machine(&s.machine).root {
+                WinNode::Pair { first, .. } => match *first {
+                    WinNode::Grid(g) => g,
+                    other => panic!("expected a Grid, got {other:?}"),
+                },
+                other => panic!("expected a Pair root, got {other:?}"),
+            };
+            assert_eq!(grid.cols, 80, "non-vacuity: the game's grid is its 80 columns");
+            let mut colors = app::colors::ColorScheme::terminal_default();
+            colors.virtual_window_border = BorderStyle::None;
+            colors.upper_window_border_sides = PaneSides::all(BorderStyle::None);
+            let area = Rect::new(0, 0, pane_w, 30);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            let _ = app::render::upper_window::draw_upper_window(&grid, false, &colors, area, &mut buf, honor, &mut Vec::new());
+            let bar: String = (0..pane_w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
+            assert!(bar.trim_start().starts_with("West of House"), "room name leads (honor={honor}, pane={pane_w}): {bar:?}");
+            assert!(
+                bar.contains("Score: 0") && bar.trim_end().ends_with("Moves: 1"),
+                "both fields survive (honor={honor}, pane={pane_w}): {bar:?}"
+            );
+        }
+    }
+}

@@ -707,10 +707,10 @@ pub struct Machine {
     /// The host uses this to tell a story that only ever reads `$21` once, at
     /// boot, and bakes its status-line field columns into fixed positions
     /// forever after (Zork 1 r52) from one that recomputes its layout from the
-    /// header every turn (Lost Pig) — the SQ-0681 restore-width floor on
-    /// `boot_screen_cols` protects the former permanently and the latter only
-    /// until its next repaint, and this flag is how the host tells which one
-    /// it is running. Mirrors [`crate::screen::ScreenState::erase_lower_requested`]'s
+    /// header every turn (Lost Pig) — [`crate::width_probe`] (SQ-1809) plays a
+    /// throwaway copy before the real boot and uses this flag to tell which one
+    /// it is, so a host can give the former a fixed width and the latter the
+    /// pane's. Mirrors [`crate::screen::ScreenState::erase_lower_requested`]'s
     /// shape: set inside opcode execution, drained once per turn by the host
     /// via [`Self::take_header_width_read`].
     header_width_read: bool,

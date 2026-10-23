@@ -255,7 +255,7 @@ pub fn reset_game(
                 // The host pane, as the launch seeds it (SQ-1061). This was a
                 // bare `None` — the only argument in this call with no comment
                 // above it — so the constructor took neither `set_screen_dims`
-                // nor the `boot_screen_cols` branch, and a v3/v4/v5 story whose
+                // nor the fixed-width decision (SQ-1809), and a v3/v4/v5 story whose
                 // status routine lays itself out once at boot (Zork 1, SQ-0680)
                 // came back laid out for zvm's 80x24 fallback. Nothing re-seeds
                 // it afterwards: `loop_tick::poll_zvm_screen_dims` runs

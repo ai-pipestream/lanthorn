@@ -962,7 +962,7 @@ I'm in a chapel
 - **v4+ upper-window screen model** — cursor-addressed status lines and full-screen
   forms (Bureaucracy's infamous licence application, for one) render in a fixed
   grid pinned atop the transcript, and `read_char` keystrokes are forwarded so you
-  fill those forms in place. The game is told the story pane's **real** size — the
+  fill those forms in place. A game that re-reads the width is told the story pane's **real** size (one that lays its status out once is told 80, see `status_width`) — the
   standard asks the interpreter to keep the current height and width in the header
   and lets it change them whenever it likes, so lanthorn measures the pane and
   re-measures it on every terminal resize. A game's full-width form therefore lines

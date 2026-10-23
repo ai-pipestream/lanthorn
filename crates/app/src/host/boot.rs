@@ -396,7 +396,7 @@ pub fn resolve_pict_blorb(story_path: &Path, images: bool) -> Option<blorb::Blor
 /// inventory panel are left at their true boot-time state — closed; both open
 /// only after this session already exists (`initial_panel`, further down) —
 /// and neither affects the WIDTH this seeds anyway, only rows, which the
-/// SQ-0679 floor never gates.
+/// fixed-width rule (SQ-1809) never touches.
 ///
 /// `None` when the frame is zero-area; the constructor then falls back to the
 /// 80×24 boot default.

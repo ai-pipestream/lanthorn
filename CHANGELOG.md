@@ -27,6 +27,14 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Changed
+
+- **Older Infocom games keep a full 80-column status line at any window size.** lanthorn now
+  checks, before starting a game, whether it lays its status line out once (Zork, Trinity,
+  Bureaucracy and their kin) or redraws it for the width it is told (modern Inform games), and
+  gives the first kind a steady 80 columns that no resize or restored save can upset. A new
+  `status_width` setting (`"auto"`, `"fixed"` or `"pane"`, also per game) overrides the check.
+
 ## v0.9.8 — 2026-10-23
 
 ### Added

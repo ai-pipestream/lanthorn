@@ -1164,11 +1164,9 @@ impl GameSession {
     /// dims applied a frame after boot, which is one turn too late for a v4/v5
     /// story whose status-bar routine lays itself out ONCE, at boot, and never
     /// re-reads header byte $21 (SQ-0679/SQ-0680). Seeding the real pane here
-    /// means that boot-time layout already targets it, so the SQ-0679 floor
-    /// (which never lets a v4+ declared width shrink below the BOOT width) now
-    /// only ever guards a genuine mid-session narrowing, instead of permanently
-    /// pinning every story to the zvm 80×24 fallback it would otherwise have
-    /// booted at. `None` (non-TUI callers, most tests) leaves that 80×24 fallback
+    /// means that boot-time layout already targets it — unless the story is found
+    /// to cache the width (SQ-1809, see `fixed_cols`), in which case the columns
+    /// become 80 and only the rows are taken from the pane. `None` (non-TUI callers, most tests) leaves that 80×24 fallback
     /// in place, matching prior behaviour exactly. Ignored for v6, whose screen
     /// is the native pixel frame seeded from `v6_screen_px` above, never the host
     /// cell pane.
@@ -5565,17 +5563,16 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
 /// coordinate system underneath its own hardcoded art placement — and would
 /// clobber the window-0/1 sizes just restored from the archive.
 ///
-/// `floor_cols` is the caller's [`GameSession::boot_screen_cols`] AFTER
+/// `fixed_cols` is the caller's [`GameSession::fixed_cols`] AFTER
 /// [`GameSession::note_restored_screen_cols`] has taken the restored game's own
-/// width into account (SQ-0681), so the width reconciled here is the same one
-/// `loop_tick::poll_zvm_screen_dims` will declare on the next pass. Without it
-/// the reconcile would first narrow the restored grid to this pane and the poll
-/// would widen it back a frame later — a needless truncate/re-pad of the very
-/// row the restore was carrying. v1–3 are exempt (§8.4's fields start at v4, and
+/// width into account (SQ-0681, SQ-1809), so the width reconciled here is the same
+/// one `loop_tick::poll_zvm_screen_dims` will declare on the next pass: a story
+/// that caches the width keeps its fixed one, any other follows this host's pane.
+/// v1–3 are exempt (§8.4's fields start at v4, and
 /// their status line is recomputed from the globals every turn), matching
 /// [`declared_story_screen_dims`]'s own exemptions; a user-pinned
 /// `virtual_screen_cols` is not visible from here, so an explicit pin narrower
-/// than the floor is re-applied by that poll rather than here.
+/// than the fixed width is re-applied by that poll rather than here.
 ///
 /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
 fn reconcile_restored_screen_size(machine: &mut Machine, fixed_cols: Option<u16>) {

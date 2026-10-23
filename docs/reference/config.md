@@ -72,6 +72,7 @@ Every setting `config.toml` accepts, grouped the way the seeded template groups 
 | `kitty_shared_memory` | `"auto"` |  | On a kitty-protocol terminal, hand it the artwork through shared memory instead of base64-encoding every pixel into the stream. A 640x400 frame is a megabyte of base64 the terminal then has to decode; through shared memory it is a filename. "auto" asks the terminal at startup and uses it only if it answered — a terminal on the far end of an ssh connection cannot open our memory, so over SSH nothing changes and the pictures still arrive. "off" does not even ask. There is deliberately no "on": this is something a terminal can do or cannot, not a preference. |
 | `virtual_screen_cols` | `80` | example | Override the screen size reported to the Z-machine in header bytes $21/$20. Unset (default) follows the game pane, which is what ZMSD §8.4 asks for. Set both only to pin a fixed virtual screen. |
 | `virtual_screen_rows` | `24` | example | The height half of the same override; set it alongside the width. |
+| `status_width` | `"auto"` |  | What width a v4+ Z-machine game is told: "auto" plays a throwaway copy first and tells a game that lays its status line out once (older Infocom) 80 columns for the whole session, and one that re-reads the width the pane's; "fixed" is always 80; "pane" is always the pane's. |
 
 ## Sound
 

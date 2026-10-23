@@ -196,10 +196,8 @@ pub fn probe_status_width(story: Vec<u8>, config: BootConfig) -> Option<WidthPro
         let read = m.take_header_width_read();
         let upper = upper_text(&m);
         status_drawn |= upper.chars().any(|c| !c.is_whitespace());
-        if armed {
-            if read {
-                return Some(finish(WidthVerdict::Adapts, WidthEvidence::ReadAfterInput, inputs, status_drawn));
-            }
+        if armed && read {
+            return Some(finish(WidthVerdict::Adapts, WidthEvidence::ReadAfterInput, inputs, status_drawn));
         }
         // The prompt's identity: kind, the tail of the story text, the grid.
         let text = out.borrow();
@@ -304,8 +302,11 @@ mod tests {
     fn a_story_that_never_rereads_the_width_caches() {
         let p = probe_status_width(story(false), cfg()).expect("a v5 story");
         assert_eq!(p.verdict, WidthVerdict::Caches);
-        assert_eq!(p.evidence, WidthEvidence::NoReadInBudget);
-        assert_eq!(p.inputs, LINE_TURNS, "it stopped after the line-turn budget, not at a cap");
+        // The synthetic story draws no status line, so no turn counts against
+        // the budget (rule 3) and the probe falls back on the input cap.
+        assert!(!p.status_drawn);
+        assert_eq!(p.evidence, WidthEvidence::CapHit);
+        assert_eq!(p.inputs, MAX_INPUTS);
     }
 
     #[test]
