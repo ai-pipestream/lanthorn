@@ -29,6 +29,7 @@ while any such tag, or this Unreleased section, still exists.*
 
 ### Fixed
 
+- **Shogun's title card and Zork Zero's status line keep every line on a narrow window.** Between about 40 and 76 columns, lines the game printed one below the other could land on the same row and overwrite each other ("Copyright (c) 1988 by Infocom" and "All rights reserved.", or "Banquet Hall" and the Moves row); each line now keeps a row of its own, and wide windows are drawn exactly as before.
 - **Arthur's and other graphical games' status bars keep their right-hand text on narrow windows.** "St Anne's Day, Compline" no longer gets cut off to "...Compli", "...Com" or "...Day," while the middle of the bar sits empty: when the text would not fit, the empty columns in the bar are squeezed out (the same way the older Infocom status lines already were) and every row of a menu such as Journey's shifts together, so its columns stay lined up.
 - **Text that an older Infocom game centred or indented for an 80-column screen now keeps its shape on a narrow one.** AMFV's opening quotation no longer breaks up with its attribution stranded on a row of its own: a block of indented lines that would stick out past the right edge slides left as one piece (as far as its least-indented line allows), and goes back to the game's own layout when the window widens again. Only lines indented four or more spaces count, so ordinary paragraphs with a small first-line indent keep it.
 

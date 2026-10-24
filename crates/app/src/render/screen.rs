@@ -1390,7 +1390,7 @@ fn render_node(
                                     })
                                     .collect();
                                 stamp_runs_over_art(
-                                    &over_art_refs, &art_rects, &scale, cell_px, area, gfx,
+                                    &over_art_refs, &frame.over_art_rows, &art_rects, &scale, cell_px, area, gfx,
                                     default_fg, default_bg, &state.colors, buf,
                                     state.v6_text.cell(),
                                 );
@@ -4189,6 +4189,10 @@ pub(crate) struct HybridFrame {
     live: std::collections::HashSet<crate::render::graphics::BandKey>,
     packed_text: Vec<crate::render::graphics::PackedText>,
     over_art_runs: Vec<crate::engine::PxText>,
+    /// The terminal row of each `over_art_runs` entry (SQ-1817), from
+    /// [`ChromeRowOracle::row_of`] — so the stamp and the host layout use the row
+    /// classification used.
+    over_art_rows: Vec<i32>,
 }
 
 /// SQ-1187: one COMPUTE of the hybrid chrome ring — every layout decision,
@@ -4603,7 +4607,8 @@ fn build_hybrid_frame_with(
     // SQ-0894: the ring is carved by what the chrome CONTAINS, not as
     // the story viewport's complement, so each flank is one column over
     // every contiguous row of art it may own.
-    let row_oracle = ChromeRowOracle {
+    let mut row_oracle = ChromeRowOracle {
+        shifts: Default::default(),
         v6_cell: state.v6_text.cell(),
         pane: area,
         scale: &scale,
@@ -4616,6 +4621,7 @@ fn build_hybrid_frame_with(
         bar_rows: &bar_rows,
         row_spans: &row_spans,
     };
+    row_oracle.shifts = row_oracle.compute_shifts();
     let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
     // SQ-0505: in the Menu plan the bottom band IS the command
     // strip — decompose it through the bottom-anchored `menu`
@@ -4697,7 +4703,7 @@ fn build_hybrid_frame_with(
                     && state.v6_text.cell().bottom_px(t.y) as i32 <= story_top
                     && !row_oracle.over_art(t)
             })
-            .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
+            .map(|t| row_oracle.row_of(t))
             .max();
         let clip_row = match text_above {
             Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
@@ -4761,6 +4767,8 @@ fn build_hybrid_frame_with(
     // is the whole gate: everywhere else these runs stay pixels and
     // every line below this one behaves exactly as it did.
     let (mut strips, over_art_runs) = decompose_chrome_strips(&ring_bands, &row_oracle);
+    let over_art_rows: Vec<i32> =
+        if layer_glyphs_over_art { over_art_runs.iter().map(|t| row_oracle.row_of(t)).collect() } else { Vec::new() };
     let over_art_runs: Vec<crate::engine::PxText> = if layer_glyphs_over_art {
         over_art_runs.into_iter().cloned().collect()
     } else {
@@ -5604,6 +5612,7 @@ fn build_hybrid_frame_with(
         live,
         packed_text,
         over_art_runs,
+        over_art_rows,
     }
 }
 
@@ -6314,8 +6323,8 @@ impl V6HybridChromeLayout {
         // like `stamp_runs_over_art` positions it — one `run_cell` per run, no
         // strip bucketing (over-art runs are never grouped into a strip's own
         // row layout, since the art strip they sit on carries no text band).
-        for t in &frame.over_art_runs {
-            let (col, row) = run_cell(t, &frame.scale, cell_px, pane, cell);
+        for (t, &row) in frame.over_art_runs.iter().zip(&frame.over_art_rows) {
+            let (col, _) = run_cell(t, &frame.scale, cell_px, pane, cell);
             let resolved = Some((col, col + t.text.chars().count() as i32));
             runs.push(V6HybridChromeRun { run: t.clone(), col, row, over_art: true, in_menu_band: false, resolved });
         }
@@ -10118,9 +10127,61 @@ struct ChromeRowOracle<'a, 'b> {
     /// The native `[x0, x1)` columns the chrome WINDOWS contributing runs to each
     /// native text row span between them — a ribbon's own reach (SQ-0949).
     row_spans: &'a std::collections::HashMap<u16, (u16, u16)>,
+    /// SQ-1817: how many terminal rows each GAME text row is pushed down so that two
+    /// distinct game rows never share a terminal row — see [`Self::compute_shifts`].
+    /// Keyed by the game row, `(y - 1) / cell.h`. Empty wherever nothing collides.
+    shifts: std::collections::HashMap<i32, i32>,
 }
 
 impl<'b> ChromeRowOracle<'_, 'b> {
+    /// The terminal row a chrome text candidate lands on: [`run_cell`]'s row, plus the
+    /// push-down its game row needed to stay clear of the game row above (SQ-1817).
+    /// The one authority for the row — classification, the over-art stamp and the
+    /// host-facing layout all ask here, so they cannot disagree.
+    fn row_of(&self, t: &crate::engine::PxText) -> i32 {
+        let base = run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell).1;
+        base + self.shifts.get(&self.game_row(t)).copied().unwrap_or(0)
+    }
+
+    fn game_row(&self, t: &crate::engine::PxText) -> i32 {
+        (t.y.max(1) as i32 - 1) / i32::from(self.v6_cell.h().max(1))
+    }
+
+    /// Distinct game text rows must land on distinct terminal rows (SQ-1817).
+    ///
+    /// [`run_cell`] rounds every run's row on its own. Under a pane scale below one a
+    /// terminal row is more than one game row's worth of pixels, so two lines the game
+    /// drew a full row apart can round onto the SAME terminal row — Shogun's title card
+    /// ("Copyright (c) 1988 by Infocom" / "All rights reserved.", and two more pairs
+    /// further down) between roughly 40 and 76 columns. A text strip then holds fewer
+    /// rows than it has game rows, and [`draw_chrome_text_strip`] — which gives each
+    /// game row a row of its own (SQ-0543) — runs out of strip and drops the last.
+    ///
+    /// So walk the game rows top to bottom and push a row down by exactly as much as it
+    /// needs to clear the one above. A row that already clears it is not touched, which
+    /// makes this the identity wherever the scale is large enough and keeps wide panes
+    /// byte-identical.
+    fn compute_shifts(&self) -> std::collections::HashMap<i32, i32> {
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<i32, (i32, i32)> = BTreeMap::new();
+        for t in self.runs.iter().copied().filter(|t| self.below_or_above(t)) {
+            let r = run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell).1;
+            let e = groups.entry(self.game_row(t)).or_insert((r, r));
+            e.0 = e.0.min(r);
+            e.1 = e.1.max(r);
+        }
+        let mut out = std::collections::HashMap::new();
+        let mut prev_max: Option<i32> = None;
+        for (g, (lo, hi)) in groups {
+            let d = prev_max.map_or(0, |p| (p + 1 - lo).max(0));
+            if d > 0 {
+                out.insert(g, d);
+            }
+            prev_max = Some(hi + d);
+        }
+        out
+    }
+
     /// A run sits over opaque frame art when its glyph span overlaps graphics.
     fn over_art(&self, t: &crate::engine::PxText) -> bool {
         let px0 = t.x.max(1) as u32 - 1;
@@ -10152,7 +10213,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         self.runs
             .iter()
             .copied()
-            .filter(|t| self.below_or_above(t) && run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell).1 == row as i32)
+            .filter(|t| self.below_or_above(t) && self.row_of(t) == row as i32)
             .collect()
     }
 
@@ -10955,6 +11016,7 @@ type StampedCells = Vec<(u16, u16, char, u32)>;
 #[cfg(feature = "terminal")]
 fn stamp_runs_over_art(
     runs: &[&crate::engine::PxText],
+    rows: &[i32],
     art_rects: &[Rect],
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
@@ -10994,8 +11056,8 @@ fn stamp_runs_over_art(
     // asked per cell (SQ-1060), so each glyph carries the NATIVE x of its own
     // declared cell alongside the pane cell it lands in.
     let mut placed: Vec<(&crate::engine::PxText, StampedCells)> = Vec::new();
-    for t in runs {
-        let (col0, row) = run_cell(t, scale, cell_px, pane, cell);
+    for (t, &row) in runs.iter().zip(rows) {
+        let (col0, _) = run_cell(t, scale, cell_px, pane, cell);
         // The cell path places by the DECLARED cell — `col0 + i` above — so glyph
         // `i` occupies native `[px0 + i*font_w, +font_w)`. `pen_chains` does not
         // run here, so a run is what the game published.
@@ -11938,7 +12000,7 @@ mod tests {
         let bg = image::Rgba([0, 0, 0, 255]);
         let mut buf = Buffer::empty(pane);
         super::stamp_runs_over_art(
-            &[&run], &art, &scale, (cell.w(), cell.h()), pane, &gfx, fg, bg,
+            &[&run], &[0], &art, &scale, (cell.w(), cell.h()), pane, &gfx, fg, bg,
             &ColorScheme::terminal_default(), &mut buf, cell,
         );
 

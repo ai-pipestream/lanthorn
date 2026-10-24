@@ -41,3 +41,6 @@ mod v6_shogun_title_header;
 
 #[path = "suites/v6_screen_palette.rs"]
 mod v6_screen_palette;
+
+#[path = "suites/sq1817_shogun_title_rows.rs"]
+mod sq1817_shogun_title_rows;
