@@ -4638,6 +4638,30 @@ fn build_hybrid_frame_with(
         row_spans: &row_spans,
     };
     row_oracle.shifts = row_oracle.compute_shifts();
+    // SQ-1825: the chrome text above the story gets a terminal row for every game text
+    // row it carries. The band above the viewport is as many rows as the SCALED native
+    // height rounds to, which is fewer than the game's text rows when a terminal row is
+    // taller than the scaled game row: Shogun's two-line status bar (two 16px rows,
+    // 52 device px at a 1.645 scale) in 60px cells got ONE row, and the oracle had
+    // nowhere to push the second line to. So the viewport gives up the rows the text
+    // needs, exactly as it does for an overlaid status strip (SQ-0582): the story is the
+    // part of the screen that can lose a row.
+    let viewport = if plate_owns_screen || viewport.height == 0 {
+        viewport
+    } else {
+        let top = chrome_runs
+            .iter()
+            .filter(|t| state.v6_text.cell().bottom_px(t.y) <= vp_native.1)
+            .map(|t| row_oracle.row_of(t) + 1)
+            .max()
+            .unwrap_or(0)
+            .clamp(0, i32::from(viewport.bottom())) as u16;
+        if top > viewport.y {
+            Rect::new(viewport.x, top, viewport.width, viewport.bottom() - top)
+        } else {
+            viewport
+        }
+    };
     let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
     // SQ-0505: in the Menu plan the bottom band IS the command
     // strip — decompose it through the bottom-anchored `menu`
@@ -6032,6 +6056,9 @@ fn row_spans(
         (c, c + t.text.chars().count() as i32)
     };
     let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
+    // The previous glyph run's drawn end, the last cell of the game's own grid it covers, and
+    // whether it is a field.
+    let mut prev_glyph: Option<(i32, i32, bool)> = None;
     for (i, (t, rule)) in row_runs.iter().enumerate() {
         let (c0, c1) = base_span(t);
         let span = if *rule {
@@ -6046,11 +6073,37 @@ fn row_spans(
             let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
             (left, right.max(left))
         } else {
-            (c0, c1)
+            // SQ-1825: a FIELD (a word or number) that the scale lays ON the field before it,
+            // or flush against it, though the game set the two a blank cell or more apart on
+            // its own grid, is moved to one blank cell past it, instead of being drawn over
+            // it, dropped as a stray glyph, or fused with it ("Score:0"): Shogun's "0" after
+            // "Score:", five columns on in the game and on top of it at 39 columns. Only two fields with nothing between them: a
+            // divider or marker standing between (Journey's menu) means the row is a table
+            // whose columns the scale owns. A field the scale merely lays against the
+            // previous one, runs the game abuts or overprints (a word's fragments, a title
+            // over its rule) and symbol glyphs (dividers, frames) keep the column the scale
+            // gave them.
+            let nudge = if is_field(t, *rule) {
+                prev_glyph
+                    .filter(|&(end, grid_end, field)| field && c0 <= end && i32::from(t.gcol) > grid_end + 1)
+                    .map_or(0, |(end, ..)| end + 1 - c0)
+            } else {
+                0
+            };
+            (c0 + nudge, c1 + nudge)
         };
+        if !*rule && !t.text.trim().is_empty() {
+            prev_glyph = Some((span.1, i32::from(t.gcol) + t.text.chars().count() as i32 - 1, is_field(t, *rule)));
+        }
         spans.push(span);
     }
     spans
+}
+
+/// SQ-1825: whether a run is a text FIELD for [`row_spans`]'s collision rule: a word or
+/// number, not a frame glyph or a blank.
+fn is_field(t: &crate::engine::PxText, rule: bool) -> bool {
+    !rule && t.text.trim().chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// SQ-1814: the whole-strip column plan of a v6 chrome text strip, and the map
@@ -6454,7 +6507,8 @@ fn strip_run_positions(
     for (row, row_runs) in &by_row {
         let raw_spans = row_spans(row_runs, &origin);
         for ((t, rule), &(c0, _)) in row_runs.iter().zip(&raw_spans) {
-            let c = shift.map_row(*row, origin(t));
+            // SQ-1825: a field the collision rule moved is published where it is drawn.
+            let c = shift.map_row(*row, if *rule { origin(t) } else { c0 });
             // SQ-1816: publish the run as it is drawn, less the leading blanks the
             // column plan dropped, so a host drawing `run.text` at `col` agrees.
             let mut run = t.clone();
@@ -17029,6 +17083,27 @@ mod tests {
         assert_eq!(lone_glyph_run([(&item, false), (&bar, false)].into_iter()), None, "a bar beside it");
         assert_eq!(lone_glyph_run([(&item, false), (&blank, true)].into_iter()), None, "a rule beside it");
         assert_eq!(lone_glyph_run([(&blank, false)].into_iter()), None, "no glyph run");
+    }
+
+    #[test]
+    fn row_spans_move_a_field_the_scale_lays_on_the_field_before_it() {
+        // SQ-1825: Shogun's "Score:" (game cells 63..=68) and its value, five cells on.
+        let cell = zvm::screen::V6Cell::DEFAULT;
+        let run = |x: u16, text: &str| (crate::engine::PxText::derived(1, x, text.into(), 0, 0, 0, cell), false);
+        let origin = |at: i32| move |t: &crate::engine::PxText| if t.text == "Score:" { 31 } else { at };
+        let score = run(505, "Score:");
+        // Laid on top of the label, or flush against it: one blank past it.
+        for at in [36, 37] {
+            assert_eq!(row_spans(&[score.clone(), run(585, "0")], &origin(at)), [(31, 37), (38, 39)], "at {at}");
+        }
+        assert_eq!(row_spans(&[score.clone(), run(585, "10")], &origin(36)), [(31, 37), (38, 40)], "a number");
+        // Clear of it already: untouched.
+        assert_eq!(row_spans(&[score.clone(), run(585, "0")], &origin(40)), [(31, 37), (40, 41)]);
+        // The game abutted them ("Score:0"): the scale's answer stands.
+        assert_eq!(row_spans(&[score.clone(), run(553, "0")], &origin(36)), [(31, 37), (36, 37)]);
+        // A divider standing between them makes the row a table the scale owns.
+        let bar = run(537, "\u{258c}");
+        assert_eq!(row_spans(&[score.clone(), bar.clone(), run(585, "0")], &origin(36)), [(31, 37), (36, 37), (36, 37)]);
     }
 
     #[test]

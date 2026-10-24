@@ -48,3 +48,5 @@ mod sq1817_shogun_title_rows;
 mod sq1822_shogun_boot_menu;
 #[path = "suites/sq1824_shogun_slide_clear.rs"]
 mod sq1824_shogun_slide_clear;
+#[path = "suites/sq1825_shogun_status_bar_rows.rs"]
+mod sq1825_shogun_status_bar_rows;
