@@ -30,6 +30,8 @@ mod v6_arthur_intro_plates;
 mod v6_arthur_status;
 #[path = "suites/v6_arthur_room_description.rs"]
 mod v6_arthur_room_description;
+#[path = "suites/sq1814_v6_strip_column_plan.rs"]
+mod sq1814_v6_strip_column_plan;
 #[path = "suites/v6_inform_titles.rs"]
 mod v6_inform_titles;
 #[path = "suites/v6_location_mapper.rs"]

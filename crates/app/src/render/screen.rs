@@ -5869,6 +5869,135 @@ fn chrome_run_origin(
     }
 }
 
+/// The `(start, end)` columns (end exclusive, before any clip) of each run in one
+/// strip row, in the row's own order: the run's [`chrome_run_origin`] and its
+/// character count, except a RULE (SQ-0742), which spans from the end of whatever
+/// is drawn before it to the start of whatever comes after, so a border reads as
+/// one unbroken line through its own corners and titles (shared by
+/// `draw_chrome_text_strip`, `strip_run_resolution` and [`chrome_strip_shift`],
+/// SQ-1814).
+///
+/// SQ-0747: "where the last thing before it ends" is the end of the last thing
+/// DRAWN, which is not always the immediately preceding run. A run is POSITIONED
+/// through the scale but advances ONE TERMINAL COLUMN per character, and the two
+/// rates only coincide at one column per native 8px cell. So a BLANK run the game
+/// paints after a label — over the label's own trailing whitespace, in native
+/// pixels — maps to a column INSIDE the label once the label has advanced at the
+/// other rate, and ends there. Taking that as the rule's left edge started the
+/// rule inside the label and stamped its glyph over the tail: Journey's release-30
+/// menu header came out `The P` at a 115-column pane and `The Pa` at 157. So the
+/// rule starts no further left than the end of every GLYPH span before it.
+/// Monotone: this can only ever move a rule's left edge to the RIGHT of where it
+/// is today, and only past ink.
+fn row_spans(
+    row_runs: &[(crate::engine::PxText, bool)],
+    origin: &dyn Fn(&crate::engine::PxText) -> i32,
+) -> Vec<(i32, i32)> {
+    let base_span = |t: &crate::engine::PxText| {
+        let c = origin(t);
+        (c, c + t.text.chars().count() as i32)
+    };
+    let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
+    for (i, (t, rule)) in row_runs.iter().enumerate() {
+        let (c0, c1) = base_span(t);
+        let span = if *rule {
+            let prev = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
+            let left = row_runs[..i]
+                .iter()
+                .zip(&spans)
+                .filter(|((p, _), _)| !p.text.trim().is_empty())
+                .map(|(_, &(_, e))| e)
+                .max()
+                .map_or(prev, |ink| prev.max(ink));
+            let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
+            (left, right.max(left))
+        } else {
+            (c0, c1)
+        };
+        spans.push(span);
+    }
+    spans
+}
+
+/// SQ-1814: the whole-strip column plan of a v6 chrome text strip, and the map
+/// from the columns the runs were laid at to the columns they are drawn at.
+///
+/// A text strip POSITIONS each run through the pane scale and then advances one
+/// cell per character, so on a narrow pane the start columns shrink while the text
+/// does not: Arthur's status bar kept "Churchyard" and clipped "St Anne's Day,
+/// Compline" to "…Compli", "…Com", "…Day," at 70, 60 and 50 columns, with the
+/// middle of the bar blank. Only when some glyph run would overrun the strip is a
+/// plan made ([`strip_column_plan`], the SQ-1809 rule for an upper-window grid):
+/// columns blank on EVERY row go, so all rows shift together and a multi-row menu
+/// keeps its columns aligned. If the blank columns cannot cover the overrun there
+/// is no plan and the strip clips exactly as it always did.
+struct StripShift {
+    /// The strip's left column: columns before it are never touched.
+    x0: i32,
+    /// Columns the plan covers, from `x0`.
+    cols: usize,
+    plan: Option<crate::render::upper_window::ColumnPlan>,
+}
+
+impl StripShift {
+    /// Where virtual column `v` (an exclusive end counts) is drawn: `v` less the
+    /// dropped columns before it.
+    fn map(&self, v: i32) -> i32 {
+        let Some(plan) = &self.plan else { return v };
+        if v <= self.x0 {
+            return v;
+        }
+        let before = ((v - self.x0) as usize).min(self.cols);
+        let kept = plan.kept.partition_point(|&c| usize::from(c) <= before);
+        let dropped = before - kept;
+        v - dropped as i32
+    }
+}
+
+fn chrome_strip_shift(
+    by_row: &std::collections::BTreeMap<i32, Vec<(crate::engine::PxText, bool)>>,
+    rect: Rect,
+    origin: &dyn Fn(&crate::engine::PxText) -> i32,
+) -> StripShift {
+    let x0 = rect.x as i32;
+    let none = StripShift { x0, cols: 0, plan: None };
+    let rows: Vec<_> = by_row
+        .iter()
+        .filter(|(row, _)| **row >= rect.y as i32 && **row < rect.bottom() as i32)
+        .map(|(_, rr)| (rr, row_spans(rr, origin)))
+        .collect();
+    let glyph = |t: &crate::engine::PxText, rule: bool| !rule && !t.text.trim().is_empty();
+    let vmax = rows
+        .iter()
+        .flat_map(|(rr, sp)| rr.iter().zip(sp))
+        .filter(|((t, rule), _)| glyph(t, *rule))
+        // A merged run can carry trailing padding; clipping blanks costs nothing.
+        .map(|((t, _), &(_, e))| e - t.text.chars().rev().take_while(|c| c.is_whitespace()).count() as i32)
+        .max()
+        .unwrap_or(0);
+    let right = rect.right() as i32;
+    if vmax <= right {
+        return none;
+    }
+    let mut ink = vec![false; (vmax - x0) as usize];
+    for (rr, sp) in &rows {
+        let bar = row_is_reverse_bar(rr.iter().map(|(t, _)| t));
+        for ((t, rule), &(s, e)) in rr.iter().zip(sp) {
+            // Glyph runs are ink over their whole span (an interior space is a word
+            // space, not a gap to drop); so is a reversed blank run standing as a
+            // column divider in a row that is not itself a bar (SQ-0508(b)). Rules
+            // and the rest of the blanks stretch or shrink with the plan.
+            if glyph(t, *rule) || (!*rule && t.style & 1 != 0 && !bar) {
+                for c in s.max(x0)..e.min(vmax) {
+                    ink[(c - x0) as usize] = true;
+                }
+            }
+        }
+    }
+    let need = (vmax - right) as usize;
+    StripShift { x0, cols: ink.len(), plan: crate::render::upper_window::strip_column_plan(&ink, need) }
+}
+
 /// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
 /// same way [`draw_chrome_text_strip`] positions it (SQ-1591): SQ-0543's
 /// consecutive-row packing (one game text row per terminal row, from the
@@ -5892,10 +6021,12 @@ fn strip_run_positions(
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut out = Vec::new();
     for (row, row_runs) in &by_row {
         for (t, _rule) in row_runs {
-            let c = chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+            let c = shift.map(origin(t));
             out.push((t.clone(), c, *row));
         }
     }
@@ -5960,9 +6091,15 @@ fn strip_divider_fills(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    native: (u16, u16),
     cell: zvm::screen::V6Cell,
 ) -> Vec<(u16, i32, i32)> {
     let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
+    let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
+    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
+    let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut divider_rows: std::collections::BTreeMap<u16, (i32, i32)> = std::collections::BTreeMap::new();
     for (row, row_runs) in &by_row {
         if row_is_reverse_bar(row_runs.iter().map(|(t, _)| t)) {
@@ -5970,7 +6107,7 @@ fn strip_divider_fills(
         }
         for (t, _) in row_runs {
             if t.style & 1 != 0 && t.text.trim().is_empty() {
-                let (c, _) = run_cell(t, scale, cell_px, pane, cell);
+                let c = shift.map(run_cell(t, scale, cell_px, pane, cell).0);
                 if c >= rect.x as i32 && c < rect.right() as i32 {
                     let span = divider_rows.entry(c as u16).or_insert((*row, *row));
                     span.0 = span.0.min(*row);
@@ -6009,31 +6146,12 @@ fn strip_run_resolution(
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
-    let base_span = |t: &crate::engine::PxText| -> (i32, i32) {
-        let c = chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
-        (c, c + t.text.chars().count() as i32)
-    };
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut out = Vec::new();
     for row_runs in by_row.values() {
-        let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
-        for (i, (t, rule)) in row_runs.iter().enumerate() {
-            let (c0, c1) = base_span(t);
-            let span = if *rule {
-                let prev = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
-                let left = row_runs[..i]
-                    .iter()
-                    .zip(&spans)
-                    .filter(|((p, _), _)| !p.text.trim().is_empty())
-                    .map(|(_, &(_, e))| e)
-                    .max()
-                    .map_or(prev, |ink| prev.max(ink));
-                let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
-                (left, right.max(left))
-            } else {
-                (c0, c1)
-            };
-            spans.push(span);
-        }
+        let spans: Vec<(i32, i32)> =
+            row_spans(row_runs, &origin).into_iter().map(|(c0, c1)| (shift.map(c0), shift.map(c1))).collect();
         let claimed: Vec<(usize, (i32, i32), bool)> = row_runs
             .iter()
             .zip(&spans)
@@ -6083,7 +6201,7 @@ impl V6HybridChromeLayout {
                     runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: false, resolved: r });
                 }
                 ground.extend(strip_ground_fills(text_runs, *rect, &frame.scale, cell_px, pane, native, cell));
-                divider_fills.extend(strip_divider_fills(text_runs, *rect, &frame.scale, cell_px, pane, cell));
+                divider_fills.extend(strip_divider_fills(text_runs, *rect, &frame.scale, cell_px, pane, native, cell));
             }
         }
         let menu_band: Vec<Rect> = frame
@@ -6102,7 +6220,7 @@ impl V6HybridChromeLayout {
                     runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: true, resolved: r });
                 }
                 ground.extend(strip_ground_fills(text_runs, *rect, menu_scale, cell_px, pane, native, cell));
-                divider_fills.extend(strip_divider_fills(text_runs, *rect, menu_scale, cell_px, pane, cell));
+                divider_fills.extend(strip_divider_fills(text_runs, *rect, menu_scale, cell_px, pane, native, cell));
             }
         }
         // SQ-0944: text the game printed ON its own artwork, positioned exactly
@@ -10960,6 +11078,14 @@ fn draw_chrome_text_strip(
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
 
+    // SQ-1814: a text strip POSITIONS each run through the pane scale but advances one
+    // cell per character, so at a narrow pane the start columns shrink and the text
+    // does not, and a right-hand field ran off the strip while the middle of the bar
+    // sat blank. When something would clip, drop the columns blank on EVERY row (the
+    // plan SQ-1809 uses for an upper-window grid) and shift all rows by the same map.
+    let origin = |t: &PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let shift = chrome_strip_shift(&by_row, rect, &origin);
+
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run is
     // a vertical column divider — a reverse-video space is a solid block, which is how
     // these games draw a rule — and the scale bridges some rows in as blank Text rows,
@@ -10983,7 +11109,7 @@ fn draw_chrome_text_strip(
         }
         for (t, _) in row_runs {
             if t.style & 1 != 0 && t.text.trim().is_empty() {
-                let (c, _) = run_cell(t, scale, cell_px, pane, cell);
+                let c = shift.map(run_cell(t, scale, cell_px, pane, cell).0);
                 if c >= rect.x as i32 && c < rect.right() as i32 {
                     let span = divider_rows.entry(c as u16).or_insert((*row, *row));
                     span.0 = span.0.min(*row);
@@ -11061,69 +11187,10 @@ fn draw_chrome_text_strip(
         // through its own corners and titles instead of a rule with a hole either
         // side of every neighbour. Everything else keeps exactly the span its
         // characters occupy.
-        let base_span = |t: &PxText| {
-            // SQ-0892: in a strip with no horizontal structure the column is the
-            // run's offset in NATIVE TEXT CELLS from the strip's own origin;
-            // everywhere else it is this run's own native pixel through the scale.
-            let c = match native_origin {
-                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
-                None => run_cell(t, scale, cell_px, pane, cell).0,
-            };
-            // SQ-0783: a LONE frame glyph standing at the game screen's own edge — the
-            // `┐` that ends the top rule, the `┘` that ends the bottom one, the `│` that
-            // closes the menu header — aligns to the far end of its own native cell, so
-            // the frame reaches the pane's last column instead of leaving the one beside
-            // it blank. Everything else, including every interior divider, keeps
-            // `run_cell`'s answer exactly. The rule in front of it runs to whatever
-            // column this returns (its right edge IS this span's start), so the line
-            // stays unbroken through the corner.
-            let c = match t.text.chars().next() {
-                Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
-                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane, cell).unwrap_or(c)
-                }
-                _ => c,
-            };
-            (c, c + t.text.chars().count() as i32)
-        };
-        let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
-        for (i, (t, rule)) in row_runs.iter().enumerate() {
-            let (c0, c1) = base_span(t);
-            let span = if *rule {
-                // SQ-0747: "where the last thing before it ends" is the end of the last
-                // thing DRAWN, which is not always the immediately preceding run.
-                //
-                // A run is POSITIONED through the scale but advances ONE TERMINAL
-                // COLUMN per character, and the two rates only coincide at one column
-                // per native 8px cell. So a BLANK run the game paints after a label —
-                // over the label's own trailing whitespace, in native pixels — maps to
-                // a column INSIDE the label once the label has advanced at the other
-                // rate, and ends there. Taking that as the rule's left edge started the
-                // rule inside the label and stamped its glyph over the tail: Journey's
-                // release-30 menu header came out `The P` at a 115-column pane and
-                // `The Pa` at 157, with `Individual Comm` beside it — the eaten labels
-                // this quest has carried through five passes, and the reason the count
-                // varied with the pane rather than staying put. SQ-0727 fixed the same
-                // rate mismatch for the blank run's OWN stamping; this is it one level
-                // up, in what the blank's span is then used to bound.
-                //
-                // So the rule starts no further left than the end of every GLYPH span
-                // before it. Monotone: this can only ever move a rule's left edge to
-                // the RIGHT of where it is today, and only past ink.
-                let prev = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
-                let left = row_runs[..i]
-                    .iter()
-                    .zip(&spans)
-                    .filter(|((p, _), _)| !p.text.trim().is_empty())
-                    .map(|(_, &(_, e))| e)
-                    .max()
-                    .map_or(prev, |ink| prev.max(ink));
-                let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
-                (left, right.max(left))
-            } else {
-                (c0, c1)
-            };
-            spans.push(span);
-        }
+        let spans: Vec<(i32, i32)> = row_spans(row_runs, &origin)
+            .into_iter()
+            .map(|(c0, c1)| (shift.map(c0), shift.map(c1)))
+            .collect();
         // The cells each run's own glyphs occupy, kept alongside the run's index so a
         // run can ask what OTHER runs claim (SQ-0747). `WORD` is a multi-character
         // label — a word the game printed, which nothing single-glyph may overwrite.
@@ -16381,5 +16448,27 @@ mod tests {
                 gen_us + build_us,
             );
         }
+    }
+
+    // ── StripShift (SQ-1814) ─────────────────────────────────────────────────
+
+    #[test]
+    fn strip_shift_maps_columns_past_the_dropped_ones() {
+        use crate::render::upper_window::{ColumnPlan, ColumnStrategy};
+        // Domain columns 1..=8 from x0 = 10, with 3 and 4 dropped.
+        let shift = StripShift {
+            x0: 10,
+            cols: 8,
+            plan: Some(ColumnPlan { kept: vec![1, 2, 5, 6, 7, 8], strategy: ColumnStrategy::DropBlank }),
+        };
+        assert_eq!(shift.map(5), 5, "left of the strip is never touched");
+        assert_eq!(shift.map(10), 10);
+        assert_eq!(shift.map(12), 12);
+        assert_eq!(shift.map(14), 12, "a dropped column lands on the next kept one");
+        assert_eq!(shift.map(15), 13);
+        assert_eq!(shift.map(18), 16, "an exclusive end past the last kept column");
+        assert_eq!(shift.map(30), 28, "past the domain every dropped column counts");
+        let none = StripShift { x0: 10, cols: 0, plan: None };
+        assert_eq!(none.map(30), 30);
     }
 }

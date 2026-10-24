@@ -344,6 +344,61 @@ fn middle_out(cands: &[u16], cols: u16, n: usize) -> Vec<u16> {
     out
 }
 
+/// Which `need` of the blank columns `cands` to drop, shared by [`column_plan`]
+/// (an upper-window grid, SQ-1809) and [`strip_column_plan`] (a v6 chrome text
+/// strip, SQ-1814). `blank[c]` (1-based, `blank.len() == cols + 1`) says column
+/// `c` is blank on every row.
+///
+/// The first column of a blank run that sits BETWEEN ink (a word gap, the space
+/// in `Score: 0`) is the last to go, so dropping the gap between a room name and
+/// its fields never fuses the words either side of it; everything else goes
+/// nearest the centre first ([`middle_out`]).
+fn drop_blank_columns(blank: &[bool], cols: u16, cands: &[u16], need: usize) -> Vec<u16> {
+    let is_sep = |c: u16| {
+        let ink = |c: u16| c >= 1 && c <= cols && !blank[usize::from(c)];
+        let mut l = c;
+        while l > 1 && blank[usize::from(l - 1)] {
+            l -= 1;
+        }
+        let mut r = c;
+        while r < cols && blank[usize::from(r + 1)] {
+            r += 1;
+        }
+        c == l && ink(l.wrapping_sub(1)) && ink(r + 1)
+    };
+    let (seps, firsts): (Vec<u16>, Vec<u16>) = cands.iter().partition(|&&c| is_sep(c));
+    let mut d = middle_out(&firsts, cols, need);
+    if d.len() < need {
+        d.extend(middle_out(&seps, cols, need - d.len()));
+    }
+    d
+}
+
+/// The columns of a v6 chrome text strip to keep when its text would overrun the
+/// strip (SQ-1814): `ink[i]` says strip column `i` (0-based) holds ink on SOME
+/// row, and `need` is how many columns must go. Only columns blank on EVERY row
+/// are dropped, by [`column_plan`]'s own rule ([`drop_blank_columns`]), so every
+/// row maps through the same plan and a multi-row strip stays column-aligned.
+/// `kept` is 1-based, as for a grid. `None` when the blank columns cannot cover
+/// `need` (the caller then clips, as it always did).
+pub fn strip_column_plan(ink: &[bool], need: usize) -> Option<ColumnPlan> {
+    let cols = u16::try_from(ink.len()).ok()?;
+    if need == 0 || need >= usize::from(cols) {
+        return None;
+    }
+    let mut blank = vec![true; usize::from(cols) + 1];
+    for (i, &x) in ink.iter().enumerate() {
+        blank[i + 1] = !x;
+    }
+    let cands: Vec<u16> = (1..=cols).filter(|&c| blank[usize::from(c)]).collect();
+    if cands.len() < need {
+        return None;
+    }
+    let dropped = drop_blank_columns(&blank, cols, &cands, need);
+    let kept = (1..=cols).filter(|c| !dropped.contains(c)).collect();
+    Some(ColumnPlan { kept, strategy: ColumnStrategy::DropBlank })
+}
+
 /// Decide which columns of `upper`'s first `rows` rows are shown in `width`
 /// visible columns (SQ-1809). `cursor` is the 1-based grid cursor and
 /// `show_cursor` says it is the player's (the game is reading input in this
@@ -424,26 +479,7 @@ pub fn column_plan(
     let blank_cands: Vec<u16> =
         (1..=cols).filter(|&c| blank[usize::from(c)] && !protect[usize::from(c)]).collect();
     let (dropped, strategy) = if blank_cands.len() >= need {
-        // The first column of a blank run that sits BETWEEN ink (a word gap, the
-        // space in `Score: 0`) is the last to go, so dropping the gap between a
-        // room name and its fields never fuses the words either side of it.
-        let is_sep = |c: u16| {
-            let ink = |c: u16| c >= 1 && c <= cols && !blank[usize::from(c)];
-            let mut l = c;
-            while l > 1 && blank[usize::from(l - 1)] {
-                l -= 1;
-            }
-            let mut r = c;
-            while r < cols && blank[usize::from(r + 1)] {
-                r += 1;
-            }
-            c == l && ink(l.wrapping_sub(1)) && ink(r + 1)
-        };
-        let (seps, firsts): (Vec<u16>, Vec<u16>) = blank_cands.iter().partition(|&&c| is_sep(c));
-        let mut d = middle_out(&firsts, cols, need);
-        if d.len() < need {
-            d.extend(middle_out(&seps, cols, need - d.len()));
-        }
+        let d = drop_blank_columns(&blank, cols, &blank_cands, need);
         (d, ColumnStrategy::DropBlank)
     } else if band_or_blank {
         let content: Vec<u16> =
@@ -1868,5 +1904,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── strip_column_plan (SQ-1814) ──────────────────────────────────────────
+
+    fn strip_shown(ink: &str, need: usize) -> Option<String> {
+        let flags: Vec<bool> = ink.chars().map(|c| c == '#').collect();
+        let plan = strip_column_plan(&flags, need)?;
+        assert_eq!(plan.strategy, ColumnStrategy::DropBlank);
+        Some(plan.kept.iter().map(|&c| ink.chars().nth(usize::from(c) - 1).unwrap()).collect())
+    }
+
+    #[test]
+    fn strip_plan_shrinks_a_gap_between_runs_and_keeps_every_ink_column() {
+        assert_eq!(strip_shown("##....##", 3).as_deref(), Some("##.##"));
+        assert_eq!(strip_shown("##....##", 4).as_deref(), Some("####"));
+    }
+
+    #[test]
+    fn strip_plan_drops_the_gap_before_a_word_space() {
+        // The first column of a blank run BETWEEN ink is the last to go, so words
+        // keep their space while the wide gap and the margins give way first.
+        assert_eq!(strip_shown("##.##....##", 3).as_deref(), Some("##.##.##"));
+        assert_eq!(strip_shown("..##.##", 2).as_deref(), Some("##.##"));
+    }
+
+    #[test]
+    fn strip_plan_is_none_when_blanks_cannot_cover_the_overrun_or_nothing_is_needed() {
+        assert_eq!(strip_shown("##.##", 2), None);
+        assert_eq!(strip_shown("##....##", 0), None);
+        assert_eq!(strip_shown("####", 1), None);
     }
 }
