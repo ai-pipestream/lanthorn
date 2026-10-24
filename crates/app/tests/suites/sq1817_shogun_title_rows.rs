@@ -301,3 +301,80 @@ fn host_layout_and_clicks_follow_the_slide() {
         assert!(gx > x0 && gx <= x1, "{cols} cols: first cell clicks to native x {gx}, outside {x0}..{x1}");
     }
 }
+
+// ── SQ-1821: a click on any drawn cell of a run resolves inside that run ─────
+
+/// The host layout of the title card on kitty at `(cw, ch)` cells.
+fn host_ring(
+    s: &GameSession,
+    cols: u16,
+    (cw, ch): (u16, u16),
+) -> app::render::screen::V6HybridChromeLayout {
+    let model = s.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let cell = zvm::screen::V6Cell::DEFAULT;
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(cell));
+    let layout = app::render::v6_layout::classify_windows(items, cell);
+    let mut st = app::state::AppState::default();
+    st.colors = app::colors::ColorScheme::terminal_default();
+    st.set_game_picker(Some(app::render::graphics::kitty_picker(cw, ch)));
+    st.config.v6_render = app::config::V6RenderMode::Hybrid;
+    st.config.honor_game_colours = true;
+    let pane = Rect::new(0, 0, cols, 36);
+    app::render::screen::hybrid_chrome_layout(&layout, native, pane, (cw, ch), &st).expect("chrome ring")
+}
+
+/// The slid, clipped trademark line (54 characters) is the report's specimen: at 40
+/// columns its cells 33..40 mapped past the image's right edge and returned `None`.
+/// Every drawn cell of every glyph run now clicks inside its own native span, at both
+/// widths and both cell sizes.
+///
+/// FALSIFY by emptying `drawn_runs` in `strip_click_columns`: cells 33..40 of the
+/// trademark line at 40 columns return `None`.
+#[test]
+fn every_drawn_cell_of_a_run_clicks_inside_that_run() {
+    let Some(s) = title_card() else { return };
+    let mut checked = 0;
+    for cols in [40u16, 50] {
+        for cells in [(8u16, 16u16), (10, 22)] {
+            let ring = host_ring(&s, cols, cells);
+            let trademark = ring.runs.iter().find(|r| r.run.text.contains("SHOGUN is a trademark")).expect("run");
+            let (c0, c1) = trademark.resolved.expect("drawn");
+            if cols == 40 {
+                assert!(c0 <= 33 && c1 == 40, "premise: the slid line covers cells 33..40 ({c0}..{c1})");
+            }
+            for r in ring.runs.iter().filter(|r| !r.over_art && r.run.text.trim().chars().count() >= 2) {
+                let Some((a, b)) = r.resolved else { continue };
+                // Half a cell of slack: a run's origin is snapped to the cell grid.
+                let x0 = i32::from(r.run.x.max(1)) - 4;
+                let x1 = i32::from(r.run.x.max(1)) + r.run.text.chars().count() as i32 * 8 + 4;
+                for col in a..b {
+                    let ctx = format!("{cols} cols {cells:?}: {:?} cell ({col},{})", r.run.text, r.row);
+                    let (gx, _) = ring.click_map.map_click(col as u16, r.row as u16).unwrap_or_else(|| panic!("{ctx} maps to None"));
+                    let gx = i32::from(gx);
+                    assert!((x0..=x1).contains(&gx), "{ctx} clicks to native x {gx}, outside {x0}..{x1}");
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 200, "non-vacuity: only {checked} cells checked");
+}
+
+/// Wide panes are untouched: with the drawn extents removed from the map every cell of
+/// the pane answers exactly the same.
+#[test]
+fn wide_pane_clicks_are_unchanged_by_the_run_extents() {
+    let Some(s) = title_card() else { return };
+    for cols in [80u16, 100] {
+        let ring = host_ring(&s, cols, (8, 16));
+        assert!(!ring.click_map.drawn_runs.is_empty(), "premise: runs recorded");
+        let mut bare = ring.click_map.clone();
+        bare.drawn_runs.clear();
+        for row in 0..36 {
+            for col in 0..cols {
+                assert_eq!(ring.click_map.map_click(col, row), bare.map_click(col, row), "{cols} cols ({col},{row})");
+            }
+        }
+    }
+}

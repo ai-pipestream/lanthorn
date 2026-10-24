@@ -5661,6 +5661,7 @@ mod tests {
             canvas: (64, frame.canvas_h as u16), screen: frame.native,
             packed_text: Vec::new(),
             strip_cols: Vec::new(),
+            drawn_runs: Vec::new(),
         };
         for y in 0..frame.canvas_h as u16 {
             for x in [0u16, 31, 63] {

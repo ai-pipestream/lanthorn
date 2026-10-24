@@ -91,6 +91,7 @@ fn zork0_v6_compass_click_maps_writes_header_and_does_not_fault() {
         img_h: 200.0,
         packed_text: Vec::new(),
         strip_cols: Vec::new(),
+        drawn_runs: Vec::new(),
         canvas: (320, 200),
         screen: (320, 200),
     };
@@ -170,6 +171,7 @@ fn zork0_compass_click_ends_the_line_read_with_the_clicked_direction() {
         img_h: 400.0,
         packed_text: Vec::new(),
         strip_cols: Vec::new(),
+        drawn_runs: Vec::new(),
         canvas: (640, 400),
         screen: (640, 400),
     };
@@ -329,6 +331,7 @@ fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
             cols: Some((14, 72, 86)),
         }],
         strip_cols: Vec::new(),
+        drawn_runs: Vec::new(),
     };
 
     // Row by row down the menu: each terminal row names the NEXT native text row,
@@ -380,6 +383,7 @@ fn a_row_only_packed_region_leaves_the_column_proportional() {
         canvas: (640, 400), screen: (640, 400),
         packed_text: vec![PackedText { rows: (30, 4, 20 * 16), cols: None }],
         strip_cols: Vec::new(),
+        drawn_runs: Vec::new(),
     };
     let (gx, gy) = map.map_click(10, 31).expect("inside the strip");
     assert_eq!(gy, 20 * 16 + 16 + 8, "the row still inverts by packing");

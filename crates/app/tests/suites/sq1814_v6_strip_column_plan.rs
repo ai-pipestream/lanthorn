@@ -247,13 +247,13 @@ fn host_layout(session: &GameSession, honor: bool, cols: u16) -> app::render::sc
         .expect("a hybrid chrome layout")
 }
 
-/// The first drawn cell of every glyph run clicks back to a game pixel inside
+/// Every drawn cell of every glyph run clicks back to a game pixel inside
 /// the run's own native span (a character is 8 native px wide), never a neighbour's.
 ///
 /// FALSIFY by passing `Vec::new()` for the strip columns in
-/// `V6HybridChromeLayout::from_frame`'s `build_hybrid_click_map` call: every shifted
+/// `V6HybridChromeLayout::from_frame`'s `build_hybrid_click_map` call (SQ-1815: every shifted
 /// word clicks onto its neighbour, which an embedding host saw as "clicking Esher
-/// does nothing".
+/// does nothing"), or by dropping `drawn_runs` (SQ-1821: a run's later cells click past it).
 fn assert_clicks_land_on_their_words(ctx: &str, hyb: &app::render::screen::V6HybridChromeLayout, cols: u16) -> usize {
     let mut checked = 0;
     for r in hyb.runs.iter().filter(|r| !r.over_art && !r.run.text.trim().is_empty()) {
@@ -262,13 +262,24 @@ fn assert_clicks_land_on_their_words(ctx: &str, hyb: &app::render::screen::V6Hyb
             continue;
         }
         let n = r.run.text.trim_end().chars().count() as i32;
-        let x0 = i32::from(r.run.x.max(1)) - 1;
-        let x1 = x0 + n * 8;
-        // Only the FIRST cell: a run's later characters advance a column each while the
-        // scale compresses the pane, so they overshoot the run's own native span by
-        // design (and always did).
-        {
-            let (col, row) = (c0 as u16, r.row as u16);
+        let x0 = i32::from(r.run.x.max(1)) - 1 - 4;
+        let x1 = x0 + 4 + n * 8 + 4;
+        // SQ-1821 (the 4 is half a cell: a run's origin is snapped to the cell grid): EVERY drawn cell of the run, not only the first. A run's later
+        // characters advance a column each while the scale compresses the pane, so the
+        // scale alone puts them past the run's own native span; the click map now keeps
+        // each inside it.
+        // A cell a LATER run on the row is drawn over belongs to that run (the glyph the
+        // player sees there is the later one's), so it is that run's to resolve.
+        let later: Vec<(i32, i32)> = hyb
+            .runs
+            .iter()
+            .skip_while(|o| !std::ptr::eq(*o, r))
+            .skip(1)
+            .filter(|o| o.row == r.row && !o.over_art && !o.run.text.trim().is_empty())
+            .filter_map(|o| o.resolved)
+            .collect();
+        for col in (c0..c1).filter(|c| !later.iter().any(|&(a, b)| *c >= a && *c < b)) {
+            let (col, row) = (col as u16, r.row as u16);
             let (gx, _) = hyb
                 .click_map
                 .map_click(col, row)

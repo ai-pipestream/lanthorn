@@ -1575,6 +1575,7 @@ impl GraphicsRender {
             screen,
             packed_text: Vec::new(),
             strip_cols: Vec::new(),
+            drawn_runs: Vec::new(),
         });
     }
 

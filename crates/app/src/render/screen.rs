@@ -5815,20 +5815,22 @@ pub struct V6HybridGroundFill {
 
 impl HybridFrame {
     /// SQ-1815: the column maps of every text strip this frame draws through a
-    /// column plan (SQ-1814), for the click map. Built by [`chrome_strip_shift`] on
-    /// the SAME inputs the drawing, [`strip_run_positions`] and the host layout use,
-    /// so a click on a shifted word and the glyph drawn there cannot disagree. A
-    /// strip with no plan contributes nothing and clicks exactly as before.
+    /// column plan (SQ-1814) or a slide (SQ-1820), and (SQ-1821) the drawn cell
+    /// extent of every glyph run, for the click map. Built on the SAME inputs the
+    /// drawing, [`strip_run_positions`] and the host layout use ([`chrome_strip_shift`]
+    /// for the maps, [`strip_run_drawn`] for the extents), so a click on a shifted
+    /// word and the glyph drawn there cannot disagree. A strip with no plan or slide
+    /// contributes no column map and clicks exactly as before.
     pub(crate) fn strip_click_columns(
         &self,
         pane: Rect,
         native: (u16, u16),
         cell_px: (u16, u16),
         cell: zvm::screen::V6Cell,
-    ) -> Vec<crate::render::graphics::StripColumns> {
+    ) -> crate::render::graphics::StripClickFacts {
         let menu_scale = self.menu.as_ref().unwrap_or(&self.scale);
         let groups = [(&self.strips, &self.scale), (&self.menu_strips, menu_scale)];
-        let mut out = Vec::new();
+        let mut out = crate::render::graphics::StripClickFacts::default();
         for (strips, scale) in groups {
             for s in strips {
                 let ChromeStrip::Text(rect, runs) = s else { continue };
@@ -5841,11 +5843,32 @@ impl HybridFrame {
                 };
                 let shift = chrome_strip_shift(&by_row, *rect, &origin);
                 if shift.plan.is_some() || !shift.slides.is_empty() {
-                    out.push(crate::render::graphics::StripColumns {
+                    out.strip_cols.push(crate::render::graphics::StripColumns {
                         rect: *rect,
                         cols: if shift.plan.is_some() { shift.cols as u16 } else { 0 },
                         kept: shift.plan.map(|p| p.kept).unwrap_or_default(),
                         slides: shift.slides.iter().map(|(&r, &d)| (r as u16, d)).collect(),
+                    });
+                }
+                // SQ-1821: the drawn extent of each glyph run, in `strip_run_drawn`'s
+                // order, which is `by_row`'s own.
+                let resolved = strip_run_drawn(runs, *rect, scale, cell_px, pane, native, cell);
+                let flat = by_row.iter().flat_map(|(row, rr)| rr.iter().map(move |(t, rule)| (*row, t, *rule)));
+                for ((row, t, rule), (range, first_char)) in flat.zip(resolved) {
+                    let (Some((a, b)), false) = (range, rule) else { continue };
+                    let n = t.text.chars().count();
+                    if t.text.trim().is_empty() || n < 2 || a < 0 || b <= a || row < 0 {
+                        continue;
+                    }
+                    let cw = cell.w();
+                    let x = t.x.max(1);
+                    out.drawn_runs.push(crate::render::graphics::DrawnRun {
+                        row: row as u16,
+                        first: a as u16,
+                        end: b as u16,
+                        first_x: x.saturating_add((first_char as u16).saturating_mul(cw)),
+                        last_x: x.saturating_add((n as u16).saturating_mul(cw)).saturating_sub(1),
+                        cw,
                     });
                 }
             }
@@ -6274,6 +6297,22 @@ fn strip_run_resolution(
     native: (u16, u16),
     cell: zvm::screen::V6Cell,
 ) -> Vec<Option<(i32, i32)>> {
+    strip_run_drawn(runs, rect, scale, cell_px, pane, native, cell).into_iter().map(|d| d.0).collect()
+}
+
+/// [`strip_run_resolution`] with, for each run, the index of the character drawn at
+/// the first cell of its resolved range (the run's plan-dropped leading blanks plus
+/// whatever the strip's left edge clipped, SQ-1821). The click map reads it to know
+/// WHICH character of a run each drawn cell shows.
+fn strip_run_drawn(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    native: (u16, u16),
+    cell: zvm::screen::V6Cell,
+) -> Vec<(Option<(i32, i32)>, usize)> {
     let by_row = chrome_by_row(runs, rect, scale, cell_px, pane, cell);
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
@@ -6295,6 +6334,7 @@ fn strip_run_resolution(
             .collect();
         let over_word = |i: usize, c: i32| claimed.iter().any(|&(j, (lo, hi), word)| word && j != i && c >= lo && c < hi);
         for (i, ((t, rule), &(col, end))) in row_runs.iter().zip(&spans).enumerate() {
+            let first_char = skips[i] + (rect.x as i32 - col).max(0) as usize;
             let resolved = if col >= rect.right() as i32 || end <= rect.x as i32 {
                 None
             } else {
@@ -6309,7 +6349,7 @@ fn strip_run_resolution(
                     (len > 0).then_some((c2, c2 + len))
                 }
             };
-            out.push(resolved);
+            out.push((resolved, first_char));
         }
     }
     out

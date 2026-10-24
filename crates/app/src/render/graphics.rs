@@ -451,6 +451,62 @@ pub struct V6ClickMap {
     /// out at before the scale inverse (SQ-1815). Empty when no strip dropped a
     /// column, which is the common case.
     pub strip_cols: Vec<StripColumns>,
+    /// The drawn cell extent of every glyph run of a chrome text strip (SQ-1821), so a
+    /// click on any cell a run is drawn on resolves inside that run's native span even
+    /// when the scale places the cell elsewhere. Empty off the hybrid path.
+    pub drawn_runs: Vec<DrawnRun>,
+}
+
+/// What the hybrid click map needs of the chrome text strips: the column maps of the
+/// planned or slid ones and the drawn extent of every run. Built together by
+/// `HybridFrame::strip_click_columns` from the one source the drawing reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StripClickFacts {
+    pub strip_cols: Vec<StripColumns>,
+    pub drawn_runs: Vec<DrawnRun>,
+}
+
+/// One glyph run as DRAWN in a chrome text strip (SQ-1821): terminal `row`, cells
+/// `first..end` (end exclusive, after the plan, the slide and every clip), and the
+/// run's native extent in 1-based game pixels.
+///
+/// A run is POSITIONED through the pane scale but drawn one cell per character, so
+/// under a compressing scale its later cells lie past the span the scale gives it
+/// (to a neighbour, or off the image). The character drawn at cell `first + k` is
+/// the `k`th drawn character, native pixels `first_x + k*cw ..`, so
+/// [`V6ClickMap::map_click`] resolves a cell in the extent to that character's
+/// centre, clamped to `last_x`, whenever the scale inverse lands outside the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawnRun {
+    pub row: u16,
+    pub first: u16,
+    pub end: u16,
+    /// 1-based native x of the first DRAWN character.
+    pub first_x: u16,
+    /// 1-based native x of the run's last pixel.
+    pub last_x: u16,
+    /// Native width of one character cell.
+    pub cw: u16,
+}
+
+impl DrawnRun {
+    fn holds(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.first && col < self.end
+    }
+
+    /// Whether the scale's answer `x` already lies in the run, give or take the half
+    /// cell the run's origin was rounded by when it was snapped to the cell grid, so an
+    /// answer that was right before stays exactly as it was.
+    fn spans(&self, x: u32) -> bool {
+        let slack = u32::from(self.cw) / 2;
+        x + slack >= u32::from(self.first_x) && x <= u32::from(self.last_x) + slack
+    }
+
+    /// The native x of the character drawn at `col`, clamped to the run's end.
+    fn native_x(&self, col: u16) -> u32 {
+        let k = u32::from(col - self.first);
+        (u32::from(self.first_x) + k * u32::from(self.cw) + u32::from(self.cw) / 2).min(u32::from(self.last_x))
+    }
 }
 
 /// The column map of one chrome text strip drawn through a
@@ -567,7 +623,7 @@ pub fn build_hybrid_click_map(
     native: (u16, u16),
     cell_px: (u16, u16),
     packed_text: Vec<PackedText>,
-    strip_cols: Vec<StripColumns>,
+    facts: StripClickFacts,
 ) -> V6ClickMap {
     let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
     V6ClickMap {
@@ -585,7 +641,8 @@ pub fn build_hybrid_click_map(
         canvas: native,
         screen: native,
         packed_text,
-        strip_cols,
+        strip_cols: facts.strip_cols,
+        drawn_runs: facts.drawn_runs,
     }
 }
 
@@ -607,12 +664,17 @@ impl V6ClickMap {
         }
         // SQ-1815: a cell in a strip drawn through a column plan stands for the
         // column its run was LAID OUT at, which is what the scale inverts.
+        let drawn_col = col;
         let col = self.strip_cols.iter().find(|s| s.holds(col, row)).map_or(col, |s| s.laid_col(col, row));
+        // SQ-1821: the glyph run drawn on this cell, if any (the last drawn wins where
+        // two extents share a cell, as the later run overwrites the earlier).
+        let run = self.drawn_runs.iter().rev().find(|r| r.holds(drawn_col, row));
         // Device-pixel position of the clicked cell's centre, relative to pane.
         let dx = (col - self.pane_x) as f32 * self.cell_w as f32 + self.cell_w as f32 / 2.0;
         let dy = (row - self.pane_y) as f32 * self.cell_h as f32 + self.cell_h as f32 / 2.0;
         let fx = (dx - self.img_x) / self.img_w;
-        if !(0.0..1.0).contains(&fx) {
+        let fx_ok = (0.0..1.0).contains(&fx);
+        if !fx_ok && run.is_none() {
             return None;
         }
         // A PACKED region inverts by cell index, not by the letterbox — on whichever
@@ -639,8 +701,22 @@ impl V6ClickMap {
                 // anyway because `screen` and `canvas` are one subject and an
                 // asymmetric bound is how the next axis gets forgotten. The bound
                 // is `RasterFrame::game_px`'s, shared with every host (SQ-1568).
-                let cx = (fx * self.canvas.0 as f32).floor() as u32;
-                u32::from(crate::render::v6_layout::canvas_to_game_axis(cx, self.screen.0)?)
+                let scaled = fx_ok
+                    .then(|| {
+                        let cx = (fx * self.canvas.0 as f32).floor() as u32;
+                        crate::render::v6_layout::canvas_to_game_axis(cx, self.screen.0).map(u32::from)
+                    })
+                    .flatten();
+                match run {
+                    // SQ-1821: a cell a run is drawn on belongs to that run. Where the
+                    // scale inverse already lands inside the run it stands (wide panes
+                    // are untouched); otherwise the character drawn there decides.
+                    Some(r) => match scaled {
+                        Some(x) if r.spans(x) => x,
+                        _ => r.native_x(drawn_col),
+                    },
+                    None => scaled?,
+                }
             }
         };
         let gy = match row_packed {
@@ -1121,8 +1197,8 @@ impl GraphicsRender {
     /// what the player sees. `pane` is the whole v6 pane's cell rect; `native` is
     /// the chrome canvas's game-pixel extent; `cell_px` is the font cell size.
     /// `packed_text` carries every region drawn as packed cells rather than through
-    /// the scale — see [`PackedText`]. `strip_cols` carries every strip drawn
-    /// through a column plan — see [`StripColumns`].
+    /// the scale — see [`PackedText`]. `facts` carries every strip drawn
+    /// through a column plan or slide and every run's drawn extent — see [`StripClickFacts`].
     pub fn record_hybrid_click_map(
         &mut self,
         pane: Rect,
@@ -1130,10 +1206,10 @@ impl GraphicsRender {
         native: (u16, u16),
         cell_px: (u16, u16),
         packed_text: Vec<PackedText>,
-        strip_cols: Vec<StripColumns>,
+        facts: StripClickFacts,
     ) {
         self.last_v6_map =
-            Some(build_hybrid_click_map(pane, scale, native, cell_px, packed_text, strip_cols));
+            Some(build_hybrid_click_map(pane, scale, native, cell_px, packed_text, facts));
     }
 
     /// Record the click map for the v6 CELL path — a terminal with no image
@@ -1169,6 +1245,7 @@ impl GraphicsRender {
             screen: native,
             packed_text: Vec::new(),
             strip_cols: Vec::new(),
+            drawn_runs: Vec::new(),
         });
     }
 
@@ -2729,6 +2806,7 @@ mod tests {
             screen: (100, 100),
             packed_text: Vec::new(),
             strip_cols: Vec::new(),
+            drawn_runs: Vec::new(),
         }
     }
 
@@ -2749,6 +2827,25 @@ mod tests {
         // Outside the strip's rows nothing is remapped.
         assert_eq!(m.map_click(4, 5), Some((46, 56)));
         assert_eq!(m.map_click(4, 2), Some((46, 26)));
+    }
+
+    #[test]
+    fn map_click_keeps_every_drawn_cell_of_a_run_inside_the_run() {
+        // SQ-1821: one cell == 10 game pixels over a 100px image (cells 0..10). A 6
+        // character run of 8px glyphs at native x 70.. (1-based, clipped at 108) is
+        // drawn on cells 6..12, so its last two cells lie past the image edge.
+        let run = DrawnRun { row: 3, first: 6, end: 12, first_x: 70, last_x: 108, cw: 8 };
+        let m = V6ClickMap { drawn_runs: vec![run], ..unit_map() };
+        let bare = unit_map();
+        // Past the image edge: None before, inside the run now (the 5th and 6th glyphs).
+        assert_eq!(bare.map_click(10, 3), None);
+        assert_eq!(m.map_click(10, 3), Some((106, 36)), "the fifth glyph's centre");
+        assert_eq!(m.map_click(11, 3), Some((108, 36)), "the last glyph, clamped to the run's end");
+        // A cell whose scale answer is already in the run is untouched.
+        assert_eq!(m.map_click(7, 3), bare.map_click(7, 3));
+        // Other rows and cells outside the extent are untouched.
+        assert_eq!(m.map_click(10, 4), bare.map_click(10, 4));
+        assert_eq!(m.map_click(5, 3), bare.map_click(5, 3));
     }
 
     #[test]
@@ -2805,6 +2902,7 @@ mod tests {
             img_h: 80.0,
             packed_text: Vec::new(),
             strip_cols: Vec::new(),
+            drawn_runs: Vec::new(),
             canvas: (40, 40),
             screen: (40, 40),
         };
