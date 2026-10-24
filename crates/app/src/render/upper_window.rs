@@ -390,11 +390,30 @@ pub fn strip_column_plan(ink: &[bool], need: usize) -> Option<ColumnPlan> {
     for (i, &x) in ink.iter().enumerate() {
         blank[i + 1] = !x;
     }
-    let cands: Vec<u16> = (1..=cols).filter(|&c| blank[usize::from(c)]).collect();
-    if cands.len() < need {
+    // SQ-1818: two fields must never touch. The margin outside all ink goes first (it
+    // is nobody's separator), then the interior gap columns beyond the first of each
+    // gap; the first column of every gap between ink is never dropped. When that
+    // cannot cover `need` there is no plan and the caller clips, as before.
+    let ink_at = |c: u16| c >= 1 && c <= cols && !blank[usize::from(c)];
+    let first = (1..=cols).find(|&c| ink_at(c));
+    let last = (1..=cols).rev().find(|&c| ink_at(c));
+    let mut margin: Vec<u16> = Vec::new();
+    let mut gap: Vec<u16> = Vec::new();
+    for c in (1..=cols).filter(|&c| blank[usize::from(c)]) {
+        let interior = first.is_some_and(|f| c > f) && last.is_some_and(|l| c < l);
+        if !interior {
+            margin.push(c);
+        } else if !ink_at(c - 1) {
+            gap.push(c);
+        }
+    }
+    if margin.len() + gap.len() < need {
         return None;
     }
-    let dropped = drop_blank_columns(&blank, cols, &cands, need);
+    let mut dropped = middle_out(&margin, cols, need);
+    if dropped.len() < need {
+        dropped.extend(middle_out(&gap, cols, need - dropped.len()));
+    }
     let kept = (1..=cols).filter(|c| !dropped.contains(c)).collect();
     Some(ColumnPlan { kept, strategy: ColumnStrategy::DropBlank })
 }
@@ -1918,7 +1937,8 @@ mod tests {
     #[test]
     fn strip_plan_shrinks_a_gap_between_runs_and_keeps_every_ink_column() {
         assert_eq!(strip_shown("##....##", 3).as_deref(), Some("##.##"));
-        assert_eq!(strip_shown("##....##", 4).as_deref(), Some("####"));
+        // The last blank of a gap is never dropped (SQ-1818): the fields would fuse.
+        assert_eq!(strip_shown("##....##", 4), None);
     }
 
     #[test]
@@ -1927,6 +1947,16 @@ mod tests {
         // keep their space while the wide gap and the margins give way first.
         assert_eq!(strip_shown("##.##....##", 3).as_deref(), Some("##.##.##"));
         assert_eq!(strip_shown("..##.##", 2).as_deref(), Some("##.##"));
+    }
+
+    #[test]
+    fn strip_plan_drops_margins_before_any_gap_and_never_fuses_fields() {
+        // SQ-1818: Arthur at 37 columns read "  ChurchyardSt Anne's": the gap went
+        // while two leading blanks stayed. Margins go first; one blank per gap stays.
+        assert_eq!(strip_shown("..##...##", 2).as_deref(), Some("##...##"));
+        assert_eq!(strip_shown("..##...##", 4).as_deref(), Some("##.##"));
+        assert_eq!(strip_shown("..##...##", 5), None);
+        assert_eq!(strip_shown("##...##..", 2).as_deref(), Some("##...##"));
     }
 
     #[test]

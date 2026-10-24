@@ -180,13 +180,14 @@ fn col_of(rows: &[String], word: &str) -> Option<usize> {
 
 /// Journey's multi-row menu: every row maps through the same plan, so the verb
 /// columns stay aligned, and "Individual Commands" is no longer clipped at 40-44
-/// columns. At 80 and up the menu is not touched.
+/// columns (SQ-1818: from 41 up; below that one blank per gap cannot be kept, so the
+/// menu clips instead of fusing). At 80 and up the menu is not touched.
 #[test]
 fn journey_menu_columns_stay_aligned_through_the_plan() {
     for honor in [true, false] {
         let Some(session) = journey_menu(honor) else { return };
         let model = session.screen();
-        for cols in [40u16, 42, 44, 80, 100] {
+        for cols in [41u16, 42, 44, 80, 100] {
             let (area, buf) = render(&model, honor, cols, 25);
             let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
             let where_ = format!("honor={honor} {cols} cols:\n{}", rows.join("\n"));
@@ -288,7 +289,7 @@ fn assert_clicks_land_on_their_words(ctx: &str, hyb: &app::render::screen::V6Hyb
 fn journey_menu_clicks_resolve_through_the_strip_plan() {
     for honor in [true, false] {
         let Some(session) = journey_menu(honor) else { return };
-        for cols in [40u16, 42, 44] {
+        for cols in [41u16, 42, 44] {
             let hyb = host_layout(&session, honor, cols);
             let ctx = format!("honor={honor} {cols} cols");
             assert!(!hyb.click_map.strip_cols.is_empty(), "{ctx}: premise, the menu strip is planned");
@@ -316,15 +317,24 @@ fn arthur_status_fits_at_the_widths_a_leading_space_used_to_defeat() {
     for honor in [true, false] {
         let Some(session) = arthur(honor) else { return };
         let model = session.screen();
-        for cols in [37u16, 38, 40, 44] {
+        // SQ-1818: at 37 columns the blanks cannot cover the overrun with one blank
+        // kept between the fields, so there is no plan: the date clips (never fuses).
+        let (area, buf) = render(&model, honor, 37, 25);
+        let (_, text) = arthur_status(&buf, area);
+        assert!(text.contains("Churchyard"), "honor={honor} 37 cols: {text:?}");
+        assert!(!text.contains("Compline") && !text.contains("ChurchyardSt"), "honor={honor} 37 cols clips: {text:?}");
+        for cols in [38u16, 40, 44] {
             let (area, buf) = render(&model, honor, cols, 25);
             let (_, text) = arthur_status(&buf, area);
             assert!(text.contains("Churchyard"), "honor={honor} {cols} cols: {text:?}");
             assert!(text.contains("St Anne's Day, Compline"), "honor={honor} {cols} cols: {text:?}");
+            // SQ-1818: the two fields never fuse; at least one blank cell between them.
+            let (loc, date) = (text.find("Churchyard").unwrap(), text.find("St Anne's").unwrap());
+            assert!(date > loc + "Churchyard".len(), "honor={honor} {cols} cols: fields fused or reordered: {text:?}");
         }
         // The host sees the same plan: the dropped blank is not part of the run it
         // is told to draw at `col`.
-        let hyb = host_layout(&session, honor, 37);
+        let hyb = host_layout(&session, honor, 38);
         let runs: Vec<_> = hyb.runs.iter().filter(|r| r.run.text.contains("Churchyard")).collect();
         assert!(!runs.is_empty());
         for r in runs {

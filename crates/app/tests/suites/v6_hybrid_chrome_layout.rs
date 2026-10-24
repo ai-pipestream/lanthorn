@@ -441,7 +441,7 @@ fn hybrid_chrome_layout_click_map_recovers_a_menu_click_and_delivering_it_change
     assert_ne!(before, after, "clicking the menu band's own reported run position did not change the menu");
 }
 
-/// SQ-1815: the same click-through at a pane narrow enough (42 columns) that
+/// SQ-1815: the same click-through at a pane narrow enough (43 columns; 42 no longer plans since SQ-1818 keeps a blank between fields) that
 /// SQ-1814's column plan drops blank columns from the menu strip, so the verb is
 /// DRAWN at a shifted column. Clicking the cell it is drawn in must still reach the
 /// game's verb handler: before the click map followed the plan it landed on the
@@ -459,7 +459,7 @@ fn hybrid_chrome_layout_click_map_follows_the_strip_plan_on_a_narrow_pane() {
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
     let native = v6::native_extent(items, &b.state.v6_text);
     let layout = v6::classify_windows(items, b.state.v6_text.cell());
-    let pane = Rect::new(0, 0, 42, 45);
+    let pane = Rect::new(0, 0, 43, 45);
     let hyb = hybrid_chrome_layout(&layout, native, pane, (10, 22), &b.state).expect("expected a hybrid chrome layout");
     assert!(!hyb.click_map.strip_cols.is_empty(), "premise: the narrow menu strip is planned");
     let verb = hyb
