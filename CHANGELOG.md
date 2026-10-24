@@ -41,6 +41,10 @@ while any such tag, or this Unreleased section, still exists.*
 - **Hint files lay out in a narrower side panel.** The Hints tab used to give every hint file at
   least 72 columns; the smaller `*izm` hint files now get as little as 60, and the InvisiClues
   `*inv` files keep 72.
+- **For embedding hosts: the narrow-screen rules are library functions, so a host draws what the
+  terminal app draws.** `column_plan` says which status-area columns to keep when the game is
+  wider than the pane (and maps a screen column back to the game's), `block_shifts` slides
+  hand-laid text left to fit, and `hint_program_min_cols` gives a hint file's minimum width.
 
 ## v0.9.8 — 2026-10-23
 
