@@ -1173,6 +1173,10 @@ fn render_node(
                         state.v6_hybrid_ring.set(true);
                         state.v6_ring_plan.set(frame.ring_plan);
                         state.v6_ring_clip.set(frame.ring_clip);
+                        // SQ-1824: the click map's column facts include the story-box slides, which render
+                        // the prose into a scratch buffer, and that render takes `graphics_render` itself,
+                        // so they are built before this frame's borrow of it.
+                        let click_cols = frame.strip_click_columns(&layout, state, area, native, cell_px, state.v6_text.cell());
                         {
                             let mut gr = state.graphics_render.borrow_mut();
                             // SQ-1187: tell the band draws whether this frame replays an
@@ -1407,7 +1411,7 @@ fn render_node(
                                 native,
                                 cell_px,
                                 frame.packed_text.clone(),
-                                frame.strip_click_columns(&layout, area, native, cell_px, state.v6_text.cell()),
+                                click_cols,
                             );
                             // SQ-1188: hand this frame's changed-band encodes to the
                             // background worker in one batch. Every band above kept
@@ -1615,7 +1619,13 @@ fn render_node(
                             .collect();
                         draw_erase_fills(
                             &fill_chrome, viewport, buf, base, TextInk::of(state),
-                            &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area, 0),
+                            &|pw: &PositionedWindow| {
+                                // SQ-1824: a window inside the story box is laid 1:1 with the box's
+                                // own text, as the in-box runs below are; mapped through the ring scale its
+                                // panel started cells left of its own text and blanked the prose before it.
+                                story_window_cells(pw, viewport, vp_native, state.v6_text.cell())
+                                    .unwrap_or_else(|| px_rect_to_cells(pw, &scale, cell_px, area, 0))
+                            },
                         );
                         draw_secondary_buffers(&layout.chrome, area, buf, state, links, &|pw: &PositionedWindow| {
                             px_rect_to_cells(pw, &scale, cell_px, area, 0)
@@ -1729,7 +1739,7 @@ fn render_node(
                         let run_col = |t: &crate::engine::PxText| {
                             viewport.x as i32 + i32::from(t.gcol) - vp_col
                         };
-                        let slides = story_block_slides(&in_box, &run_col, viewport, state.v6_text.cell().h());
+                        let slides = story_slides(&layout, state, &in_box, &run_col, viewport, vp_native, state.v6_text.cell());
                         for (&y, row_runs) in in_box.iter_mut() {
                             row_runs.sort_by_key(|t| t.x);
                             let merged = merge_strip_fragments(row_runs);
@@ -5830,6 +5840,7 @@ impl HybridFrame {
     pub(crate) fn strip_click_columns(
         &self,
         layout: &crate::render::v6_layout::V6Layout<'_>,
+        state: &AppState,
         pane: Rect,
         native: (u16, u16),
         cell_px: (u16, u16),
@@ -5880,7 +5891,7 @@ impl HybridFrame {
                 }
             }
         }
-        out.drawn_runs.extend(story_slid_click_runs(layout, self.vp_native, self.viewport, cell));
+        out.drawn_runs.extend(story_slid_click_runs(layout, state, self.vp_native, self.viewport, cell));
         out
     }
 }
@@ -5894,12 +5905,13 @@ impl HybridFrame {
 /// disagree. Unslid runs contribute nothing and click through the packed index.
 fn story_slid_click_runs(
     layout: &crate::render::v6_layout::V6Layout<'_>,
+    state: &AppState,
     vp_native: (u32, u32, u32, u32),
     viewport: Rect,
     cell: zvm::screen::V6Cell,
 ) -> Vec<crate::render::graphics::DrawnRun> {
     let vp_col = (vp_native.0 / u32::from(cell.w())) as i32;
-    story_slot_overlay_runs(layout, vp_native, viewport, cell)
+    story_slot_overlay_runs(layout, state, vp_native, viewport, cell)
         .iter()
         .filter(|o| !o.run.text.trim().is_empty())
         .filter_map(|o| {
@@ -6136,15 +6148,20 @@ fn slide_left_to_fit(start: i32, ink_cells: i32, left: i32, right: i32) -> i32 {
     }
 }
 
-/// SQ-1823: the slide each candidate row takes, given `(row, start column, own slide)`
-/// in row order. A BLOCK is a maximal run of candidates on consecutive rows that start
-/// at the same column (a menu: its items are laid at one column); every row of a block
-/// takes the block's largest slide (the most negative, already clamped to the left edge
-/// by [`slide_left_to_fit`]), so the left edges stay aligned and the longest item ends at
-/// the right edge. A row with no same-column neighbour (a centred title-card line) keeps
-/// its own slide; a block that fits (all zero) is untouched. Blank rows between items
-/// end a block: Shogun's menu is on consecutive rows, and a gap is a different group.
-fn block_slides(cands: &[(i32, i32, i32)]) -> Vec<i32> {
+/// SQ-1823 / SQ-1824: the slide each candidate row takes, given `(row, start column, own
+/// slide, floor)` in row order. A BLOCK is a maximal run of candidates on consecutive rows
+/// that start at the same column (a menu: its items are laid at one column); every row of a
+/// block takes the block's largest slide (the most negative, already clamped to the left
+/// edge by [`slide_left_to_fit`]), so the left edges stay aligned and the longest item ends
+/// at the right edge. A row with no same-column neighbour (a centred title-card line) keeps
+/// its own slide; a block that fits (all zero) is untouched. Blank rows between items end a
+/// block: Shogun's menu is on consecutive rows, and a gap is a different group.
+///
+/// `floor` (<= 0) is the furthest left that row may slide without landing on ink already
+/// drawn to its left on the same cell row (`i32::MIN` for none). The block's slide is
+/// limited by its most constrained member, so the block stays aligned: it slides no
+/// further than the largest floor, and what then still overruns clips on the right.
+fn block_slides(cands: &[(i32, i32, i32, i32)]) -> Vec<i32> {
     let mut out = Vec::with_capacity(cands.len());
     let mut i = 0;
     while i < cands.len() {
@@ -6152,39 +6169,164 @@ fn block_slides(cands: &[(i32, i32, i32)]) -> Vec<i32> {
         while j < cands.len() && cands[j].0 == cands[j - 1].0 + 1 && cands[j].1 == cands[i].1 {
             j += 1;
         }
-        let slide = cands[i..j].iter().map(|c| c.2).min().unwrap_or(0);
-        out.extend(std::iter::repeat_n(slide, j - i));
+        let want = cands[i..j].iter().map(|c| c.2).min().unwrap_or(0);
+        let floor = cands[i..j].iter().map(|c| c.3).max().unwrap_or(i32::MIN);
+        out.extend(std::iter::repeat_n(want.max(floor), j - i));
         i = j;
     }
     out
+}
+
+/// SQ-1824: the cells of the story's own prose (the transcript, drawn through the one
+/// `render_node` path the TUI draws it with) that hold ink, by terminal row, so a slide
+/// can refuse to land on text already on its cell row. Rendered into a scratch buffer
+/// over the viewport: the prose is the `AppState` transcript in both the TUI and an
+/// embedding host, and the draw pass, the click map and `story_slot_overlay_runs` all ask
+/// here, so they cannot disagree. The frame-geometry cells that render publishes
+/// (`transcript_geom`, the input-line rects, the copy text) are put back as found.
+struct ProseInk {
+    x: i32,
+    y: i32,
+    rows: Vec<Vec<bool>>,
+}
+
+impl ProseInk {
+    fn of(layout: &crate::render::v6_layout::V6Layout<'_>, state: &AppState, viewport: Rect) -> Self {
+        let mut rows = Vec::new();
+        if let Some(story) = layout.story.filter(|st| matches!(&st.node, WinNode::Buffer(b) if b.primary)) {
+            let (geom, submit, origin) =
+                (state.transcript_geom.get(), state.input_submit_rect.get(), state.input_text_origin.get());
+            let selection = state.selection_text.borrow().clone();
+            let mut scratch = Buffer::empty(viewport);
+            let _ = render_node(
+                &story.node,
+                &crate::engine::StatusModel::HostManaged,
+                false,
+                None,
+                state,
+                viewport,
+                &mut scratch,
+                None,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &state.colors,
+            );
+            state.transcript_geom.set(geom);
+            state.input_submit_rect.set(submit);
+            state.input_text_origin.set(origin);
+            *state.selection_text.borrow_mut() = selection;
+            for y in viewport.y..viewport.bottom() {
+                rows.push((viewport.x..viewport.right()).map(|x| !scratch[(x, y)].symbol().trim().is_empty()).collect());
+            }
+        }
+        ProseInk { x: i32::from(viewport.x), y: i32::from(viewport.y), rows }
+    }
+
+    /// The first column a run starting at `start` on terminal `row` may be drawn at
+    /// without touching the prose before it: one blank cell past the rightmost ink left
+    /// of `start`, never left of `left`.
+    fn min_col(&self, row: i32, start: i32, left: i32) -> i32 {
+        let Some(cells) = usize::try_from(row - self.y).ok().and_then(|r| self.rows.get(r)) else { return left };
+        let upto = usize::try_from(start - self.x).unwrap_or(0).min(cells.len());
+        let end = cells[..upto].iter().rposition(|&ink| ink).map_or(left, |c| self.x + c as i32 + 2);
+        end.max(left)
+    }
 }
 
 /// SQ-1823: the slide of each story-box row that holds a lone glyph run, by native `y`,
 /// with SQ-1822's lone-run test and SQ-1820's arithmetic, grouped into blocks by
 /// [`block_slides`]. The one source for the box's drawing pass and
 /// [`story_slot_overlay_runs`].
+///
+/// SQ-1824: "lone" is judged per terminal CELL row, over every native row that maps onto
+/// it, so a second window's text sharing the cell row stops a run sliding; and a slide
+/// never takes a run (or a block) onto prose already drawn to its left on its row:
+/// `min_col(row, start)` is the first column that row's run may be drawn at, asked only
+/// when something would slide.
 fn story_block_slides(
     in_box: &std::collections::BTreeMap<u16, Vec<&crate::engine::PxText>>,
     run_col: &dyn Fn(&crate::engine::PxText) -> i32,
     viewport: Rect,
     row_h: u16,
+    row_of: &dyn Fn(u16) -> i32,
+    min_col: &dyn Fn(i32, i32) -> i32,
 ) -> std::collections::BTreeMap<u16, i32> {
-    let mut ys = Vec::new();
-    let mut cands = Vec::new();
+    use std::collections::BTreeMap;
+    let mut lines: BTreeMap<i32, Vec<(u16, Vec<crate::engine::PxText>)>> = BTreeMap::new();
     for (&y, runs) in in_box {
         let mut runs = runs.clone();
         runs.sort_by_key(|t| t.x);
-        let merged = merge_strip_fragments(&runs);
-        let Some(i) = lone_glyph_run(merged.iter().map(|t| (t, false))) else { continue };
-        let t = &merged[i];
+        lines.entry((i32::from(y.max(1)) - 1) / i32::from(row_h)).or_default().push((y, merge_strip_fragments(&runs)));
+    }
+    let mut ys: Vec<Vec<u16>> = Vec::new();
+    let mut cands = Vec::new();
+    let mut rows = Vec::new();
+    for (&line, rows_of_line) in &lines {
+        let all: Vec<&crate::engine::PxText> = rows_of_line.iter().flat_map(|(_, m)| m.iter()).collect();
+        let Some(i) = lone_glyph_run(all.iter().map(|t| (*t, false))) else { continue };
+        let t = all[i];
         let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
         let ink = (t.text.chars().count() - trail) as i32;
         let start = run_col(t);
-        ys.push(y);
-        let line = (i32::from(y.max(1)) - 1) / i32::from(row_h);
-        cands.push((line, start, slide_left_to_fit(start, ink, viewport.x as i32, viewport.right() as i32)));
+        ys.push(rows_of_line.iter().map(|(y, _)| *y).collect());
+        rows.push(row_of(t.y));
+        cands.push((line, start, slide_left_to_fit(start, ink, viewport.x as i32, viewport.right() as i32), i32::MIN));
     }
-    ys.into_iter().zip(block_slides(&cands)).collect()
+    if cands.iter().any(|c| c.2 < 0) {
+        for (c, &row) in cands.iter_mut().zip(&rows) {
+            c.3 = (min_col(row, c.1) - c.1).min(0);
+        }
+    }
+    ys.into_iter().zip(block_slides(&cands)).flat_map(|(ys, slide)| ys.into_iter().map(move |y| (y, slide))).collect()
+}
+
+/// SQ-1824: the cells a chrome window occupies when it lies inside the story box's native
+/// region, counted from the box exactly as the in-box runs are (one terminal cell per native
+/// text cell, from the viewport's top-left), or `None` for a window outside it.
+fn story_window_cells(
+    pw: &PositionedWindow,
+    viewport: Rect,
+    vp_native: (u32, u32, u32, u32),
+    cell: zvm::screen::V6Cell,
+) -> Option<Rect> {
+    let (x, y) = (u32::from(pw.x_px), u32::from(pw.y_px));
+    let inside = x >= vp_native.0
+        && y >= vp_native.1
+        && x + u32::from(pw.w_px) <= vp_native.0 + vp_native.2
+        && y + u32::from(pw.h_px) <= vp_native.1 + vp_native.3;
+    if !inside {
+        return None;
+    }
+    let (cw, ch) = (u32::from(cell.w()), u32::from(cell.h()));
+    let col = viewport.x as u32 + x / cw - vp_native.0 / cw;
+    let row = viewport.y as u32 + y / ch - vp_native.1 / ch;
+    Some(Rect::new(
+        col.min(u32::from(u16::MAX)) as u16,
+        row.min(u32::from(u16::MAX)) as u16,
+        u32::from(pw.w_px).div_ceil(cw) as u16,
+        u32::from(pw.h_px).div_ceil(ch) as u16,
+    ))
+}
+
+/// SQ-1824: [`story_block_slides`] for one frame, with the row mapping and the prose-ink
+/// floor the drawing and [`story_slot_overlay_runs`] both use. The ink is rendered once,
+/// and only if some run would slide.
+fn story_slides(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    state: &AppState,
+    in_box: &std::collections::BTreeMap<u16, Vec<&crate::engine::PxText>>,
+    run_col: &dyn Fn(&crate::engine::PxText) -> i32,
+    viewport: Rect,
+    vp_native: (u32, u32, u32, u32),
+    cell: zvm::screen::V6Cell,
+) -> std::collections::BTreeMap<u16, i32> {
+    let row_h = i32::from(cell.h());
+    let row_of = |y: u16| viewport.y as i32 + (i32::from(y.max(1)) - 1) / row_h - (vp_native.1 as i32) / row_h;
+    let ink = std::cell::OnceCell::new();
+    let min_col = |row: i32, start: i32| {
+        ink.get_or_init(|| ProseInk::of(layout, state, viewport)).min_col(row, start, viewport.x as i32)
+    };
+    story_block_slides(in_box, run_col, viewport, cell.h(), &row_of, &min_col)
 }
 
 /// SQ-1822: the terminal column each merged run of one story-box row is stamped at:
@@ -6262,7 +6404,7 @@ fn chrome_strip_shift(
     // overruns after the plan slides left just far enough to end at the strip's right
     // edge, never past its left edge. A multi-run row keeps its table columns.
     // SQ-1823: consecutive such rows laid at the same column (a menu) slide together.
-    let mut cands: Vec<(i32, i32, i32)> = Vec::new();
+    let mut cands: Vec<(i32, i32, i32, i32)> = Vec::new();
     for (row, rr, sp) in &rows {
         let Some(i) = lone_glyph_run(rr.iter().map(|(t, rule)| (t, *rule))) else { continue };
         let (t, c0) = (&rr[i].0, sp[i].0);
@@ -6273,7 +6415,7 @@ fn chrome_strip_shift(
         let skip = shift.lead_skip(t, c0, false);
         let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
         let start = shift.map(c0);
-        cands.push((*row, start, slide_left_to_fit(start, (n - skip - trail) as i32, x0, right)));
+        cands.push((*row, start, slide_left_to_fit(start, (n - skip - trail) as i32, x0, right), i32::MIN));
     }
     for (&(row, ..), slide) in cands.iter().zip(block_slides(&cands)) {
         if slide != 0 {
@@ -6497,6 +6639,7 @@ impl V6HybridChromeLayout {
     fn from_frame(
         frame: &HybridFrame,
         layout: &crate::render::v6_layout::V6Layout<'_>,
+        state: &AppState,
         pane: Rect,
         native: (u16, u16),
         cell_px: (u16, u16),
@@ -6551,9 +6694,9 @@ impl V6HybridChromeLayout {
             native,
             cell_px,
             frame.packed_text.clone(),
-            frame.strip_click_columns(layout, pane, native, cell_px, cell),
+            frame.strip_click_columns(layout, state, pane, native, cell_px, cell),
         );
-        let story_overlay = story_slot_overlay_runs(layout, frame.vp_native, frame.viewport, cell);
+        let story_overlay = story_slot_overlay_runs(layout, state, frame.vp_native, frame.viewport, cell);
         // SQ-1618: `hybrid_story_slot_grid`'s own two extra tests beyond what
         // this frame has already passed by construction (`WinNode::Grid`,
         // and a non-empty `frame.viewport` — the same `viewport` that
@@ -6702,7 +6845,7 @@ pub fn hybrid_chrome_layout(
             return None;
         }
     }
-    Some(V6HybridChromeLayout::from_frame(&frame, layout, pane, native, cell_px, state.v6_text.cell()))
+    Some(V6HybridChromeLayout::from_frame(&frame, layout, state, pane, native, cell_px, state.v6_text.cell()))
 }
 
 /// One flood [`draw_erase_fills`] paints (SQ-1614) — the resolved twin,
@@ -7187,6 +7330,7 @@ pub struct V6HybridStoryOverlayRun {
 /// for the specimens that pinned each rule.
 fn story_slot_overlay_runs(
     layout: &crate::render::v6_layout::V6Layout<'_>,
+    state: &AppState,
     vp_native: (u32, u32, u32, u32),
     viewport: Rect,
     cell: zvm::screen::V6Cell,
@@ -7217,7 +7361,7 @@ fn story_slot_overlay_runs(
     }
     let vp_col = (vp_native.0 / u32::from(cell.w())) as i32;
     let run_col = |t: &crate::engine::PxText| viewport.x as i32 + i32::from(t.gcol) - vp_col;
-    let slides = story_block_slides(&in_box, &run_col, viewport, cell.h());
+    let slides = story_slides(layout, state, &in_box, &run_col, viewport, vp_native, cell);
     let mut out = Vec::new();
     for (&y, row_runs) in in_box.iter_mut() {
         row_runs.sort_by_key(|t| t.x);
@@ -16860,15 +17004,19 @@ mod tests {
     #[test]
     fn block_slides_share_the_largest_slide_of_same_column_neighbours() {
         // SQ-1823: three menu rows at column 27 with own slides -4, -10, -3 all take -10.
-        assert_eq!(block_slides(&[(5, 27, -4), (6, 27, -10), (7, 27, -3)]), [-10, -10, -10]);
+        assert_eq!(block_slides(&[(5, 27, -4, i32::MIN), (6, 27, -10, i32::MIN), (7, 27, -3, i32::MIN)]), [-10, -10, -10]);
         // A different start column breaks the block: each row keeps its own slide.
-        assert_eq!(block_slides(&[(5, 20, -2), (6, 27, -4), (7, 27, -6), (8, 30, -1)]), [-2, -6, -6, -1]);
+        assert_eq!(block_slides(&[(5, 20, -2, i32::MIN), (6, 27, -4, i32::MIN), (7, 27, -6, i32::MIN), (8, 30, -1, i32::MIN)]), [-2, -6, -6, -1]);
         // A blank row between items ends the block.
-        assert_eq!(block_slides(&[(5, 27, -4), (7, 27, -10)]), [-4, -10]);
+        assert_eq!(block_slides(&[(5, 27, -4, i32::MIN), (7, 27, -10, i32::MIN)]), [-4, -10]);
         // A block that fits is untouched; a fitting row joins an overrunning neighbour.
-        assert_eq!(block_slides(&[(5, 10, 0), (6, 10, 0)]), [0, 0]);
-        assert_eq!(block_slides(&[(5, 27, 0), (6, 27, -5)]), [-5, -5]);
+        assert_eq!(block_slides(&[(5, 10, 0, i32::MIN), (6, 10, 0, i32::MIN)]), [0, 0]);
+        assert_eq!(block_slides(&[(5, 27, 0, i32::MIN), (6, 27, -5, i32::MIN)]), [-5, -5]);
         assert_eq!(block_slides(&[]), Vec::<i32>::new());
+        // SQ-1824: a floor (ink to the left on that row) stops the whole block at the most
+        // constrained member, so the block stays aligned.
+        assert_eq!(block_slides(&[(5, 27, -4, -1), (6, 27, -10, i32::MIN), (7, 27, -3, -2)]), [-1, -1, -1]);
+        assert_eq!(block_slides(&[(5, 27, -4, 0)]), [0]);
     }
 
     #[test]
@@ -16881,6 +17029,51 @@ mod tests {
         assert_eq!(lone_glyph_run([(&item, false), (&bar, false)].into_iter()), None, "a bar beside it");
         assert_eq!(lone_glyph_run([(&item, false), (&blank, true)].into_iter()), None, "a rule beside it");
         assert_eq!(lone_glyph_run([(&blank, false)].into_iter()), None, "no glyph run");
+    }
+
+    #[test]
+    fn prose_ink_min_col_keeps_one_blank_after_the_ink_to_the_left() {
+        // SQ-1824: row 3 holds prose in columns 4..=9 (viewport x = 2); a run laid at column
+        // 20 may go no further left than one blank past it, 11, and never left of the box.
+        let mut rows = vec![vec![false; 30]; 5];
+        rows[1][2..8].fill(true); // absolute columns 4..=9 on row 3
+        let ink = ProseInk { x: 2, y: 2, rows };
+        assert_eq!(ink.min_col(3, 20, 2), 11);
+        assert_eq!(ink.min_col(3, 6, 2), 7, "ink right of `start` is not to its left: only cols 4,5 count");
+        assert_eq!(ink.min_col(4, 20, 2), 2, "a row with no ink floors at the box edge");
+        assert_eq!(ink.min_col(40, 20, 2), 2, "a row outside the box floors at the box edge");
+    }
+
+    #[test]
+    fn story_block_slides_never_land_on_prose_and_judge_lone_per_cell_row() {
+        // SQ-1824. Two items laid at column 29 on cell rows 21 and 22 of a 37-wide box that
+        // starts at column 0; the first row also carries prose ending at column 17.
+        let cell = zvm::screen::V6Cell::DEFAULT;
+        let run = |y: u16, x: u16, text: &str| crate::engine::PxText::derived(y, x, text.into(), 0, 0, 0, cell);
+        let (a, b) = (run(337, 233, "START the game"), run(353, 233, "RESTORE a saved game"));
+        let mut in_box = std::collections::BTreeMap::new();
+        in_box.insert(a.y, vec![&a]);
+        in_box.insert(b.y, vec![&b]);
+        let viewport = Rect::new(0, 10, 37, 20);
+        let run_col = |t: &crate::engine::PxText| i32::from(t.gcol);
+        let row_of = |y: u16| 10 + (i32::from(y) - 1) / 16 - 21;
+        let none = |_: i32, _: i32| 0;
+        let slides = story_block_slides(&in_box, &run_col, viewport, 16, &row_of, &none);
+        assert_eq!(slides[&337], -12, "no prose: the block takes RESTORE's overrun, 29 + 20 - 37");
+        assert_eq!(slides[&353], -12);
+        // Prose ends at column 17 on the first item's row (row_of(337) == 10): the block slides
+        // no further than one blank after it, 18, i.e. 11 left, and clips on the right.
+        let ink = |row: i32, _: i32| if row == 10 { 18 } else { 0 };
+        let slides = story_block_slides(&in_box, &run_col, viewport, 16, &row_of, &ink);
+        assert_eq!((slides[&337], slides[&353]), (-11, -11), "the block stays aligned");
+        // A second window's text on the SAME cell row (another native y inside the row) means
+        // the row is not lone: nothing slides.
+        let other = run(340, 100, "elsewhere");
+        let mut crowded = in_box.clone();
+        crowded.insert(other.y, vec![&other]);
+        let slides = story_block_slides(&crowded, &run_col, viewport, 16, &row_of, &none);
+        assert!(!slides.contains_key(&337) && !slides.contains_key(&340), "a crowded cell row is not lone");
+        assert_eq!(slides[&353], -12, "the second row, alone on its cell row, still slides as a block of one");
     }
 
     #[test]

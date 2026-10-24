@@ -46,3 +46,5 @@ mod v6_screen_palette;
 mod sq1817_shogun_title_rows;
 #[path = "suites/sq1822_shogun_boot_menu.rs"]
 mod sq1822_shogun_boot_menu;
+#[path = "suites/sq1824_shogun_slide_clear.rs"]
+mod sq1824_shogun_slide_clear;
