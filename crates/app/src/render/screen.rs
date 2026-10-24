@@ -1407,7 +1407,7 @@ fn render_node(
                                 native,
                                 cell_px,
                                 frame.packed_text.clone(),
-                                frame.strip_click_columns(area, native, cell_px, state.v6_text.cell()),
+                                frame.strip_click_columns(&layout, area, native, cell_px, state.v6_text.cell()),
                             );
                             // SQ-1188: hand this frame's changed-band encodes to the
                             // background worker in one batch. Every band above kept
@@ -1760,16 +1760,21 @@ fn render_node(
                             // ever covers whitespace the glyph run drew itself, so it may
                             // still paint the cells no glyph run claimed (a selection bar
                             // extending past its label) and must skip the rest.
+                            //
+                            // SQ-1822: a LONE run that would overrun the box's right
+                            // edge (a menu item laid at game column 29 in a box that
+                            // ends at 37) slides left to end at the edge instead of
+                            // clipping while blank cells sit to its left. This is
+                            // SQ-1820's rule, through `story_row_cols`, which
+                            // `story_slot_overlay_runs` reads too.
+                            let cols = story_row_cols(&merged, &run_col, viewport);
                             let ink: Vec<(i32, i32)> = merged
                                 .iter()
-                                .filter(|t| !t.text.trim().is_empty())
-                                .map(|t| {
-                                    let c = run_col(t);
-                                    (c, c + t.text.chars().count() as i32)
-                                })
+                                .zip(&cols)
+                                .filter(|(t, _)| !t.text.trim().is_empty())
+                                .map(|(t, &c)| (c, c + t.text.chars().count() as i32))
                                 .collect();
-                            for t in &merged {
-                                let col = run_col(t);
+                            for (t, &col) in merged.iter().zip(&cols) {
                                 // SQ-0892: the ROW is the run's own native text row
                                 // counted from the story box's first — one terminal row
                                 // each — not its native pixel through the ring scale.
@@ -5823,6 +5828,7 @@ impl HybridFrame {
     /// contributes no column map and clicks exactly as before.
     pub(crate) fn strip_click_columns(
         &self,
+        layout: &crate::render::v6_layout::V6Layout<'_>,
         pane: Rect,
         native: (u16, u16),
         cell_px: (u16, u16),
@@ -5873,8 +5879,43 @@ impl HybridFrame {
                 }
             }
         }
+        out.drawn_runs.extend(story_slid_click_runs(layout, self.vp_native, self.viewport, cell));
         out
     }
+}
+
+/// SQ-1822: the story box packs its columns one terminal cell per native 8px cell, so
+/// a click inside it inverts by cell index; a run [`story_row_cols`] slid left is no
+/// longer where that index says, so each slid glyph run is recorded as a
+/// [`DrawnRun`](crate::render::graphics::DrawnRun) whose characters carry the native
+/// x they were LAID at. Built from [`story_slot_overlay_runs`], the host's own view of
+/// the drawing, so a click on a slid menu item and the glyph drawn there cannot
+/// disagree. Unslid runs contribute nothing and click through the packed index.
+fn story_slid_click_runs(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    vp_native: (u32, u32, u32, u32),
+    viewport: Rect,
+    cell: zvm::screen::V6Cell,
+) -> Vec<crate::render::graphics::DrawnRun> {
+    let vp_col = (vp_native.0 / u32::from(cell.w())) as i32;
+    story_slot_overlay_runs(layout, vp_native, viewport, cell)
+        .iter()
+        .filter(|o| !o.run.text.trim().is_empty())
+        .filter_map(|o| {
+            let &(a, b) = o.spans.first()?;
+            let laid = viewport.x as i32 + i32::from(o.run.gcol) - vp_col;
+            let first_x = vp_native.0 as i32 + (i32::from(o.run.gcol) - vp_col) * 8;
+            let chars = (b - a).max(0);
+            (a != laid && a >= 0 && chars > 0 && first_x >= 0).then(|| crate::render::graphics::DrawnRun {
+                row: o.row as u16,
+                first: a as u16,
+                end: b as u16,
+                first_x: first_x as u16,
+                last_x: (first_x + chars * 8) as u16,
+                cw: 8,
+            })
+        })
+        .collect()
 }
 
 /// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
@@ -6067,6 +6108,54 @@ fn glyph_ink_span(t: &crate::engine::PxText, (s, e): (i32, i32)) -> (i32, i32) {
     (s + lead, e - trail)
 }
 
+/// SQ-1820 / SQ-1822: the index of the ONE glyph run on a row, when everything beside
+/// it is plain blank (no rule, no reverse): a centred title-card line, or one menu
+/// item. `None` for a row of several glyph runs (a table, whose alignment a slide
+/// would break) or one with a bar or rule beside the run. Shared by the chrome text
+/// strips and the story box so the two cannot disagree on what counts as lone.
+fn lone_glyph_run<'a>(runs: impl Iterator<Item = (&'a crate::engine::PxText, bool)>) -> Option<usize> {
+    let runs: Vec<_> = runs.collect();
+    let is_glyph = |t: &crate::engine::PxText, rule: bool| !rule && !t.text.trim().is_empty();
+    let mut glyphs = runs.iter().enumerate().filter(|(_, (t, rule))| is_glyph(t, *rule));
+    let (Some((i, _)), None) = (glyphs.next(), glyphs.next()) else { return None };
+    let plain = runs.iter().enumerate().all(|(j, (o, rule))| j == i || (!*rule && o.text.trim().is_empty() && o.style & 1 == 0));
+    plain.then_some(i)
+}
+
+/// SQ-1820 / SQ-1822: the columns (<= 0) a lone run starting at `start` whose ink is
+/// `ink_cells` wide slides left so it ends at `right` instead of clipping while blanks
+/// sit to its left, never past `left`. Zero when it fits, or already starts at `left`
+/// (a run longer than the box starts at the left edge and clips on the right).
+fn slide_left_to_fit(start: i32, ink_cells: i32, left: i32, right: i32) -> i32 {
+    let over = start + ink_cells - right;
+    if over > 0 && start > left {
+        (start - over).max(left) - start
+    } else {
+        0
+    }
+}
+
+/// SQ-1822: the terminal column each merged run of one story-box row is stamped at:
+/// the run's own [`gcol`-based column](crate::engine::PxText::gcol) (`run_col`), less
+/// the slide a LONE glyph run takes to end at the box's right edge (SQ-1820's rule,
+/// shared through [`lone_glyph_run`] and [`slide_left_to_fit`]). A reversed run slides
+/// too, since a selected menu item is a reversed run and its bar goes with it. The one
+/// source for the box's drawing pass and for [`story_slot_overlay_runs`].
+fn story_row_cols(
+    merged: &[crate::engine::PxText],
+    run_col: &dyn Fn(&crate::engine::PxText) -> i32,
+    viewport: Rect,
+) -> Vec<i32> {
+    let mut cols: Vec<i32> = merged.iter().map(run_col).collect();
+    if let Some(i) = lone_glyph_run(merged.iter().map(|t| (t, false))) {
+        let t = &merged[i];
+        let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
+        let ink = (t.text.chars().count() - trail) as i32;
+        cols[i] += slide_left_to_fit(cols[i], ink, viewport.x as i32, viewport.right() as i32);
+    }
+    cols
+}
+
 fn chrome_strip_shift(
     by_row: &std::collections::BTreeMap<i32, Vec<(crate::engine::PxText, bool)>>,
     rect: Rect,
@@ -6126,20 +6215,18 @@ fn chrome_strip_shift(
     // overruns after the plan slides left just far enough to end at the strip's right
     // edge, never past its left edge. A multi-run row keeps its table columns.
     for (row, rr, sp) in &rows {
-        let mut glyphs = rr.iter().zip(sp).enumerate().filter(|(_, ((t, rule), _))| glyph(t, *rule));
-        let (Some((i, ((t, _), &(c0, _)))), None) = (glyphs.next(), glyphs.next()) else { continue };
-        let others_plain = rr.iter().enumerate().all(|(j, (o, rule))| j == i || (!*rule && o.text.trim().is_empty() && o.style & 1 == 0));
+        let Some(i) = lone_glyph_run(rr.iter().map(|(t, rule)| (t, *rule))) else { continue };
+        let (t, c0) = (&rr[i].0, sp[i].0);
         let n = t.text.chars().count();
-        if !others_plain || t.style & 1 != 0 || n < 2 {
+        if t.style & 1 != 0 || n < 2 {
             continue;
         }
         let skip = shift.lead_skip(t, c0, false);
         let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
         let start = shift.map(c0);
-        let ink_end = start + (n - skip) as i32 - trail as i32;
-        let over = ink_end - right;
-        if over > 0 && start > x0 {
-            shift.slides.insert(*row, (start - over).max(x0) - start);
+        let slide = slide_left_to_fit(start, (n - skip - trail) as i32, x0, right);
+        if slide != 0 {
+            shift.slides.insert(*row, slide);
         }
     }
     shift
@@ -6413,7 +6500,7 @@ impl V6HybridChromeLayout {
             native,
             cell_px,
             frame.packed_text.clone(),
-            frame.strip_click_columns(pane, native, cell_px, cell),
+            frame.strip_click_columns(layout, pane, native, cell_px, cell),
         );
         let story_overlay = story_slot_overlay_runs(layout, frame.vp_native, frame.viewport, cell);
         // SQ-1618: `hybrid_story_slot_grid`'s own two extra tests beyond what
@@ -7083,16 +7170,15 @@ fn story_slot_overlay_runs(
         row_runs.sort_by_key(|t| t.x);
         let run_col = |t: &crate::engine::PxText| viewport.x as i32 + i32::from(t.gcol) - vp_col;
         let merged = merge_strip_fragments(row_runs);
+        // SQ-1822: the same lone-run slide the drawing applies.
+        let cols = story_row_cols(&merged, &run_col, viewport);
         let ink: Vec<(i32, i32)> = merged
             .iter()
-            .filter(|t| !t.text.trim().is_empty())
-            .map(|t| {
-                let c = run_col(t);
-                (c, c + t.text.chars().count() as i32)
-            })
+            .zip(&cols)
+            .filter(|(t, _)| !t.text.trim().is_empty())
+            .map(|(t, &c)| (c, c + t.text.chars().count() as i32))
             .collect();
-        for t in &merged {
-            let col = run_col(t);
+        for (t, &col) in merged.iter().zip(&cols) {
             let row = viewport.y as i32 + (t.y.max(1) as i32 - 1) / i32::from(cell.h())
                 - (vp_native.1 as i32) / i32::from(cell.h());
             if row < viewport.y as i32
@@ -16706,6 +16792,29 @@ mod tests {
         assert_eq!(shift.map(30), 28, "past the domain every dropped column counts");
         let none = StripShift { x0: 10, cols: 0, plan: None, slides: Default::default() };
         assert_eq!(none.map(30), 30);
+    }
+
+    #[test]
+    fn slide_left_to_fit_ends_at_the_edge_and_never_passes_the_left() {
+        // SQ-1820/1822: a run at 27 with 14 ink cells in a box 3..37 slides 4 to end at 37.
+        assert_eq!(slide_left_to_fit(27, 14, 3, 37), -4);
+        // It fits, or already starts at the left edge: no slide.
+        assert_eq!(slide_left_to_fit(23, 14, 3, 37), 0);
+        assert_eq!(slide_left_to_fit(3, 50, 3, 37), 0);
+        // Longer than the box: stops at the left edge.
+        assert_eq!(slide_left_to_fit(27, 50, 3, 37), -24);
+    }
+
+    #[test]
+    fn lone_glyph_run_wants_one_glyph_run_and_plain_blanks() {
+        let run = |text: &str, style: u8| crate::engine::PxText::derived(1, 1, text.into(), style, 0, 0, zvm::screen::V6Cell::DEFAULT);
+        let (item, blank, bar, other) = (run("QUIT", 1), run("    ", 0), run("    ", 1), run("MORE", 0));
+        assert_eq!(lone_glyph_run([(&item, false)].into_iter()), Some(0), "a reversed item is lone");
+        assert_eq!(lone_glyph_run([(&blank, false), (&item, false)].into_iter()), Some(1));
+        assert_eq!(lone_glyph_run([(&item, false), (&other, false)].into_iter()), None, "two glyph runs");
+        assert_eq!(lone_glyph_run([(&item, false), (&bar, false)].into_iter()), None, "a bar beside it");
+        assert_eq!(lone_glyph_run([(&item, false), (&blank, true)].into_iter()), None, "a rule beside it");
+        assert_eq!(lone_glyph_run([(&blank, false)].into_iter()), None, "no glyph run");
     }
 
     #[test]

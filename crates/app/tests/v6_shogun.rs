@@ -44,3 +44,5 @@ mod v6_screen_palette;
 
 #[path = "suites/sq1817_shogun_title_rows.rs"]
 mod sq1817_shogun_title_rows;
+#[path = "suites/sq1822_shogun_boot_menu.rs"]
+mod sq1822_shogun_boot_menu;

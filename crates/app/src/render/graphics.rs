@@ -687,6 +687,9 @@ impl V6ClickMap {
             // The clicked column's game pixel is that cell's HORIZONTAL middle, so
             // the whole terminal cell selects the character the player sees on it —
             // the same rule the row mapping below uses vertically.
+            // SQ-1822: a run the story box slid left is drawn off the index this
+            // inverts; its cells resolve to the native x they were laid at.
+            Some(_) if run.is_some() => run.map_or(0, |r| r.native_x(drawn_col).min(u32::from(self.screen.0))),
             Some((left, _, native_x0)) => {
                 // A packed region's overshoot is a ROUNDING TAIL of cell arithmetic
                 // over cells the renderer drew, not a click outside the frame, so it
