@@ -5840,11 +5840,12 @@ impl HybridFrame {
                     chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell)
                 };
                 let shift = chrome_strip_shift(&by_row, *rect, &origin);
-                if let Some(plan) = shift.plan {
+                if shift.plan.is_some() || !shift.slides.is_empty() {
                     out.push(crate::render::graphics::StripColumns {
                         rect: *rect,
-                        cols: shift.cols as u16,
-                        kept: plan.kept,
+                        cols: if shift.plan.is_some() { shift.cols as u16 } else { 0 },
+                        kept: shift.plan.map(|p| p.kept).unwrap_or_default(),
+                        slides: shift.slides.iter().map(|(&r, &d)| (r as u16, d)).collect(),
                     });
                 }
             }
@@ -5993,6 +5994,12 @@ struct StripShift {
     /// Columns the plan covers, from `x0`.
     cols: usize,
     plan: Option<crate::render::upper_window::ColumnPlan>,
+    /// SQ-1820: terminal row -> columns (<= 0) a LONE glyph run there slides left, after
+    /// the plan, so it ends at the strip's right edge instead of clipping while blanks
+    /// sit to its left. Only a row holding exactly one glyph run slides, so a table's
+    /// alignment is never broken. One source for the drawing, the host layout and the
+    /// click map.
+    slides: std::collections::BTreeMap<i32, i32>,
 }
 
 impl StripShift {
@@ -6007,6 +6014,11 @@ impl StripShift {
         let kept = plan.kept.partition_point(|&c| usize::from(c) <= before);
         let dropped = before - kept;
         v - dropped as i32
+    }
+
+    /// [`map`](Self::map) for a run on terminal `row`: the plan, then the row's slide.
+    fn map_row(&self, row: i32, v: i32) -> i32 {
+        self.map(v) + self.slides.get(&row).copied().unwrap_or(0)
     }
 
     /// SQ-1816: how many of a glyph run's LEADING whitespace characters the plan
@@ -6038,16 +6050,16 @@ fn chrome_strip_shift(
     origin: &dyn Fn(&crate::engine::PxText) -> i32,
 ) -> StripShift {
     let x0 = rect.x as i32;
-    let none = StripShift { x0, cols: 0, plan: None };
+    let none = StripShift { x0, cols: 0, plan: None, slides: Default::default() };
     let rows: Vec<_> = by_row
         .iter()
         .filter(|(row, _)| **row >= rect.y as i32 && **row < rect.bottom() as i32)
-        .map(|(_, rr)| (rr, row_spans(rr, origin)))
+        .map(|(row, rr)| (*row, rr, row_spans(rr, origin)))
         .collect();
     let glyph = |t: &crate::engine::PxText, rule: bool| !rule && !t.text.trim().is_empty();
     let vmax = rows
         .iter()
-        .flat_map(|(rr, sp)| rr.iter().zip(sp))
+        .flat_map(|(_, rr, sp)| rr.iter().zip(sp))
         .filter(|((t, rule), _)| glyph(t, *rule))
         // A merged run can carry edge padding; clipping blanks costs nothing.
         .map(|((t, _), &sp)| glyph_ink_span(t, sp).1)
@@ -6058,7 +6070,7 @@ fn chrome_strip_shift(
         return none;
     }
     let mut ink = vec![false; (vmax - x0) as usize];
-    for (rr, sp) in &rows {
+    for (_, rr, sp) in &rows {
         let bar = row_is_reverse_bar(rr.iter().map(|(t, _)| t));
         for ((t, rule), &(s, e)) in rr.iter().zip(sp) {
             // Glyph runs are ink over their span less edge whitespace (an interior
@@ -6081,7 +6093,33 @@ fn chrome_strip_shift(
         }
     }
     let need = (vmax - right) as usize;
-    StripShift { x0, cols: ink.len(), plan: crate::render::upper_window::strip_column_plan(&ink, need) }
+    let mut shift = StripShift {
+        x0,
+        cols: ink.len(),
+        plan: crate::render::upper_window::strip_column_plan(&ink, need),
+        slides: Default::default(),
+    };
+    // SQ-1820: a row that is ONE glyph run (a centred title-card line) and still
+    // overruns after the plan slides left just far enough to end at the strip's right
+    // edge, never past its left edge. A multi-run row keeps its table columns.
+    for (row, rr, sp) in &rows {
+        let mut glyphs = rr.iter().zip(sp).enumerate().filter(|(_, ((t, rule), _))| glyph(t, *rule));
+        let (Some((i, ((t, _), &(c0, _)))), None) = (glyphs.next(), glyphs.next()) else { continue };
+        let others_plain = rr.iter().enumerate().all(|(j, (o, rule))| j == i || (!*rule && o.text.trim().is_empty() && o.style & 1 == 0));
+        let n = t.text.chars().count();
+        if !others_plain || t.style & 1 != 0 || n < 2 {
+            continue;
+        }
+        let skip = shift.lead_skip(t, c0, false);
+        let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
+        let start = shift.map(c0);
+        let ink_end = start + (n - skip) as i32 - trail as i32;
+        let over = ink_end - right;
+        if over > 0 && start > x0 {
+            shift.slides.insert(*row, (start - over).max(x0) - start);
+        }
+    }
+    shift
 }
 
 /// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
@@ -6113,7 +6151,7 @@ fn strip_run_positions(
     for (row, row_runs) in &by_row {
         let raw_spans = row_spans(row_runs, &origin);
         for ((t, rule), &(c0, _)) in row_runs.iter().zip(&raw_spans) {
-            let c = shift.map(origin(t));
+            let c = shift.map_row(*row, origin(t));
             // SQ-1816: publish the run as it is drawn, less the leading blanks the
             // column plan dropped, so a host drawing `run.text` at `col` agrees.
             let mut run = t.clone();
@@ -6243,9 +6281,9 @@ fn strip_run_resolution(
     let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
     let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut out = Vec::new();
-    for row_runs in by_row.values() {
+    for (row, row_runs) in &by_row {
         let raw_spans = row_spans(row_runs, &origin);
-        let spans: Vec<(i32, i32)> = raw_spans.iter().map(|&(c0, c1)| (shift.map(c0), shift.map(c1))).collect();
+        let spans: Vec<(i32, i32)> = raw_spans.iter().map(|&(c0, c1)| (shift.map_row(*row, c0), shift.map_row(*row, c1))).collect();
         let skips: Vec<usize> =
             row_runs.iter().zip(&raw_spans).map(|((t, rule), &(c0, _))| shift.lead_skip(t, c0, *rule)).collect();
         let claimed: Vec<(usize, (i32, i32), bool)> = row_runs
@@ -11344,7 +11382,7 @@ fn draw_chrome_text_strip(
         // side of every neighbour. Everything else keeps exactly the span its
         // characters occupy.
         let raw_spans = row_spans(row_runs, &origin);
-        let spans: Vec<(i32, i32)> = raw_spans.iter().map(|&(c0, c1)| (shift.map(c0), shift.map(c1))).collect();
+        let spans: Vec<(i32, i32)> = raw_spans.iter().map(|&(c0, c1)| (shift.map_row(*row, c0), shift.map_row(*row, c1))).collect();
         // SQ-1816: leading blanks of a glyph run that the column plan dropped.
         let skips: Vec<usize> =
             row_runs.iter().zip(&raw_spans).map(|((t, rule), &(c0, _))| shift.lead_skip(t, c0, *rule)).collect();
@@ -16617,6 +16655,7 @@ mod tests {
             x0: 10,
             cols: 8,
             plan: Some(ColumnPlan { kept: vec![1, 2, 5, 6, 7, 8], strategy: ColumnStrategy::DropBlank }),
+            slides: Default::default(),
         };
         assert_eq!(shift.map(5), 5, "left of the strip is never touched");
         assert_eq!(shift.map(10), 10);
@@ -16625,7 +16664,7 @@ mod tests {
         assert_eq!(shift.map(15), 13);
         assert_eq!(shift.map(18), 16, "an exclusive end past the last kept column");
         assert_eq!(shift.map(30), 28, "past the domain every dropped column counts");
-        let none = StripShift { x0: 10, cols: 0, plan: None };
+        let none = StripShift { x0: 10, cols: 0, plan: None, slides: Default::default() };
         assert_eq!(none.map(30), 30);
     }
 
@@ -16638,13 +16677,14 @@ mod tests {
             x0: 10,
             cols: 8,
             plan: Some(ColumnPlan { kept: kept.clone(), strategy: ColumnStrategy::DropBlank }),
+            slides: Default::default(),
         };
-        let inv = crate::render::graphics::StripColumns { rect: Rect::new(10, 0, 30, 1), cols: 8, kept };
+        let inv = crate::render::graphics::StripColumns { rect: Rect::new(10, 0, 30, 1), cols: 8, kept, slides: Vec::new() };
         for v in (10..18).filter(|v| ![12, 13].contains(v)) {
             let drawn = shift.map(v);
-            assert_eq!(i32::from(inv.laid_col(drawn as u16)), v, "laid-out column {v} drawn at {drawn}");
+            assert_eq!(i32::from(inv.laid_col(drawn as u16, 0)), v, "laid-out column {v} drawn at {drawn}");
         }
         // Past the plan's domain every dropped column counts.
-        assert_eq!(i32::from(inv.laid_col(shift.map(30) as u16)), 30);
+        assert_eq!(i32::from(inv.laid_col(shift.map(30) as u16, 0)), 30);
     }
 }

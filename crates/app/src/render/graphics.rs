@@ -465,6 +465,9 @@ pub struct StripColumns {
     pub cols: u16,
     /// Kept columns, 1-based within `cols`, ascending.
     pub kept: Vec<u16>,
+    /// SQ-1820: `(terminal row, columns <= 0)` a lone glyph run on that row was slid
+    /// left after the plan. Empty for a strip with no slid row.
+    pub slides: Vec<(u16, i32)>,
 }
 
 impl StripColumns {
@@ -474,7 +477,10 @@ impl StripColumns {
 
     /// The laid-out column the drawn cell `col` stands for: the kept column at that
     /// offset, or, past the last kept one, the same distance beyond the plan's domain.
-    pub(crate) fn laid_col(&self, col: u16) -> u16 {
+    pub(crate) fn laid_col(&self, col: u16, row: u16) -> u16 {
+        // SQ-1820: undo the row's slide first (drawn = plan(laid) + slide).
+        let slide = self.slides.iter().find(|&&(r, _)| r == row).map_or(0, |&(_, d)| d);
+        let col = (i32::from(col) - slide).clamp(i32::from(self.rect.x), i32::from(u16::MAX)) as u16;
         let k = usize::from(col - self.rect.x);
         match self.kept.get(k) {
             Some(&c) => self.rect.x + c - 1,
@@ -601,7 +607,7 @@ impl V6ClickMap {
         }
         // SQ-1815: a cell in a strip drawn through a column plan stands for the
         // column its run was LAID OUT at, which is what the scale inverts.
-        let col = self.strip_cols.iter().find(|s| s.holds(col, row)).map_or(col, |s| s.laid_col(col));
+        let col = self.strip_cols.iter().find(|s| s.holds(col, row)).map_or(col, |s| s.laid_col(col, row));
         // Device-pixel position of the clicked cell's centre, relative to pane.
         let dx = (col - self.pane_x) as f32 * self.cell_w as f32 + self.cell_w as f32 / 2.0;
         let dy = (row - self.pane_y) as f32 * self.cell_h as f32 + self.cell_h as f32 / 2.0;
@@ -2731,7 +2737,7 @@ mod tests {
         // SQ-1815: a strip at cells x 2..8, rows 3..5, laid out over 8 columns of
         // which the 3rd and 4th were dropped; one cell == 10 game pixels.
         let m = V6ClickMap {
-            strip_cols: vec![StripColumns { rect: Rect::new(2, 3, 6, 2), cols: 8, kept: vec![1, 2, 5, 6, 7, 8] }],
+            strip_cols: vec![StripColumns { rect: Rect::new(2, 3, 6, 2), cols: 8, kept: vec![1, 2, 5, 6, 7, 8], slides: Vec::new() }],
             ..unit_map()
         };
         // Before the first dropped column: itself.
@@ -2743,6 +2749,26 @@ mod tests {
         // Outside the strip's rows nothing is remapped.
         assert_eq!(m.map_click(4, 5), Some((46, 56)));
         assert_eq!(m.map_click(4, 2), Some((46, 26)));
+    }
+
+    #[test]
+    fn map_click_carries_a_slid_lone_run_back_to_its_laid_out_column() {
+        // SQ-1820: row 3 of a strip at cells x 2..10 holds one run laid out at cell 6
+        // and slid 3 cells left (drawn at 3); row 4 is untouched. One cell == 10 px.
+        let m = V6ClickMap {
+            strip_cols: vec![StripColumns {
+                rect: Rect::new(2, 3, 8, 2),
+                cols: 0,
+                kept: Vec::new(),
+                slides: vec![(3, -3)],
+            }],
+            ..unit_map()
+        };
+        // Drawn cell 3 stands for laid-out cell 6; cell 4 for 7.
+        assert_eq!(m.map_click(3, 3), Some((66, 36)));
+        assert_eq!(m.map_click(4, 3), Some((76, 36)));
+        // The row beside it is not slid.
+        assert_eq!(m.map_click(3, 4), Some((36, 46)));
     }
 
     #[test]

@@ -214,3 +214,90 @@ fn zork_zero_status_band_is_legible_where_it_used_to_collide() {
         }
     }
 }
+
+// ── SQ-1820: a lone line that overruns slides left instead of clipping ───────
+
+const TRADEMARK: &str = "SHOGUN is a trademark of James Clavell";
+const LITERARY: &str = "Original Literary Work Copyright 1975 by James Clavell";
+
+/// The first row containing `needle`, with its index.
+fn row_with(rows: &[String], needle: &str) -> (usize, String) {
+    let y = rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle:?} missing:\n{}", rows.join("\n")));
+    (y, rows[y].clone())
+}
+
+/// On a pane too narrow for a centred line, the line ends at the strip's right edge
+/// instead of clipping with blanks to its left; one longer than the strip starts at
+/// the left edge and shows as much as fits (no wrapping). The card still has its nine
+/// lines in order.
+///
+/// FALSIFY by never inserting into `StripShift::slides`: the trademark line reads
+/// `  SHOGUN is a trademark of Jame` (clipped, indented) at 40 columns.
+#[test]
+fn a_lone_overrunning_line_slides_left_to_fit() {
+    let Some(s) = title_card() else { return };
+    let model = s.screen();
+    for (cols, pane_rows) in [(40u16, 36u16), (40, 25), (50, 25), (50, 36)] {
+        let (area, buf) = render(&model, cols, pane_rows);
+        let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
+        let (_, tm) = row_with(&rows, "SHOGUN is a trademark");
+        assert!(tm.contains(TRADEMARK), "{cols}x{pane_rows}: trademark whole: {tm:?}");
+        assert!(
+            tm.trim_end().ends_with("Clavell") && tm.chars().count() == usize::from(cols),
+            "{cols}x{pane_rows}: flush right: {tm:?}"
+        );
+        let (_, lit) = row_with(&rows, "Original Literary");
+        assert!(lit.starts_with("Original Literary Work Copyright 1975 by"), "{cols}x{pane_rows}: at the left edge: {lit:?}");
+        let at = card_rows(&rows);
+        assert!(at.iter().all(Option::is_some), "{cols}x{pane_rows}: {at:?}");
+    }
+}
+
+/// Wide panes keep the centred lines exactly as drawn: both lines whole and indented.
+#[test]
+fn lone_lines_that_fit_stay_centred() {
+    let Some(s) = title_card() else { return };
+    let model = s.screen();
+    for cols in [80u16, 100] {
+        let (area, buf) = render(&model, cols, 25);
+        let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
+        for line in [TRADEMARK, LITERARY] {
+            let (_, r) = row_with(&rows, &line[..12]);
+            assert!(r.contains(line), "{cols} cols: {line:?} whole: {r:?}");
+            assert!(r.find(line).unwrap() > 8, "{cols} cols: still centred: {r:?}");
+        }
+    }
+}
+
+/// The host layout and the click map follow the slide: the slid run is published at
+/// its slid column, whole, and its first cell clicks back into its own native span.
+///
+/// FALSIFY by dropping `slides` from the `StripColumns` that `strip_click_columns`
+/// builds: the click lands left of the run's native span.
+#[test]
+fn host_layout_and_clicks_follow_the_slide() {
+    let Some(s) = title_card() else { return };
+    let model = s.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let cell = zvm::screen::V6Cell::DEFAULT;
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(cell));
+    let layout = app::render::v6_layout::classify_windows(items, cell);
+    for (cols, (cw, ch)) in [(40u16, (8u16, 16u16)), (50, (8, 16)), (40, (10, 22)), (50, (10, 22))] {
+        let mut st = app::state::AppState::default();
+        st.colors = app::colors::ColorScheme::terminal_default();
+        st.set_game_picker(Some(app::render::graphics::kitty_picker(cw, ch)));
+        st.config.v6_render = app::config::V6RenderMode::Hybrid;
+        st.config.honor_game_colours = true;
+        let pane = Rect::new(0, 0, cols, 36);
+        let ring = app::render::screen::hybrid_chrome_layout(&layout, native, pane, (cw, ch), &st).expect("chrome ring");
+        let r = ring.runs.iter().find(|r| r.run.text.contains("SHOGUN is a trademark")).expect("trademark run");
+        let (c0, c1) = r.resolved.expect("drawn");
+        assert_eq!(c1, i32::from(cols), "{cols} cols: the slid run ends at the strip's right edge");
+        assert_eq!(c1 - c0, TRADEMARK.len() as i32, "{cols} cols: published whole");
+        let x0 = i32::from(r.run.x.max(1)) - 1;
+        let x1 = x0 + TRADEMARK.len() as i32 * 8;
+        let (gx, _) = ring.click_map.map_click(c0 as u16, r.row as u16).expect("click maps");
+        let gx = i32::from(gx);
+        assert!(gx > x0 && gx <= x1, "{cols} cols: first cell clicks to native x {gx}, outside {x0}..{x1}");
+    }
+}
