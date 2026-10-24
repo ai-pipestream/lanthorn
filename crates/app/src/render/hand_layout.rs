@@ -12,9 +12,12 @@
 //! story told `T`:
 //!
 //! * a **candidate** line is one hard-broken line (one transcript line, never a soft
-//!   wrap) that starts with at least one space, has text after it, and whose whole
+//!   wrap) that starts with at least `MIN_HAND_LAID_INDENT` (4) spaces, has text
+//!   after it, and whose whole
 //!   length (indent plus text, trailing spaces ignored) is at most `T`. A prose
-//!   paragraph longer than `T` is never a candidate;
+//!   paragraph longer than `T` is never a candidate, and neither is a paragraph
+//!   indented 1-3 spaces (LGOP r4 uses 3, Nord and Bert r19 uses 2): such a line
+//!   keeps its indent and breaks a run like any other text line;
 //! * a **block** is a maximal run of consecutive candidates. Empty lines inside the
 //!   run do not break it; any other line does;
 //! * a block whose furthest right edge (`indent + length`, maximised) passes `W` is
@@ -31,11 +34,18 @@
 use crate::state::StyleRun;
 use crate::textwidth::str_cells;
 
+/// The smallest indent that marks a line as hand-laid. Short prose paragraphs are
+/// indented by the games' own paragraph convention, not laid out as a block: Leather
+/// Goddesses of Phobos r4 indents them 3 spaces, Nord and Bert r19 indents them 2.
+/// Shifting those in a narrow pane would strip a first-line indent that is the
+/// paragraph's only marker, so lines indented fewer than this are plain text.
+const MIN_HAND_LAID_INDENT: usize = 4;
+
 /// One line's layout facts: `Some((indent, edge))` for a candidate, `None` for
 /// anything else. A candidate's `edge` is `indent + length`, in cells.
 fn candidate(line: &str, told: u16) -> Option<(usize, usize)> {
     let indent = line.chars().take_while(|c| *c == ' ').count();
-    if indent == 0 {
+    if indent < MIN_HAND_LAID_INDENT {
         return None;
     }
     let body = line.trim_end_matches(' ');
@@ -160,9 +170,9 @@ mod tests {
 
     #[test]
     fn the_smallest_indent_caps_the_shift() {
-        let lines = vec![format!("{}short", " ".repeat(3)), format!("{}{}", " ".repeat(30), "x".repeat(40))];
-        // edge 70, pane 40: overflow 30, but the first line only has 3 spaces.
-        assert_eq!(block_shifts(&lines, 80, 40), vec![3, 3]);
+        let lines = vec![format!("{}short", " ".repeat(4)), format!("{}{}", " ".repeat(30), "x".repeat(40))];
+        // edge 70, pane 40: overflow 30, but the first line only has 4 spaces.
+        assert_eq!(block_shifts(&lines, 80, 40), vec![4, 4]);
     }
 
     #[test]
@@ -190,11 +200,37 @@ mod tests {
         let lines = vec![
             format!("{}{}", " ".repeat(20), "a".repeat(30)),
             "plain text, no indent".to_string(),
-            format!("{}{}", " ".repeat(2), "b".repeat(10)),
+            format!("{}{}", " ".repeat(4), "b".repeat(10)),
         ];
         // First block alone overflows (edge 50 vs 40): shift 10. The second
-        // block fits and is untouched, though joined it would have shifted by 2.
+        // block fits and is untouched, though joined it would have shifted by 4.
         assert_eq!(block_shifts(&lines, 80, 40), vec![10, 0, 0]);
+    }
+
+    #[test]
+    fn a_three_space_short_line_wider_than_the_pane_is_not_shifted() {
+        let lines = vec![format!("   {}", "p".repeat(50))];
+        assert!(!is_hand_laid(&lines[0], 80));
+        assert_eq!(block_shifts(&lines, 80, 40), vec![0]);
+    }
+
+    #[test]
+    fn a_two_space_line_between_two_wide_indent_blocks_splits_them() {
+        let lines = vec![
+            format!("{}{}", " ".repeat(20), "a".repeat(30)),
+            format!("  {}", "b".repeat(10)),
+            format!("{}{}", " ".repeat(8), "c".repeat(40)),
+        ];
+        // Joined, the 2-space line would cap the shift at 2 for all three. Split:
+        // the first moves 10, the last 8, the middle none.
+        assert_eq!(block_shifts(&lines, 80, 40), vec![10, 0, 8]);
+    }
+
+    #[test]
+    fn a_four_space_line_is_still_shifted() {
+        let lines = vec![format!("    {}", "p".repeat(50))];
+        assert!(is_hand_laid(&lines[0], 80));
+        assert_eq!(block_shifts(&lines, 80, 40), vec![4]);
     }
 
     #[test]

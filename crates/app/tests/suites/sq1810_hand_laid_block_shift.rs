@@ -66,8 +66,13 @@ fn drive(s: &mut GameSession, state: &mut AppState, cmds: &[&str]) {
 /// is one column narrower than the pane (the scrollbar's column), so a pane of `w + 1`
 /// wraps at `w`: the cases below say "46-column pane" for a 45-column wrap width.
 fn frame(s: &mut GameSession, state: &AppState, w: u16) -> Vec<String> {
-    app::host::screen::sync_zvm_screen_dims(s, state, (w, 25));
-    let area = Rect::new(0, 0, w, 25);
+    frame_h(s, state, w, 25)
+}
+
+/// [`frame`] with a chosen pane height, for text that scrolls off a 25-row pane.
+fn frame_h(s: &mut GameSession, state: &AppState, w: u16, h: u16) -> Vec<String> {
+    app::host::screen::sync_zvm_screen_dims(s, state, (w, h));
+    let area = Rect::new(0, 0, w, h);
     let mut buf = Buffer::empty(area);
     app::render::screen::render_story_pane(&s.screen(), false, None, state, area, &mut buf);
     (0..area.height)
@@ -155,34 +160,53 @@ fn copy_over_a_shifted_block_takes_what_is_drawn() {
     assert_eq!(indent(lines[2]), 27);
 }
 
-/// Planetfall r10 (Solid Gold, serial 880531), the opening Enter and `inventory`: the
-/// list is a block indented 2 and 4, whose widest line passes a 45-column pane.
+/// Planetfall r10 (Solid Gold, serial 880531), the opening Enter then `kill me` (1 Enter,
+/// 1 command): the death banner is indented 4 and 25 long, so its edge is column 29 and
+/// it passes a 27-column wrap width by two.
+///
+/// This replaces the inventory case: that list was indented 2 and 4, and the 2-space
+/// items are no longer hand-laid (SQ-1810 follow-up: a block needs 4+ spaces). Before
+/// the change the inventory block moved by its smallest indent, 2; now the 2-space
+/// items never join a block and keep their indent, and the lone 4-space nested line
+/// fits, so the inventory is not shifted at all.
 #[test]
-fn planetfall_r10_inventory_block_shifts_by_its_smallest_indent() {
-    let Some(mut s) = boot("planetfall-invclues-r10-s880531.z5", 45) else { return };
+fn planetfall_r10_death_banner_shifts_in_a_27_column_pane() {
+    let Some(mut s) = boot("planetfall-invclues-r10-s880531.z5", 27) else { return };
     let mut state = AppState::default();
-    drive(&mut s, &mut state, &["inventory"]);
+    drive(&mut s, &mut state, &["kill me"]);
     assert_eq!(s.fixed_cols(), Some(80), "Planetfall caches the width");
-    let long = "A Patrol-issue self-contained multi-purpose scrub brush";
-    // Non-vacuity: the list is there, indented as the game printed it, and its widest
-    // line passes 45 columns.
-    let src = state.transcript.iter().find(|l| l.contains(long)).expect("the inventory is printed").clone();
-    assert_eq!(indent(&src), 2);
-    assert!(src.trim_end().chars().count() > 45 && src.trim_end().chars().count() <= 80);
-    assert!(state.transcript.iter().any(|l| l == "    An ID card"), "the nested line is indented 4");
+    // Non-vacuity: the banner is there, indented 4 as the game printed it, and its
+    // edge (29) passes the 27-column wrap width but not the told 80.
+    let src = state.transcript.iter().find(|l| l.contains("You have died")).expect("the death banner is printed").clone();
+    assert_eq!(src, "    ****  You have died  ****");
 
-    let wide = frame(&mut s, &state, 81);
-    let y80 = row_of(&wide, "A diary");
-    assert_eq!(indent(&wide[y80]), 2);
-    assert_eq!(indent(&wide[row_of(&wide, "An ID card")]), 4);
+    let wide = frame_h(&mut s, &state, 81, 120);
+    assert_eq!(indent(&wide[row_of(&wide, "You have died")]), 4);
 
-    let rows = frame(&mut s, &state, 46);
-    // Overflow 12, smallest indent 2: everything moves 2 left, and the nesting holds.
-    let y = row_of(&rows, "A diary");
-    assert_eq!(indent(&rows[y]), 0, "{:?}", rows[y]);
-    assert_eq!(indent(&rows[row_of(&rows, "An ID card")]), 2);
-    // The heading above the block is not part of it.
-    assert!(rows[row_of(&rows, "You are carrying")].starts_with("You are carrying"));
+    let rows = frame_h(&mut s, &state, 28, 120);
+    let y = row_of(&rows, "You have died");
+    assert_eq!(indent(&rows[y]), 2, "overflow 2, smallest indent 4: moves 2 left: {:?}", rows[y]);
+    assert!(rows[y].contains("****  You have died  ****"), "the banner stays on one row: {:?}", rows[y]);
+}
+
+/// Leather Goddesses of Phobos r4 (serial 880405), boot, the opening Enter, then `look` (1 Enter,
+/// 1 command): its paragraphs are indented 3, and `   You feel an urge.` is short
+/// enough to be a one-line "block" (edge 20) that a 15-column wrap width overflows.
+/// A 3-space paragraph is not hand-laid, so it keeps its indent.
+#[test]
+fn lgop_r4_three_space_paragraph_keeps_its_indent_in_a_narrow_pane() {
+    let Some(mut s) = boot("leathergoddesses-invclues-r4-s880405.z5", 15) else { return };
+    let mut state = AppState::default();
+    drive(&mut s, &mut state, &["look"]);
+    assert_eq!(s.fixed_cols(), Some(80), "LGOP caches the width");
+    // Non-vacuity: the short paragraph is printed indented 3, and is wider than the pane.
+    let src = state.transcript.iter().find(|l| l.contains("You feel an urge")).expect("the paragraph is printed").clone();
+    assert_eq!(src, "   You feel an urge.");
+    assert!(src.chars().count() > 15);
+
+    let rows = frame(&mut s, &state, 16);
+    let y = row_of(&rows, "You feel");
+    assert_eq!(indent(&rows[y]), 3, "{:?}", rows[y]);
 }
 
 /// The wrap cache is incremental, and a line that arrives later can join a block
