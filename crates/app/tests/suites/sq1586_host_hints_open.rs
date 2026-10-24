@@ -392,3 +392,30 @@ fn host_exposes_the_hint_program_width_floor() {
     assert_eq!(hint_program_min_cols(Some("mystery.dat")), 72);
     assert_eq!(hint_program_min_cols(None), 72);
 }
+
+/// SQ-1813: a host names the hint program before booting it, through `app::host`, and
+/// floors its panel width from that name.
+#[test]
+fn host_names_the_hint_program_before_boot() {
+    use app::host::{hint_program_min_cols, hint_program_name};
+    // A hand-picked file is named as is, whatever the resolver would find.
+    let picked = Path::new("/somewhere/else/spellbinv.z5");
+    let index = empty_index();
+    assert_eq!(
+        hint_program_name(Path::new("/nowhere/story.z3"), HintStory::new("x", ""), None, Some(picked), &index),
+        Some("spellbinv.z5".to_string())
+    );
+
+    let Some((story_path, story_bytes)) = read_story("zork1-r88-s840726.z3") else {
+        eprintln!("SKIP: stories/zork1-r88-s840726.z3 absent");
+        return;
+    };
+    if !stories_dir().join("zork1izm.z5").is_file() {
+        eprintln!("SKIP: stories/zork1izm.z5 absent");
+        return;
+    }
+    let ifid = compute_ifid(&story_bytes);
+    let name = hint_program_name(&story_path, HintStory::new(&ifid, ""), None, None, &index);
+    assert_eq!(name.as_deref(), Some("zork1izm.z5"));
+    assert_eq!(hint_program_min_cols(name.as_deref()), 60);
+}

@@ -77,7 +77,14 @@ pub fn hint_program_min_cols(program: Option<&str>) -> u16 {
 
 /// The file name of the hint program a start will open, known before it boots so the
 /// boot width can use its floor: the pick, else what the resolver finds.
-fn program_name(
+///
+/// For an embedding host: feed the result to [`hint_program_min_cols`] to floor the panel
+/// width passed to `host::hints::open` exactly as the TUI does, without restating the
+/// resolver. `picked` is a hint file the player chose by hand (for instance from a chooser
+/// when several candidates tied); its file name is returned as is. `None` lets the resolver
+/// find the program the way `open` will. The answer is `None` when nothing resolves
+/// automatically; a zip entry yields its last path component.
+pub fn hint_program_name(
     story_path: &Path,
     story: HintStory<'_>,
     tuid: Option<&str>,
@@ -281,7 +288,7 @@ pub fn ensure_started_in_with_tuid(
     state.hints_tab.phase = Phase::NotStarted;
     let index = crate::hints::load_hint_index(&state.config.user_dir);
     state.hints_tab.status = game_hint_status_with_tuid(story_path, story, tuid, &index);
-    let program = program_name(story_path, story, tuid, picked.as_deref(), &index);
+    let program = hint_program_name(story_path, story, tuid, picked.as_deref(), &index);
     let screen = state.hints_tab.panel_screen(program.as_deref());
     match start_with_tuid(story_path, story, tuid, picked.as_deref(), running.as_deref(), builtin_hint_words(state), &state.config, screen) {
         HintStart::Started(session) => {

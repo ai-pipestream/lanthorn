@@ -70,7 +70,7 @@ pub use crate::render::upper_window::{column_plan, grid_column_plan, ColumnPlan,
 pub use crate::render::hand_layout::{block_shifts, is_hand_laid, shift_line_left};
 // The hint program width floor (SQ-1813): the narrowest width the TUI's Hints tab boots a given
 // hint program at (72, or 60 for an `*izm` program), for a host passing `hints::open` its own panel size.
-pub use crate::hints_tab::{hint_program_min_cols, HINTS_MIN_COLS, HINTS_MIN_COLS_IZM};
+pub use crate::hints_tab::{hint_program_min_cols, hint_program_name, HINTS_MIN_COLS, HINTS_MIN_COLS_IZM};
 
 use crate::engine::Engine;
 
