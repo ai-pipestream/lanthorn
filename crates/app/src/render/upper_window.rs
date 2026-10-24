@@ -1960,6 +1960,18 @@ mod tests {
     }
 
     #[test]
+    fn strip_plan_fits_arthurs_bar_to_exactly_fields_plus_one_blank() {
+        // SQ-1819: Arthur r74's bar as the plan sees it at 38 columns (strip 34 wide,
+        // 47 virtual columns, need 11): a margin blank, "Churchyard", eleven gap
+        // blanks, the 23-column date. It keeps exactly fields + one blank = 34. One
+        // column narrower (strip 33, need 12) nothing can fit without fusing the fields,
+        // so there is no plan: the strip is the limit, not the accounting.
+        let ink = ".##########...........#######################";
+        assert_eq!(strip_shown(ink, 11).as_deref(), Some("##########.#######################"));
+        assert_eq!(strip_shown(ink, 12), None);
+    }
+
+    #[test]
     fn strip_plan_is_none_when_blanks_cannot_cover_the_overrun_or_nothing_is_needed() {
         assert_eq!(strip_shown("##.##", 2), None);
         assert_eq!(strip_shown("##....##", 0), None);

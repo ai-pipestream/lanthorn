@@ -317,8 +317,10 @@ fn arthur_status_fits_at_the_widths_a_leading_space_used_to_defeat() {
     for honor in [true, false] {
         let Some(session) = arthur(honor) else { return };
         let model = session.screen();
-        // SQ-1818: at 37 columns the blanks cannot cover the overrun with one blank
-        // kept between the fields, so there is no plan: the date clips (never fuses).
+        // SQ-1818/1819: at 37 columns the bar's strip is 33 cells wide (the pane less the
+        // 2-cell margins either side of native 28..612) and the fields need 10 + 1 + 23
+        // = 34, so there is no plan: the date clips (never fuses). 38 columns is the
+        // narrowest that fits, at the TUI and at a host's 10x22 cells alike.
         let (area, buf) = render(&model, honor, 37, 25);
         let (_, text) = arthur_status(&buf, area);
         assert!(text.contains("Churchyard"), "honor={honor} 37 cols: {text:?}");
@@ -339,6 +341,13 @@ fn arthur_status_fits_at_the_widths_a_leading_space_used_to_defeat() {
         assert!(!runs.is_empty());
         for r in runs {
             assert!(!r.run.text.starts_with(' '), "honor={honor}: dropped blank still published: {:?}", r.run.text);
+        }
+        // SQ-1819: the host's 10x22 cells draw the date whole at 38 and clip it at 37.
+        for (cols, whole) in [(38u16, true), (37, false)] {
+            let hyb = host_layout(&session, honor, cols);
+            let date = hyb.runs.iter().find(|r| r.run.text.contains("St Anne's")).expect("date run");
+            let (c0, c1) = date.resolved.expect("date drawn");
+            assert_eq!(c1 - c0 >= 23, whole, "honor={honor} {cols} cols: date spans {c0}..{c1}");
         }
     }
 }
