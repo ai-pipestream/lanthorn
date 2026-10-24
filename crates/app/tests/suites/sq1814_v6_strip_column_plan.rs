@@ -225,3 +225,110 @@ fn shogun_band_is_untouched_at_narrow_widths() {
         }
     }
 }
+
+// ── SQ-1815: the click map follows the strip column plan ────────────────────
+
+use app::engine::WinNode;
+use app::render::v6_layout as v6;
+
+/// `hybrid_chrome_layout` for `session` at a host pane of `cols` x 45 cells with a
+/// host font (10x22, not the game's 8x16).
+fn host_layout(session: &GameSession, honor: bool, cols: u16) -> app::render::screen::V6HybridChromeLayout {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.config.honor_game_colours = honor;
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &state.v6_text);
+    let layout = v6::classify_windows(items, state.v6_text.cell());
+    let pane = Rect::new(0, 0, cols, 45);
+    app::render::screen::hybrid_chrome_layout(&layout, native, pane, (10, 22), &state)
+        .expect("a hybrid chrome layout")
+}
+
+/// The first drawn cell of every glyph run clicks back to a game pixel inside
+/// the run's own native span (a character is 8 native px wide), never a neighbour's.
+///
+/// FALSIFY by passing `Vec::new()` for the strip columns in
+/// `V6HybridChromeLayout::from_frame`'s `build_hybrid_click_map` call: every shifted
+/// word clicks onto its neighbour, which an embedding host saw as "clicking Esher
+/// does nothing".
+fn assert_clicks_land_on_their_words(ctx: &str, hyb: &app::render::screen::V6HybridChromeLayout, cols: u16) -> usize {
+    let mut checked = 0;
+    for r in hyb.runs.iter().filter(|r| !r.over_art && !r.run.text.trim().is_empty()) {
+        let Some((c0, c1)) = r.resolved else { continue };
+        if c0 < 0 || c1 > i32::from(cols) {
+            continue;
+        }
+        let n = r.run.text.trim_end().chars().count() as i32;
+        let x0 = i32::from(r.run.x.max(1)) - 1;
+        let x1 = x0 + n * 8;
+        // Only the FIRST cell: a run's later characters advance a column each while the
+        // scale compresses the pane, so they overshoot the run's own native span by
+        // design (and always did).
+        {
+            let (col, row) = (c0 as u16, r.row as u16);
+            let (gx, _) = hyb
+                .click_map
+                .map_click(col, row)
+                .unwrap_or_else(|| panic!("{ctx}: {:?} cell ({col},{row}) maps to nothing", r.run.text));
+            let gx = i32::from(gx);
+            assert!(
+                gx > x0 && gx <= x1,
+                "{ctx}: {:?} drawn at ({col},{row}) clicks to native x {gx}, outside its own span {x0}..{x1}",
+                r.run.text
+            );
+            checked += 1;
+        }
+    }
+    checked
+}
+
+#[test]
+fn journey_menu_clicks_resolve_through_the_strip_plan() {
+    for honor in [true, false] {
+        let Some(session) = journey_menu(honor) else { return };
+        for cols in [40u16, 42, 44] {
+            let hyb = host_layout(&session, honor, cols);
+            let ctx = format!("honor={honor} {cols} cols");
+            assert!(!hyb.click_map.strip_cols.is_empty(), "{ctx}: premise, the menu strip is planned");
+            let n = assert_clicks_land_on_their_words(&ctx, &hyb, cols);
+            assert!(n > 10, "{ctx}: non-vacuity, only {n} cells checked");
+        }
+        // A wide pane draws no plan and clicks as it always did.
+        for cols in [100u16, 140] {
+            let hyb = host_layout(&session, honor, cols);
+            assert!(hyb.click_map.strip_cols.is_empty(), "honor={honor} {cols} cols: no plan, no remap");
+            assert!(assert_clicks_land_on_their_words(&format!("honor={honor} {cols} cols"), &hyb, cols) > 10);
+        }
+    }
+}
+
+// ── SQ-1816: a run's edge whitespace is blank to the plan ───────────────────
+
+/// Arthur's ' Churchyard' run leads with a space; counted as ink it left the plan one
+/// column short at ~37 columns and the date clipped to "St Anne's D". The status bar
+/// now shows the date whole down to the narrowest width the blanks can cover.
+///
+/// FALSIFY by making `glyph_ink_span` return its span unchanged: the date clips at 37.
+#[test]
+fn arthur_status_fits_at_the_widths_a_leading_space_used_to_defeat() {
+    for honor in [true, false] {
+        let Some(session) = arthur(honor) else { return };
+        let model = session.screen();
+        for cols in [37u16, 38, 40, 44] {
+            let (area, buf) = render(&model, honor, cols, 25);
+            let (_, text) = arthur_status(&buf, area);
+            assert!(text.contains("Churchyard"), "honor={honor} {cols} cols: {text:?}");
+            assert!(text.contains("St Anne's Day, Compline"), "honor={honor} {cols} cols: {text:?}");
+        }
+        // The host sees the same plan: the dropped blank is not part of the run it
+        // is told to draw at `col`.
+        let hyb = host_layout(&session, honor, 37);
+        let runs: Vec<_> = hyb.runs.iter().filter(|r| r.run.text.contains("Churchyard")).collect();
+        assert!(!runs.is_empty());
+        for r in runs {
+            assert!(!r.run.text.starts_with(' '), "honor={honor}: dropped blank still published: {:?}", r.run.text);
+        }
+    }
+}

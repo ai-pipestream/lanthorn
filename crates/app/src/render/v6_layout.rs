@@ -5660,6 +5660,7 @@ mod tests {
             img_x: 0.0, img_y: 0.0, img_w: 64.0, img_h: frame.canvas_h as f32,
             canvas: (64, frame.canvas_h as u16), screen: frame.native,
             packed_text: Vec::new(),
+            strip_cols: Vec::new(),
         };
         for y in 0..frame.canvas_h as u16 {
             for x in [0u16, 31, 63] {

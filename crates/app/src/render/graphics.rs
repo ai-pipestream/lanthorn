@@ -446,6 +446,41 @@ pub struct V6ClickMap {
     /// the letterbox scale — see [`PackedText`]. Empty when the whole pane is the
     /// scaled image, which is the common case.
     pub packed_text: Vec<PackedText>,
+    /// Chrome text strips whose runs are drawn through a column plan (SQ-1814), so a
+    /// click on a drawn cell must be carried back to the column the run was laid
+    /// out at before the scale inverse (SQ-1815). Empty when no strip dropped a
+    /// column, which is the common case.
+    pub strip_cols: Vec<StripColumns>,
+}
+
+/// The column map of one chrome text strip drawn through a
+/// [`strip_column_plan`](crate::render::upper_window::strip_column_plan) (SQ-1814):
+/// the strip's cell rect and the 1-based laid-out columns it keeps, in order. The
+/// forward map is `screen::StripShift::map`; this is its inverse, built from the same
+/// plan so a click and a drawn glyph cannot disagree (SQ-1815).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripColumns {
+    pub rect: Rect,
+    /// Laid-out columns the plan covers, from `rect.x`.
+    pub cols: u16,
+    /// Kept columns, 1-based within `cols`, ascending.
+    pub kept: Vec<u16>,
+}
+
+impl StripColumns {
+    fn holds(&self, col: u16, row: u16) -> bool {
+        col >= self.rect.x && col < self.rect.right() && row >= self.rect.y && row < self.rect.bottom()
+    }
+
+    /// The laid-out column the drawn cell `col` stands for: the kept column at that
+    /// offset, or, past the last kept one, the same distance beyond the plan's domain.
+    pub(crate) fn laid_col(&self, col: u16) -> u16 {
+        let k = usize::from(col - self.rect.x);
+        match self.kept.get(k) {
+            Some(&c) => self.rect.x + c - 1,
+            None => self.rect.x + self.cols + (k - self.kept.len()) as u16,
+        }
+    }
 }
 
 /// A rectangle the renderer draws at ONE TERMINAL CELL PER NATIVE TEXT CELL,
@@ -526,6 +561,7 @@ pub fn build_hybrid_click_map(
     native: (u16, u16),
     cell_px: (u16, u16),
     packed_text: Vec<PackedText>,
+    strip_cols: Vec<StripColumns>,
 ) -> V6ClickMap {
     let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
     V6ClickMap {
@@ -543,6 +579,7 @@ pub fn build_hybrid_click_map(
         canvas: native,
         screen: native,
         packed_text,
+        strip_cols,
     }
 }
 
@@ -562,6 +599,9 @@ impl V6ClickMap {
         if col < self.pane_x || row < self.pane_y {
             return None;
         }
+        // SQ-1815: a cell in a strip drawn through a column plan stands for the
+        // column its run was LAID OUT at, which is what the scale inverts.
+        let col = self.strip_cols.iter().find(|s| s.holds(col, row)).map_or(col, |s| s.laid_col(col));
         // Device-pixel position of the clicked cell's centre, relative to pane.
         let dx = (col - self.pane_x) as f32 * self.cell_w as f32 + self.cell_w as f32 / 2.0;
         let dy = (row - self.pane_y) as f32 * self.cell_h as f32 + self.cell_h as f32 / 2.0;
@@ -1075,7 +1115,8 @@ impl GraphicsRender {
     /// what the player sees. `pane` is the whole v6 pane's cell rect; `native` is
     /// the chrome canvas's game-pixel extent; `cell_px` is the font cell size.
     /// `packed_text` carries every region drawn as packed cells rather than through
-    /// the scale — see [`PackedText`].
+    /// the scale — see [`PackedText`]. `strip_cols` carries every strip drawn
+    /// through a column plan — see [`StripColumns`].
     pub fn record_hybrid_click_map(
         &mut self,
         pane: Rect,
@@ -1083,8 +1124,10 @@ impl GraphicsRender {
         native: (u16, u16),
         cell_px: (u16, u16),
         packed_text: Vec<PackedText>,
+        strip_cols: Vec<StripColumns>,
     ) {
-        self.last_v6_map = Some(build_hybrid_click_map(pane, scale, native, cell_px, packed_text));
+        self.last_v6_map =
+            Some(build_hybrid_click_map(pane, scale, native, cell_px, packed_text, strip_cols));
     }
 
     /// Record the click map for the v6 CELL path — a terminal with no image
@@ -1119,6 +1162,7 @@ impl GraphicsRender {
             canvas: native,
             screen: native,
             packed_text: Vec::new(),
+            strip_cols: Vec::new(),
         });
     }
 
@@ -2678,7 +2722,27 @@ mod tests {
             canvas: (100, 100),
             screen: (100, 100),
             packed_text: Vec::new(),
+            strip_cols: Vec::new(),
         }
+    }
+
+    #[test]
+    fn map_click_carries_a_planned_strip_cell_back_to_its_laid_out_column() {
+        // SQ-1815: a strip at cells x 2..8, rows 3..5, laid out over 8 columns of
+        // which the 3rd and 4th were dropped; one cell == 10 game pixels.
+        let m = V6ClickMap {
+            strip_cols: vec![StripColumns { rect: Rect::new(2, 3, 6, 2), cols: 8, kept: vec![1, 2, 5, 6, 7, 8] }],
+            ..unit_map()
+        };
+        // Before the first dropped column: itself.
+        assert_eq!(m.map_click(2, 3), Some((26, 36)));
+        assert_eq!(m.map_click(3, 4), Some((36, 46)));
+        // Past it: the laid-out column (drawn 4 stands for 6, drawn 7 for 9).
+        assert_eq!(m.map_click(4, 3), Some((66, 36)));
+        assert_eq!(m.map_click(7, 4), Some((96, 46)));
+        // Outside the strip's rows nothing is remapped.
+        assert_eq!(m.map_click(4, 5), Some((46, 56)));
+        assert_eq!(m.map_click(4, 2), Some((46, 26)));
     }
 
     #[test]
@@ -2714,6 +2778,7 @@ mod tests {
             img_w: 80.0, // 40 native * 2
             img_h: 80.0,
             packed_text: Vec::new(),
+            strip_cols: Vec::new(),
             canvas: (40, 40),
             screen: (40, 40),
         };

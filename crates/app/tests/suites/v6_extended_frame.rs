@@ -1205,6 +1205,7 @@ fn the_click_map_drops_a_click_in_the_rows_lanthorn_added() {
         canvas: (640, 896),
         screen: (640, 400),
         packed_text: Vec::new(),
+        strip_cols: Vec::new(),
     };
     // Inside the game's own screen: the ordinary letterbox inverse, unchanged.
     assert_eq!(m.map_click(0, 0), Some((5, 9)), "the top-left cell is the game's");

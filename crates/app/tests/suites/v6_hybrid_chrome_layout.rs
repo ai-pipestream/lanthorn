@@ -441,6 +441,40 @@ fn hybrid_chrome_layout_click_map_recovers_a_menu_click_and_delivering_it_change
     assert_ne!(before, after, "clicking the menu band's own reported run position did not change the menu");
 }
 
+/// SQ-1815: the same click-through at a pane narrow enough (42 columns) that
+/// SQ-1814's column plan drops blank columns from the menu strip, so the verb is
+/// DRAWN at a shifted column. Clicking the cell it is drawn in must still reach the
+/// game's verb handler: before the click map followed the plan it landed on the
+/// word's neighbour and the menu did not change.
+#[test]
+fn hybrid_chrome_layout_click_map_follows_the_strip_plan_on_a_narrow_pane() {
+    let Some(mut b) = boot_host("journey-r83-s890706.z6", 83, "hybrid-chrome-layout-click-planned") else { return };
+    let mut tidy = 0u32;
+    for _ in 0..40 {
+        if host_answer(&mut b, &mut tidy, "").contains("magical resources") {
+            break;
+        }
+    }
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &b.state.v6_text);
+    let layout = v6::classify_windows(items, b.state.v6_text.cell());
+    let pane = Rect::new(0, 0, 42, 45);
+    let hyb = hybrid_chrome_layout(&layout, native, pane, (10, 22), &b.state).expect("expected a hybrid chrome layout");
+    assert!(!hyb.click_map.strip_cols.is_empty(), "premise: the narrow menu strip is planned");
+    let verb = hyb
+        .runs
+        .iter()
+        .find(|r| r.in_menu_band && r.run.text.trim() == "Scout")
+        .expect("premise: Minar's row carries its queued verb label");
+    let (c0, _) = verb.resolved.expect("the verb is drawn");
+    let game_px = hyb.click_map.map_click(c0 as u16, verb.row as u16).expect("the click map recovers a pixel");
+    let before = menu_snapshot(&*b.session);
+    let out = host_click(&mut b, &mut tidy, game_px).expect("a char read always takes a click");
+    assert!(!out.quit, "the game goes on");
+    assert_ne!(before, menu_snapshot(&*b.session), "clicking the drawn verb did not change the menu");
+}
+
 // ---------------------------------------------------------------------------
 // SQ-1599 — the five draw-time facts SQ-1591 deliberately left unpublished:
 // strip/row ground floods, SQ-0747's rule stretch + claimed-word collision
