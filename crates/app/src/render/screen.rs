@@ -1684,53 +1684,54 @@ fn render_node(
                                 }
                             }
                         }
-                        for row_runs in in_box.values_mut() {
+                        // SQ-0937: the run's COLUMN is counted from the story box's
+                        // own left edge — one terminal column per native 8px text
+                        // cell — exactly as the row a few lines below is counted from
+                        // its top. This is SQ-0892's rule, finally applied to the
+                        // other axis.
+                        //
+                        // It used to map through the ring scale absolutely:
+                        //
+                        //     area.x + ((scale.off_x + px * scale.s) / cw).round()
+                        //
+                        // which disagrees with how the run is then DRAWN. `run_col`'s
+                        // neighbours already say why: a run is positioned through the
+                        // scale but "its characters then advance ONE TERMINAL COLUMN
+                        // each, and the two rates coincide only where a column is one
+                        // native 8px text cell." Positioning a run at one rate and
+                        // advancing its characters at another makes the run drift away
+                        // from its own text, and rounds its ORIGIN independently of the
+                        // viewport it is being clipped against.
+                        //
+                        // MEASURED, on the Macintosh press (r296/881019) at a 136x50
+                        // pane: the InvisiClues topic list prints its left column at
+                        // native x=87 against a story box whose left edge is x=86. The
+                        // old expression rounded that to `viewport.x - 1`, and the
+                        // guard below DROPS a run outside the viewport — so the whole
+                        // left column of the menu vanished while the right column at
+                        // native x=320, far enough in to survive the rounding, drew
+                        // normally. The same boundary the other way is the "disconnected
+                        // reversed cells after the menu items" seen at other sizes.
+                        //
+                        // Counting from the box cannot disagree with the box: a run at
+                        // the box's first column IS the viewport's first column, by
+                        // construction. `px >= vp_native.0` is guaranteed by the filter
+                        // that built `in_box`, so the subtraction never goes negative.
+                        //
+                        // SQ-1009: both terms are CELLS. The run's is the one the
+                        // engine wrote it in, never its pixel origin divided by the
+                        // declared width — that division is the column only while
+                        // the pen advances one declared cell per character, and on a
+                        // proportional machine it skips cells and drifts along the
+                        // line. For a fixed pen it is the same subtraction it always
+                        // was.
+                        let vp_col = (vp_native.0 / u32::from(state.v6_text.cell().w())) as i32;
+                        let run_col = |t: &crate::engine::PxText| {
+                            viewport.x as i32 + i32::from(t.gcol) - vp_col
+                        };
+                        let slides = story_block_slides(&in_box, &run_col, viewport, state.v6_text.cell().h());
+                        for (&y, row_runs) in in_box.iter_mut() {
                             row_runs.sort_by_key(|t| t.x);
-                            // SQ-0937: the run's COLUMN is counted from the story box's
-                            // own left edge — one terminal column per native 8px text
-                            // cell — exactly as the row a few lines below is counted from
-                            // its top. This is SQ-0892's rule, finally applied to the
-                            // other axis.
-                            //
-                            // It used to map through the ring scale absolutely:
-                            //
-                            //     area.x + ((scale.off_x + px * scale.s) / cw).round()
-                            //
-                            // which disagrees with how the run is then DRAWN. `run_col`'s
-                            // neighbours already say why: a run is positioned through the
-                            // scale but "its characters then advance ONE TERMINAL COLUMN
-                            // each, and the two rates coincide only where a column is one
-                            // native 8px text cell." Positioning a run at one rate and
-                            // advancing its characters at another makes the run drift away
-                            // from its own text, and rounds its ORIGIN independently of the
-                            // viewport it is being clipped against.
-                            //
-                            // MEASURED, on the Macintosh press (r296/881019) at a 136x50
-                            // pane: the InvisiClues topic list prints its left column at
-                            // native x=87 against a story box whose left edge is x=86. The
-                            // old expression rounded that to `viewport.x - 1`, and the
-                            // guard below DROPS a run outside the viewport — so the whole
-                            // left column of the menu vanished while the right column at
-                            // native x=320, far enough in to survive the rounding, drew
-                            // normally. The same boundary the other way is the "disconnected
-                            // reversed cells after the menu items" seen at other sizes.
-                            //
-                            // Counting from the box cannot disagree with the box: a run at
-                            // the box's first column IS the viewport's first column, by
-                            // construction. `px >= vp_native.0` is guaranteed by the filter
-                            // that built `in_box`, so the subtraction never goes negative.
-                            //
-                            // SQ-1009: both terms are CELLS. The run's is the one the
-                            // engine wrote it in, never its pixel origin divided by the
-                            // declared width — that division is the column only while
-                            // the pen advances one declared cell per character, and on a
-                            // proportional machine it skips cells and drifts along the
-                            // line. For a fixed pen it is the same subtraction it always
-                            // was.
-                            let vp_col = (vp_native.0 / u32::from(state.v6_text.cell().w())) as i32;
-                            let run_col = |t: &crate::engine::PxText| {
-                                viewport.x as i32 + i32::from(t.gcol) - vp_col
-                            };
                             let merged = merge_strip_fragments(row_runs);
                             // SQ-0898: the cells this row's GLYPH runs occupy, so a
                             // BLANK run cannot erase one.
@@ -1767,7 +1768,7 @@ fn render_node(
                             // clipping while blank cells sit to its left. This is
                             // SQ-1820's rule, through `story_row_cols`, which
                             // `story_slot_overlay_runs` reads too.
-                            let cols = story_row_cols(&merged, &run_col, viewport);
+                            let cols = story_row_cols(&merged, &run_col, slides.get(&y).copied().unwrap_or(0));
                             let ink: Vec<(i32, i32)> = merged
                                 .iter()
                                 .zip(&cols)
@@ -6135,23 +6136,69 @@ fn slide_left_to_fit(start: i32, ink_cells: i32, left: i32, right: i32) -> i32 {
     }
 }
 
-/// SQ-1822: the terminal column each merged run of one story-box row is stamped at:
-/// the run's own [`gcol`-based column](crate::engine::PxText::gcol) (`run_col`), less
-/// the slide a LONE glyph run takes to end at the box's right edge (SQ-1820's rule,
-/// shared through [`lone_glyph_run`] and [`slide_left_to_fit`]). A reversed run slides
-/// too, since a selected menu item is a reversed run and its bar goes with it. The one
-/// source for the box's drawing pass and for [`story_slot_overlay_runs`].
-fn story_row_cols(
-    merged: &[crate::engine::PxText],
+/// SQ-1823: the slide each candidate row takes, given `(row, start column, own slide)`
+/// in row order. A BLOCK is a maximal run of candidates on consecutive rows that start
+/// at the same column (a menu: its items are laid at one column); every row of a block
+/// takes the block's largest slide (the most negative, already clamped to the left edge
+/// by [`slide_left_to_fit`]), so the left edges stay aligned and the longest item ends at
+/// the right edge. A row with no same-column neighbour (a centred title-card line) keeps
+/// its own slide; a block that fits (all zero) is untouched. Blank rows between items
+/// end a block: Shogun's menu is on consecutive rows, and a gap is a different group.
+fn block_slides(cands: &[(i32, i32, i32)]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(cands.len());
+    let mut i = 0;
+    while i < cands.len() {
+        let mut j = i + 1;
+        while j < cands.len() && cands[j].0 == cands[j - 1].0 + 1 && cands[j].1 == cands[i].1 {
+            j += 1;
+        }
+        let slide = cands[i..j].iter().map(|c| c.2).min().unwrap_or(0);
+        out.extend(std::iter::repeat_n(slide, j - i));
+        i = j;
+    }
+    out
+}
+
+/// SQ-1823: the slide of each story-box row that holds a lone glyph run, by native `y`,
+/// with SQ-1822's lone-run test and SQ-1820's arithmetic, grouped into blocks by
+/// [`block_slides`]. The one source for the box's drawing pass and
+/// [`story_slot_overlay_runs`].
+fn story_block_slides(
+    in_box: &std::collections::BTreeMap<u16, Vec<&crate::engine::PxText>>,
     run_col: &dyn Fn(&crate::engine::PxText) -> i32,
     viewport: Rect,
-) -> Vec<i32> {
-    let mut cols: Vec<i32> = merged.iter().map(run_col).collect();
-    if let Some(i) = lone_glyph_run(merged.iter().map(|t| (t, false))) {
+    row_h: u16,
+) -> std::collections::BTreeMap<u16, i32> {
+    let mut ys = Vec::new();
+    let mut cands = Vec::new();
+    for (&y, runs) in in_box {
+        let mut runs = runs.clone();
+        runs.sort_by_key(|t| t.x);
+        let merged = merge_strip_fragments(&runs);
+        let Some(i) = lone_glyph_run(merged.iter().map(|t| (t, false))) else { continue };
         let t = &merged[i];
         let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
         let ink = (t.text.chars().count() - trail) as i32;
-        cols[i] += slide_left_to_fit(cols[i], ink, viewport.x as i32, viewport.right() as i32);
+        let start = run_col(t);
+        ys.push(y);
+        let line = (i32::from(y.max(1)) - 1) / i32::from(row_h);
+        cands.push((line, start, slide_left_to_fit(start, ink, viewport.x as i32, viewport.right() as i32)));
+    }
+    ys.into_iter().zip(block_slides(&cands)).collect()
+}
+
+/// SQ-1822: the terminal column each merged run of one story-box row is stamped at:
+/// the run's own [`gcol`-based column](crate::engine::PxText::gcol) (`run_col`), less
+/// the `slide` its row's block takes ([`story_block_slides`]; a lone glyph run, a
+/// reversed one included, since a selected menu item is one and its bar goes with it).
+fn story_row_cols(
+    merged: &[crate::engine::PxText],
+    run_col: &dyn Fn(&crate::engine::PxText) -> i32,
+    slide: i32,
+) -> Vec<i32> {
+    let mut cols: Vec<i32> = merged.iter().map(run_col).collect();
+    if let Some(i) = lone_glyph_run(merged.iter().map(|t| (t, false))) {
+        cols[i] += slide;
     }
     cols
 }
@@ -6214,6 +6261,8 @@ fn chrome_strip_shift(
     // SQ-1820: a row that is ONE glyph run (a centred title-card line) and still
     // overruns after the plan slides left just far enough to end at the strip's right
     // edge, never past its left edge. A multi-run row keeps its table columns.
+    // SQ-1823: consecutive such rows laid at the same column (a menu) slide together.
+    let mut cands: Vec<(i32, i32, i32)> = Vec::new();
     for (row, rr, sp) in &rows {
         let Some(i) = lone_glyph_run(rr.iter().map(|(t, rule)| (t, *rule))) else { continue };
         let (t, c0) = (&rr[i].0, sp[i].0);
@@ -6224,9 +6273,11 @@ fn chrome_strip_shift(
         let skip = shift.lead_skip(t, c0, false);
         let trail = t.text.chars().rev().take_while(|c| c.is_whitespace()).count();
         let start = shift.map(c0);
-        let slide = slide_left_to_fit(start, (n - skip - trail) as i32, x0, right);
+        cands.push((*row, start, slide_left_to_fit(start, (n - skip - trail) as i32, x0, right)));
+    }
+    for (&(row, ..), slide) in cands.iter().zip(block_slides(&cands)) {
         if slide != 0 {
-            shift.slides.insert(*row, slide);
+            shift.slides.insert(row, slide);
         }
     }
     shift
@@ -7165,13 +7216,14 @@ fn story_slot_overlay_runs(
         }
     }
     let vp_col = (vp_native.0 / u32::from(cell.w())) as i32;
+    let run_col = |t: &crate::engine::PxText| viewport.x as i32 + i32::from(t.gcol) - vp_col;
+    let slides = story_block_slides(&in_box, &run_col, viewport, cell.h());
     let mut out = Vec::new();
-    for row_runs in in_box.values_mut() {
+    for (&y, row_runs) in in_box.iter_mut() {
         row_runs.sort_by_key(|t| t.x);
-        let run_col = |t: &crate::engine::PxText| viewport.x as i32 + i32::from(t.gcol) - vp_col;
         let merged = merge_strip_fragments(row_runs);
-        // SQ-1822: the same lone-run slide the drawing applies.
-        let cols = story_row_cols(&merged, &run_col, viewport);
+        // SQ-1822/1823: the same block slide the drawing applies.
+        let cols = story_row_cols(&merged, &run_col, slides.get(&y).copied().unwrap_or(0));
         let ink: Vec<(i32, i32)> = merged
             .iter()
             .zip(&cols)
@@ -16803,6 +16855,20 @@ mod tests {
         assert_eq!(slide_left_to_fit(3, 50, 3, 37), 0);
         // Longer than the box: stops at the left edge.
         assert_eq!(slide_left_to_fit(27, 50, 3, 37), -24);
+    }
+
+    #[test]
+    fn block_slides_share_the_largest_slide_of_same_column_neighbours() {
+        // SQ-1823: three menu rows at column 27 with own slides -4, -10, -3 all take -10.
+        assert_eq!(block_slides(&[(5, 27, -4), (6, 27, -10), (7, 27, -3)]), [-10, -10, -10]);
+        // A different start column breaks the block: each row keeps its own slide.
+        assert_eq!(block_slides(&[(5, 20, -2), (6, 27, -4), (7, 27, -6), (8, 30, -1)]), [-2, -6, -6, -1]);
+        // A blank row between items ends the block.
+        assert_eq!(block_slides(&[(5, 27, -4), (7, 27, -10)]), [-4, -10]);
+        // A block that fits is untouched; a fitting row joins an overrunning neighbour.
+        assert_eq!(block_slides(&[(5, 10, 0), (6, 10, 0)]), [0, 0]);
+        assert_eq!(block_slides(&[(5, 27, 0), (6, 27, -5)]), [-5, -5]);
+        assert_eq!(block_slides(&[]), Vec::<i32>::new());
     }
 
     #[test]

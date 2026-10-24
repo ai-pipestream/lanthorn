@@ -76,22 +76,31 @@ fn render(s: &GameSession, cols: u16) -> Buffer {
     buf
 }
 
-/// Every item is whole at every width from 40 up, and the host layout agrees with the
-/// terminal. An item that fits where it was laid stays exactly there; one that would
-/// overrun the box ends at its right edge. (RESTORE, the longest at 20 cells, is the
-/// last to fit unslid.)
+/// The three items slide TOGETHER (SQ-1823): they are consecutive rows laid at one
+/// column, so a block shares the largest overrun, RESTORE's, and their left edges stay
+/// aligned. Whole wherever the box holds RESTORE (20 cells); the longest ends at the
+/// box's right edge once the block slides; a pane wide enough for all three to sit where
+/// the game laid them is untouched. The host layout agrees with the terminal.
 ///
-/// FALSIFY by making `story_row_cols` return `run_col` unchanged: "START the " at 40.
+/// FALSIFY by sliding each row by its own overrun (`story_block_slides` returning each
+/// row's own `slide_left_to_fit`): START, RESTORE and QUIT start at three different
+/// columns below 44 cells of box.
 #[test]
-fn boot_menu_items_are_whole_and_slide_only_where_they_overrun() {
+fn boot_menu_items_slide_together_and_stay_whole() {
     let Some(s) = boot_menu() else { return };
-    let mut slid = 0;
-    // Every width through the last one that slides, then a spread of wide ones (each
-    // render is slow in debug).
-    for cols in (40u16..=56).chain([60, 72, 80, 100]) {
+    let (mut slid, mut narrowest_whole) = (0, u16::MAX);
+    for cols in (20u16..=56).chain([60, 72, 80, 100]) {
         let buf = render(&s, cols);
         let hyb = overlay(&s, cols);
         let vp = hyb.viewport;
+        let longest = ITEMS.iter().map(|i| i.len()).max().unwrap() as i32;
+        let laid = i32::from(vp.x) + LAID_AT;
+        let want = if laid + longest <= i32::from(vp.right()) {
+            laid
+        } else {
+            (i32::from(vp.right()) - longest).max(i32::from(vp.x))
+        };
+        let mut whole = true;
         for item in ITEMS {
             let run = hyb
                 .story_overlay
@@ -100,22 +109,31 @@ fn boot_menu_items_are_whole_and_slide_only_where_they_overrun() {
                 .unwrap_or_else(|| panic!("{cols}: no overlay run for {item:?}"));
             let (a, b) = run.spans[0];
             let text = row_text(&buf, run.row as u16, cols);
-            assert!(text.contains(item), "{cols} cols: {item:?} clipped: {text:?}");
-            let at = text.find(item).map(|byte| text[..byte].chars().count() as i32);
-            assert_eq!(at, Some(a),"{cols} cols: host and terminal agree on {item:?}");
-            let laid = i32::from(vp.x) + LAID_AT;
-            let ink = item.len() as i32;
-            if laid + ink <= i32::from(vp.right()) {
-                assert_eq!(a, laid, "{cols} cols: {item:?} fits and stays where it was laid");
-            } else {
-                slid += 1;
-                assert_eq!(a + ink, i32::from(vp.right()), "{cols} cols: {item:?} ends at the box's right edge");
-                assert!(a >= i32::from(vp.x), "{cols} cols: {item:?} never starts left of the box");
+            whole &= text.contains(item);
+            if text.contains(item) {
+                let at = text.find(item).map(|byte| text[..byte].chars().count() as i32);
+                assert_eq!(at, Some(a), "{cols} cols: host and terminal agree on {item:?}");
             }
+            assert_eq!(a, want, "{cols} cols: {item:?} starts at the block's shared column");
             assert!(b > a);
         }
+        if want != laid {
+            slid += 1;
+            let r = hyb.story_overlay.iter().find(|r| r.run.text.trim() == "RESTORE a saved game").unwrap();
+            // The longest ends at the box's right edge, unless the box is narrower than it.
+            if want != i32::from(vp.x) {
+                assert_eq!(r.spans[0].1, i32::from(vp.right()), "{cols} cols: RESTORE ends at the right edge");
+            }
+        }
+        if whole {
+            narrowest_whole = narrowest_whole.min(cols);
+        }
+        if i32::from(vp.right()) - i32::from(vp.x) >= longest {
+            assert!(whole, "{cols} cols: the box holds RESTORE, so every item is whole");
+        }
     }
-    assert!(slid > 20, "non-vacuity: only {slid} slid items");
+    eprintln!("narrowest width with all three items whole: {narrowest_whole}");
+    assert!(slid > 10, "non-vacuity: only {slid} slid widths");
 }
 
 /// A click on any drawn cell of a slid item resolves to that item's own native span,
@@ -125,7 +143,7 @@ fn boot_menu_items_are_whole_and_slide_only_where_they_overrun() {
 /// slide to the right of where it is drawn, and the bar lands on the wrong item.
 #[test]
 fn clicks_on_slid_items_select_them() {
-    for cols in [40u16, 42, 44, 46] {
+    for cols in [36u16, 40, 42, 44, 46, 51] {
         for pick in ITEMS {
             let Some(mut s) = boot_menu() else { return };
             let hyb = overlay(&s, cols);
