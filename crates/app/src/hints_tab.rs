@@ -61,7 +61,13 @@ pub const HINTS_MIN_COLS_IZM: u16 = 60;
 /// The width floor for the hint program called `program` (its file name; `None`
 /// when not known yet): [`HINTS_MIN_COLS_IZM`] for an `*izm` file stem, else
 /// [`HINTS_MIN_COLS`], so an unknown program stays on the safe side.
-fn min_cols_for(program: Option<&str>) -> u16 {
+///
+/// For an embedding host: this is the one rule the TUI's Hints tab floors its boot
+/// width with. Take the larger of your panel's width and this before handing `screen`
+/// to [`crate::host::hints::open`], and you floor exactly as the TUI does, including
+/// any future change to the rule. `program` is the hint file's name or path; its stem
+/// is what is read, case-insensitively.
+pub fn hint_program_min_cols(program: Option<&str>) -> u16 {
     let stem = program.map(|p| Path::new(p).file_stem().and_then(|s| s.to_str()).unwrap_or(p));
     match stem {
         Some(s) if s.to_ascii_lowercase().ends_with("izm") => HINTS_MIN_COLS_IZM,
@@ -192,7 +198,7 @@ impl HintsTab {
     /// (SQ-1812). `None` before the tab has been drawn at all (SQ-1753).
     pub fn panel_screen(&self, program: Option<&str>) -> Option<(u16, u16)> {
         let area = self.hits.borrow().area;
-        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(min_cols_for(program))))
+        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(hint_program_min_cols(program))))
     }
 
     pub fn hits(&self) -> HintsHits {

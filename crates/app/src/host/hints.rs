@@ -130,9 +130,10 @@ pub fn no_hint_message(documents: Option<&Path>) -> String {
 /// `None` boots the Z-machine's default 80x24. A hint program reads its width at boot --
 /// centring its title, wrapping its hint screens -- so a size given later is not the same as
 /// one given here (SQ-1753). The TUI's Hints tab floors the width it gives
-/// at [`crate::hints_tab::HINTS_MIN_COLS`] (72; 60 for an `*izm` program, SQ-1812) before calling this; a host that wants the
-/// same clean `*inv` layouts on a narrow panel does likewise and draws through
-/// [`crate::host::column_plan`].
+/// at [`crate::host::hint_program_min_cols`] (72; 60 for an `*izm` program, SQ-1812) before calling
+/// this; a host that wants the same clean `*inv` layouts on a narrow panel does likewise
+/// (`width.max(hint_program_min_cols(Some(name)))`) and draws through
+/// [`crate::host::column_plan`]. This function itself applies no floor.
 ///
 /// - `Ok(None)`: resolution found nothing to open automatically
 ///   ([`HintResolution::AskUser`]/[`HintResolution::None`]) or a choice is

@@ -380,3 +380,15 @@ fn a_hint_program_boots_at_the_size_the_host_gives_it() {
         "None still boots the default 80x24"
     );
 }
+
+/// SQ-1813: the hint program width floor is reachable through `app::host`, and
+/// applies the TUI's rule: 60 for an `*izm` stem, 72 for everything else.
+#[test]
+fn host_exposes_the_hint_program_width_floor() {
+    use app::host::{hint_program_min_cols, HINTS_MIN_COLS, HINTS_MIN_COLS_IZM};
+    assert_eq!((HINTS_MIN_COLS, HINTS_MIN_COLS_IZM), (72, 60));
+    assert_eq!(hint_program_min_cols(Some("arthrizm.z5")), 60);
+    assert_eq!(hint_program_min_cols(Some("stationinv.z5")), 72);
+    assert_eq!(hint_program_min_cols(Some("mystery.dat")), 72);
+    assert_eq!(hint_program_min_cols(None), 72);
+}
