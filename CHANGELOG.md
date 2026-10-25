@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.9.8`) versions every crate and every
+version in `Cargo.toml` (currently `0.9.9`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -19,13 +19,14 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
+## v0.9.9 — 2026-10-25
 
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
+### Highlights
+
+- **Older Infocom games keep a steady 80-column status line at any window size**, and the new `status_width` setting lets you override it per game.
+- **Narrow windows and phones held upright keep status bars, title cards and menus whole and readable.** Shogun's title card, score bar and start-up menu, Arthur's and Journey's status bars and menus, and Zork Zero's status line no longer lose or overwrite text.
+- **Opening quotations laid out for an 80-column screen, such as AMFV's, keep their shape on a narrow window.**
+- **Hint files fit a narrower side panel.**
 
 ### Fixed
 
