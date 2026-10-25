@@ -447,7 +447,11 @@ pub fn column_plan(
         return ColumnPlan { kept: (1..=cols).collect(), strategy: ColumnStrategy::Fits };
     }
     let viewport = || {
-        let first = col_follow_offset(cursor.1.saturating_sub(1), width, show_cursor) + 1;
+        // Clamp so the viewport always fills the pane (`cols > width` here): a caret one
+        // past the last column (after printing to the right margin) would otherwise
+        // leave the last screen column blank. The caret then shows at the right edge.
+        let offset = col_follow_offset(cursor.1.saturating_sub(1), width, show_cursor).min(cols - width);
+        let first = offset + 1;
         ColumnPlan {
             kept: (first..=cols.min(first.saturating_add(width.saturating_sub(1)))).collect(),
             strategy: ColumnStrategy::Viewport,
@@ -1847,6 +1851,26 @@ mod tests {
         let p = column_plan(&g, 2, 8, (2, 15), true);
         assert_eq!(p.strategy, ColumnStrategy::Viewport);
         assert_eq!(p.kept, (8..=15).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn plan_viewport_fills_the_pane_when_the_cursor_is_past_the_last_column() {
+        // SQ-1809: 80-column grid, 40-column pane, caret one past the right margin.
+        let mut g = grid_of(80, &[("A", 0)]);
+        g.win = 1; // Glk grid: always the viewport
+        let p = column_plan(&g, 1, 40, (1, 81), true);
+        assert_eq!(p.strategy, ColumnStrategy::Viewport);
+        assert_eq!(p.kept, (41..=80).collect::<Vec<u16>>());
+        // caret on the last column: unchanged
+        let p = column_plan(&g, 1, 40, (1, 80), true);
+        assert_eq!(p.kept, (41..=80).collect::<Vec<u16>>());
+        // caret well inside: unchanged
+        let p = column_plan(&g, 1, 40, (1, 45), true);
+        assert_eq!(p.kept, (6..=45).collect::<Vec<u16>>());
+        // a grid narrower than the pane: unchanged
+        let g = grid_of(30, &[("A", 0)]);
+        let p = column_plan(&g, 1, 40, (1, 31), true);
+        assert_eq!(p.kept, (1..=30).collect::<Vec<u16>>());
     }
 
     #[test]
