@@ -4636,6 +4636,7 @@ fn build_hybrid_frame_with(
         runs: &chrome_runs,
         bar_rows: &bar_rows,
         row_spans: &row_spans,
+        art_free_cols: (i32::from(art_left), i32::from(art_right)),
     };
     row_oracle.shifts = row_oracle.compute_shifts();
     // SQ-1825: the chrome text above the story gets a terminal row for every game text
@@ -5881,7 +5882,7 @@ impl HybridFrame {
                 let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
                 let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
                 let origin = |t: &crate::engine::PxText| {
-                    chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell)
+                    chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell, i32::from(rect.x))
                 };
                 let shift = chrome_strip_shift(&by_row, *rect, &origin);
                 if shift.plan.is_some() || !shift.slides.is_empty() {
@@ -6014,11 +6015,19 @@ fn chrome_run_origin(
     pane: Rect,
     native_w: u16,
     cell: zvm::screen::V6Cell,
+    strip_left: i32,
 ) -> i32 {
     let c = match native_origin {
         Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
         None => run_cell(t, scale, cell_px, pane, cell).0,
     };
+    // SQ-1826: a strip narrower than the pane stops at the side art's inner edge. A word the
+    // scale lays left of that edge was laid by the game in the art-free span (a text strip
+    // has no art behind its glyphs, by classification; Shogun's "Erasmus:" is 3 native px
+    // past the ornament and rounds two cells into it at some widths), so it is drawn at the
+    // edge instead of being clipped by it. The same rule the row oracle applies
+    // ([`ChromeRowOracle::art_free_cols`]).
+    let c = if strip_left > pane.x as i32 && is_word_run(t) { c.max(strip_left) } else { c };
     match t.text.chars().next() {
         Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
             edge_glyph_col(t.x.max(1) as u32 - 1, native_w as u32, scale, cell_px, pane, cell).unwrap_or(c)
@@ -6098,6 +6107,15 @@ fn row_spans(
         spans.push(span);
     }
     spans
+}
+
+/// SQ-1826: whether a run is a word or number (a glyph run), as against a rule, a divider
+/// or a blank: the runs that stay between the side art. Frame glyphs and blanks keep the
+/// column the scale gave them.
+fn is_word_run(t: &crate::engine::PxText) -> bool {
+    // A run with leading blanks carries its own padding (Arthur's status fields): it is
+    // placed by the game's text grid, not by where its first letter lands.
+    t.text.chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// SQ-1825: whether a run is a text FIELD for [`row_spans`]'s collision rule: a word or
@@ -6336,6 +6354,10 @@ fn story_block_slides(
 /// SQ-1824: the cells a chrome window occupies when it lies inside the story box's native
 /// region, counted from the box exactly as the in-box runs are (one terminal cell per native
 /// text cell, from the viewport's top-left), or `None` for a window outside it.
+///
+/// Only the terminal draw path asks (a host lays the box out itself), so the library built
+/// without terminal graphics has no caller.
+#[cfg(feature = "terminal")]
 fn story_window_cells(
     pw: &PositionedWindow,
     viewport: Rect,
@@ -6501,7 +6523,7 @@ fn strip_run_positions(
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
-    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell, i32::from(rect.x));
     let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut out = Vec::new();
     for (row, row_runs) in &by_row {
@@ -6587,7 +6609,7 @@ fn strip_divider_fills(
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
-    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell, i32::from(rect.x));
     let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut divider_rows: std::collections::BTreeMap<u16, (i32, i32)> = std::collections::BTreeMap::new();
     for (row, row_runs) in &by_row {
@@ -6651,7 +6673,7 @@ fn strip_run_drawn(
     let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
-    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let origin = |t: &crate::engine::PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell, i32::from(rect.x));
     let shift = chrome_strip_shift(&by_row, rect, &origin);
     let mut out = Vec::new();
     for (row, row_runs) in &by_row {
@@ -10545,6 +10567,11 @@ struct ChromeRowOracle<'a, 'b> {
     /// distinct game rows never share a terminal row — see [`Self::compute_shifts`].
     /// Keyed by the game row, `(y - 1) / cell.h`. Empty wherever nothing collides.
     shifts: std::collections::HashMap<i32, i32>,
+    /// SQ-1826: the pane columns between the frame's side art, `(left_end, right_start)`
+    /// — [`flank_art_columns`]' answer, the pane's own edges where there is no side art.
+    /// Chrome text above or below the story stays between them (clipped on the right),
+    /// so what lies past them is the art's and not the text's.
+    art_free_cols: (i32, i32),
 }
 
 impl<'b> ChromeRowOracle<'_, 'b> {
@@ -10691,7 +10718,19 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// in those columns" is asked here exactly as the draw answers it.
     fn run_cols(&self, t: &crate::engine::PxText) -> (i32, i32) {
         let (c, _) = run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell);
-        (c, c + t.text.chars().count().max(1) as i32)
+        // SQ-1826: text between the side art is clipped on the right at the art's inner
+        // edge and never moves onto it, so the cells it would run on past that edge are not
+        // where it stands, and a word the scale rounds onto the art on the left is one the
+        // game laid in the art-free span (this is asked of `Text` rows, which by
+        // classification have no art behind their glyphs; see [`Self::art_free_cols`]).
+        let (lo, hi) = self.art_free_cols;
+        let n = t.text.chars().count().max(1) as i32;
+        if !is_word_run(t) {
+            return (c, c + n);
+        }
+        let c = if lo > self.pane.x as i32 { c.max(lo) } else { c };
+        let end = if hi < self.pane.right() as i32 { (c + n).min(hi) } else { c + n };
+        (c, end)
     }
 
     /// Does this run stand in `cols`?
@@ -11653,7 +11692,7 @@ fn draw_chrome_text_strip(
     // does not, and a right-hand field ran off the strip while the middle of the bar
     // sat blank. When something would clip, drop the columns blank on EVERY row (the
     // plan SQ-1809 uses for an upper-window grid) and shift all rows by the same map.
-    let origin = |t: &PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell);
+    let origin = |t: &PxText| chrome_run_origin(t, native_origin, native_x0, scale, cell_px, pane, native.0, cell, i32::from(rect.x));
     let shift = chrome_strip_shift(&by_row, rect, &origin);
 
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run is

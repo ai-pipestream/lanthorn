@@ -226,10 +226,10 @@ fn row_with(rows: &[String], needle: &str) -> (usize, String) {
     (y, rows[y].clone())
 }
 
-/// On a pane too narrow for a centred line, the line ends at the strip's right edge
-/// instead of clipping with blanks to its left; one longer than the strip starts at
-/// the left edge and shows as much as fits (no wrapping). The card still has its nine
-/// lines in order.
+/// On a pane too narrow for a centred line, the line stays BETWEEN the side art (SQ-1826,
+/// the owner's rule): it slides left to the art's inner edge and shows as much as fits
+/// there, clipped on the right (no wrapping, never over the art). The card still has its
+/// nine lines in order.
 ///
 /// FALSIFY by never inserting into `StripShift::slides`: the trademark line reads
 /// `  SHOGUN is a trademark of Jame` (clipped, indented) at 40 columns.
@@ -237,17 +237,30 @@ fn row_with(rows: &[String], needle: &str) -> (usize, String) {
 fn a_lone_overrunning_line_slides_left_to_fit() {
     let Some(s) = title_card() else { return };
     let model = s.screen();
+    let fs = ratatui_image::picker::Picker::halfblocks().font_size();
+    let (pcw, pch) = (fs.width, fs.height);
     for (cols, pane_rows) in [(40u16, 36u16), (40, 25), (50, 25), (50, 36)] {
-        let (area, buf) = render(&model, cols, pane_rows);
+        let ring = host_ring_at(&s, cols, pane_rows, (pcw, pch));
+        let (lo, hi) = (usize::from(ring.viewport.x), usize::from(ring.viewport.right()));
+        let (_, buf) = render(&model, cols, pane_rows);
+        let area = Rect::new(0, 0, cols, pane_rows);
         let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
         let (_, tm) = row_with(&rows, "SHOGUN is a trademark");
-        assert!(tm.contains(TRADEMARK), "{cols}x{pane_rows}: trademark whole: {tm:?}");
+        let inside: String = tm.chars().skip(lo).take(hi - lo).collect();
+        // Fits: whole, flush to the inner edge. Does not fit: from the inner edge, clipped.
+        let ok = if TRADEMARK.len() <= hi - lo {
+            inside.trim() == TRADEMARK && inside.ends_with("Clavell")
+        } else {
+            TRADEMARK.starts_with(inside.trim_end()) && inside.starts_with("SHOGUN")
+        };
+        assert!(ok, "{cols}x{pane_rows}: trademark between the art, clipped on the right: {tm:?} ({lo}..{hi})");
         assert!(
-            tm.trim_end().ends_with("Clavell") && tm.chars().count() == usize::from(cols),
-            "{cols}x{pane_rows}: flush right: {tm:?}"
+            !tm.chars().take(lo).chain(tm.chars().skip(hi)).any(|c| c.is_ascii_alphabetic()),
+            "{cols}x{pane_rows}: no text over the side art: {tm:?}"
         );
         let (_, lit) = row_with(&rows, "Original Literary");
-        assert!(lit.starts_with("Original Literary Work Copyright 1975 by"), "{cols}x{pane_rows}: at the left edge: {lit:?}");
+        let inside: String = lit.chars().skip(lo).take(hi - lo).collect();
+        assert!(LITERARY.starts_with(inside.trim_end()), "{cols}x{pane_rows}: at the art's inner edge: {lit:?}");
         let at = card_rows(&rows);
         assert!(at.iter().all(Option::is_some), "{cols}x{pane_rows}: {at:?}");
     }
@@ -292,8 +305,9 @@ fn host_layout_and_clicks_follow_the_slide() {
         let ring = app::render::screen::hybrid_chrome_layout(&layout, native, pane, (cw, ch), &st).expect("chrome ring");
         let r = ring.runs.iter().find(|r| r.run.text.contains("SHOGUN is a trademark")).expect("trademark run");
         let (c0, c1) = r.resolved.expect("drawn");
-        assert_eq!(c1, i32::from(cols), "{cols} cols: the slid run ends at the strip's right edge");
-        assert_eq!(c1 - c0, TRADEMARK.len() as i32, "{cols} cols: published whole");
+        let vp = ring.viewport;
+        assert_eq!(c1, i32::from(vp.right()), "{cols} cols: the slid run ends at the art's inner edge");
+        assert_eq!(c1 - c0, i32::from(vp.width).min(TRADEMARK.len() as i32), "{cols} cols: published clipped on the right");
         let x0 = i32::from(r.run.x.max(1)) - 1;
         let x1 = x0 + TRADEMARK.len() as i32 * 8;
         let (gx, _) = ring.click_map.map_click(c0 as u16, r.row as u16).expect("click maps");
@@ -305,9 +319,15 @@ fn host_layout_and_clicks_follow_the_slide() {
 // ── SQ-1821: a click on any drawn cell of a run resolves inside that run ─────
 
 /// The host layout of the title card on kitty at `(cw, ch)` cells.
-fn host_ring(
+fn host_ring(s: &GameSession, cols: u16, cells: (u16, u16)) -> app::render::screen::V6HybridChromeLayout {
+    host_ring_at(s, cols, 36, cells)
+}
+
+/// [`host_ring`] at a chosen pane height.
+fn host_ring_at(
     s: &GameSession,
     cols: u16,
+    rows: u16,
     (cw, ch): (u16, u16),
 ) -> app::render::screen::V6HybridChromeLayout {
     let model = s.screen();
@@ -320,7 +340,7 @@ fn host_ring(
     st.set_game_picker(Some(app::render::graphics::kitty_picker(cw, ch)));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st.config.honor_game_colours = true;
-    let pane = Rect::new(0, 0, cols, 36);
+    let pane = Rect::new(0, 0, cols, rows);
     app::render::screen::hybrid_chrome_layout(&layout, native, pane, (cw, ch), &st).expect("chrome ring")
 }
 
@@ -341,7 +361,7 @@ fn every_drawn_cell_of_a_run_clicks_inside_that_run() {
             let trademark = ring.runs.iter().find(|r| r.run.text.contains("SHOGUN is a trademark")).expect("run");
             let (c0, c1) = trademark.resolved.expect("drawn");
             if cols == 40 {
-                assert!(c0 <= 33 && c1 == 40, "premise: the slid line covers cells 33..40 ({c0}..{c1})");
+                assert!(c0 == i32::from(ring.viewport.x) && c1 == i32::from(ring.viewport.right()), "premise: the slid line fills the art-free span ({c0}..{c1})");
             }
             for r in ring.runs.iter().filter(|r| !r.over_art && r.run.text.trim().chars().count() >= 2) {
                 let Some((a, b)) = r.resolved else { continue };

@@ -139,6 +139,14 @@ fn the_terminal_bar_is_two_whole_rows_at_every_width() {
         let (top, second) = (row_text(&buf, 0, cols), row_text(&buf, 1, cols));
         let words = |line: &str| line.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
         let (top_words, second_words) = (words(&top), words(&second));
+        // SQ-1826: the bar stays between the side art (three columns each side at the
+        // narrowest) and is truncated on the right where it cannot fit: below 30 columns
+        // the first line loses its tail, never its start.
+        if cols < 30 {
+            assert!(top_words.first().is_some_and(|w| w == "Erasmus:"), "{cols}x{rows}: row 0 still starts the first line: {top:?}");
+            assert!(second_words.first().is_some_and(|w| w == "Bridge"), "{cols}x{rows}: row 1 still starts the second line: {second:?}");
+            continue;
+        }
         assert!(
             top_words.first().is_some_and(|w| w == "Erasmus:") && top_words.ends_with(&["Score:".into(), "0".into()]),
             "{cols}x{rows}: row 0 is the first line, the score a blank past its label: {top:?}"
