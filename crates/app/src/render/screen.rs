@@ -10725,7 +10725,8 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         // classification have no art behind their glyphs; see [`Self::art_free_cols`]).
         let (lo, hi) = self.art_free_cols;
         let n = t.text.chars().count().max(1) as i32;
-        if !is_word_run(t) {
+        // A word, or the blank padding of a bar (a `Text` row has no art under either).
+        if !is_word_run(t) && !t.text.trim().is_empty() {
             return (c, c + n);
         }
         let c = if lo > self.pane.x as i32 { c.max(lo) } else { c };
@@ -11260,6 +11261,41 @@ fn decompose_chrome_strips<'a>(
                     _ => {}
                 }
                 j += 1;
+            }
+            // SQ-1826: a strip that is the art-free span (narrower than the pane) holds rows
+            // that fit it and rows that overrun it (they slide or clip). Before the flank kept
+            // overrunning rows they were separate strips, and a strip's block origin, column
+            // plan and slides are laid out over ITS rows only: merged, a line that fits would
+            // move because a longer one beside it needed room (Shogun's title card at 71
+            // columns: "SHOGUN" 3 columns off centre). So split at every change of status, so
+            // each strip is laid out exactly as it was when the rows were separate.
+            if text && (band.x > oracle.pane.x || band.right() < oracle.pane.right()) {
+                let overruns = |rr: &Vec<&crate::engine::PxText>| {
+                    rr.iter().any(|t| {
+                        let (c, _) = run_cell(t, oracle.scale, oracle.cell_px, oracle.pane, oracle.v6_cell);
+                        is_word_run(t) && c + t.text.chars().count() as i32 > band.right() as i32
+                    })
+                };
+                let mut start = i;
+                let mut status: Option<bool> = None;
+                let mut sub: Vec<&crate::engine::PxText> = Vec::new();
+                for (k, class) in classes.iter().enumerate().take(j).skip(i) {
+                    if let RowClass::Text(rr) = class {
+                        let st = overruns(rr);
+                        if status.is_some_and(|s0| s0 != st) {
+                            let rect = Rect::new(band.x, band.y + start as u16, band.width, (k - start) as u16);
+                            out.push(ChromeStrip::Text(rect, sub.iter().map(|t| (*t).clone()).collect()));
+                            start = k;
+                            sub.clear();
+                        }
+                        status = Some(st);
+                        sub.extend(rr.iter().copied());
+                    }
+                }
+                let rect = Rect::new(band.x, band.y + start as u16, band.width, (j - start) as u16);
+                out.push(ChromeStrip::Text(rect, sub.iter().map(|t| (*t).clone()).collect()));
+                i = j;
+                continue;
             }
             let rect = Rect::new(band.x, band.y + i as u16, band.width, (j - i) as u16);
             out.push(if text {
