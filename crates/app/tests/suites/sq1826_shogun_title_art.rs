@@ -333,9 +333,10 @@ fn bar_sizes() -> Vec<((u16, u16, u16, u16), bool)> {
 /// `!is_word_run(t)` early return): the floppy's fill spans the pane at 28..=31 and 14..=22.
 #[test]
 fn the_score_bar_is_between_the_art_on_both_presses_at_every_size() {
-    let mut checked = 0;
+    let (mut checked, mut booted) = (0, 0);
     for file in [Z6, ADF] {
         let Some(s) = gameplay_of(file) else { continue };
+        booted += 1;
         for (size, lock) in bar_sizes() {
             let ring = host_locked(&s, size, lock);
             let who = format!("{file} {}x{}@{}x{} lock {lock}", size.0, size.1, size.2, size.3);
@@ -365,7 +366,10 @@ fn the_score_bar_is_between_the_art_on_both_presses_at_every_size() {
             checked += 1;
         }
     }
-    assert!(checked > 400, "non-vacuity: {checked}");
+    // CI has no `stories/`: with neither fixture present there is nothing to check.
+    if booted > 0 {
+        assert!(checked > 400, "non-vacuity: {checked}");
+    }
 }
 
 /// A title-card line that fits the art-free span lands where the scale puts it, as at 7f116e7ec:
