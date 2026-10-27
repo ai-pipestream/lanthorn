@@ -37,6 +37,34 @@ pub(crate) const WINDOWS_RESERVED: [&str; 22] = [
     "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
+/// Unicode bidi and format controls: they let `exe.txt` display as `txt.exe`-style
+/// spoofs, and never belong in a file name.
+fn is_format_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
+}
+
+/// THE file-name sanitiser (SQ-1732) for every name that came off the network:
+/// story downloads, URL fetches and documents. Takes the last component under
+/// either separator, drops control characters and Unicode bidi/format controls,
+/// replaces `/ \ : * ? " < > |` with `_`, trims surrounding spaces and trailing
+/// dots (Windows), refuses an empty, all-dots or leading-dot name, and gives a
+/// Windows device name (`CON`, `con.z5`) a `_` prefix. Extension policy is the
+/// caller's.
+pub fn sanitise_filename(raw: &str) -> Option<String> {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !is_format_control(*c))
+        .map(|c| if matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches(['.', ' ']);
+    if cleaned.is_empty() || cleaned.starts_with('.') {
+        return None;
+    }
+    let stem = cleaned.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    Some(if WINDOWS_RESERVED.contains(&stem.as_str()) { format!("_{cleaned}") } else { cleaned.to_string() })
+}
+
 /// Make `title` safe as a folder name on Windows, macOS and Linux. Spaces stay.
 /// `/ \ : * ? " < > |` and control characters become `_`; leading dots become `_`
 /// (no hidden folders); trailing dots and spaces go (Windows); the result is
@@ -250,6 +278,75 @@ impl DocKind {
     }
 }
 
+/// Extensions lanthorn lists on their own say-so (SQ-1730): a viewer type, or a
+/// zip as a container. Every other extension is admitted only if the file's
+/// bytes are text ([`admitted`]).
+const ALLOWED_EXTS: &[&str] =
+    &["pdf", "png", "jpg", "jpeg", "gif", "txt", "md", "rtf", "html", "htm", "zip"];
+/// The subset the system opener may ever be handed. The text types are left out
+/// because lanthorn's own pager shows them; zip is a container, never opened.
+const OPENER_EXTS: &[&str] = &["pdf", "png", "jpg", "jpeg", "gif", "html", "htm"];
+/// Executables and launchers: never downloaded or kept, even when their bytes
+/// are text, because in a documents folder a double-click would run them.
+const NEVER_EXTS: &[&str] = &[
+    "bat", "cmd", "com", "exe", "msi", "scr", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "lnk", "url",
+    "pif", "reg", "jar", "app", "command", "terminal", "tool", "fileloc", "desktop", "sh", "csh", "bash", "zsh",
+    "appimage", "dmg", "pkg", "deb", "rpm", "apk",
+];
+/// Known non-text formats that would only be downloaded to be thrown away.
+const KNOWN_BINARY_EXTS: &[&str] = &[
+    "inv", "hqx", "sit", "sea", "bin", "cpt", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "lzh", "lha", "arj", "z",
+    "mp3", "ogg", "wav", "aif", "aiff", "mid", "midi", "flac", "m4a", "mod", "hex", "hug", "inf", "t3", "gam", "taf",
+    "acd", "sna", "tzx", "d64", "adf", "blb", "ulx", "dat", "doc", "webp", "tif", "tiff", "bmp", "svg",
+];
+
+/// The lower-cased extension of `name` (empty when it has none).
+fn ext_of(name: &str) -> String {
+    Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+}
+
+/// What a name's extension says before any bytes are seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameVerdict {
+    /// Never downloaded or kept.
+    Refused,
+    /// An allowlisted type: admitted on its name.
+    Allowed,
+    /// Any other extension: admitted only if the bytes turn out to be text.
+    NeedsSniff,
+}
+
+/// The one decision every document gate asks (SQ-1730): link classification, zip
+/// entries, the post-download check and the opener guard all come through
+/// [`name_verdict`], [`admitted`] and [`opener_allowed`].
+pub fn name_verdict(name: &str) -> NameVerdict {
+    let ext = ext_of(name);
+    if NEVER_EXTS.contains(&ext.as_str()) || KNOWN_BINARY_EXTS.contains(&ext.as_str()) {
+        NameVerdict::Refused
+    } else if ALLOWED_EXTS.contains(&ext.as_str()) {
+        NameVerdict::Allowed
+    } else {
+        NameVerdict::NeedsSniff
+    }
+}
+
+/// Whether the file `name` with first bytes `head` may be listed and kept: an
+/// allowlisted extension, or any other (not [`NEVER_EXTS`]) whose bytes sniff as
+/// text. An empty `head` has nothing to sniff, so only the name decides.
+pub fn admitted(name: &str, head: &[u8]) -> bool {
+    match name_verdict(name) {
+        NameVerdict::Refused => false,
+        NameVerdict::Allowed => true,
+        NameVerdict::NeedsSniff => !head.is_empty() && sniff_kind_bytes(head, name) == DocKind::Text,
+    }
+}
+
+/// Whether `name` may be handed to the system opener. Only allowlisted viewer
+/// types; a text file of any name is shown in the pager, never opened outside.
+pub fn opener_allowed(name: &str) -> bool {
+    OPENER_EXTS.contains(&ext_of(name).as_str())
+}
+
 /// How much of a file [`sniff_kind`] reads.
 const SNIFF_BYTES: usize = 8 * 1024;
 
@@ -330,7 +427,7 @@ pub fn sniff_kind(path: &Path) -> io::Result<DocKind> {
 /// One file in a documents folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocEntry {
-    /// The name to show: the file name without its extension.
+    /// The name to show: the file name, extension included (SQ-1730).
     pub display_name: String,
     pub kind: DocKind,
     pub size: u64,
@@ -419,16 +516,42 @@ fn write_index(dir: &Path, index: &Index) -> io::Result<()> {
     crate::storage::atomic_write(&dir.join(INDEX_NAME), &bytes)
 }
 
-/// The exclusive advisory lock every index writer holds; released on drop.
-fn lock_dir(dir: &Path) -> io::Result<std::fs::File> {
+/// The exclusive advisory lock every index writer holds; released on drop. `None`
+/// means the filesystem has no advisory locks and the writer carries on unlocked.
+type DirLock = Option<std::fs::File>;
+
+/// Whether a failed `lock()` means "this filesystem has no advisory locks" rather
+/// than a real failure. Android's shared storage (`/storage/emulated/0`, a FUSE
+/// mount by MediaProvider) answers `flock` with ENOSYS, and some network mounts
+/// with EOPNOTSUPP.
+fn lock_unsupported(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    if matches!(e.raw_os_error(), Some(libc::ENOSYS | libc::EOPNOTSUPP)) {
+        return true;
+    }
+    e.kind() == io::ErrorKind::Unsupported
+}
+
+/// Take the folder's index lock. Where the filesystem cannot lock at all (Android
+/// shared storage, see [`lock_unsupported`]) this carries on UNLOCKED instead of
+/// failing every import: with no lock available there is nothing to serialise on,
+/// and a failed lock would block the write outright. Any other lock error fails.
+fn lock_dir(dir: &Path) -> io::Result<DirLock> {
+    lock_dir_with(dir, |f| f.lock())
+}
+
+fn lock_dir_with(dir: &Path, try_lock: impl FnOnce(&std::fs::File) -> io::Result<()>) -> io::Result<DirLock> {
     let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join(".import.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    match try_lock(&lock) {
+        Ok(()) => Ok(Some(lock)),
+        Err(e) if lock_unsupported(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn entry_for(path: PathBuf, size: u64, meta: Option<&DocMeta>) -> Option<DocEntry> {
     let id = path.file_name()?.to_str()?.to_string();
-    let display_name = Path::new(&id).file_stem().and_then(|s| s.to_str()).unwrap_or(&id).to_string();
+    let display_name = id.clone();
     let spoiler = meta.is_some_and(|m| m.spoiler) || crate::ifdb_documents::looks_like_spoiler(&id);
     Some(DocEntry {
         display_name,
@@ -670,6 +793,31 @@ mod tests {
     }
 
     #[test]
+    fn an_unsupported_lock_lets_the_index_write_go_ahead() {
+        let dir = crate::scratch_dir("doc-lock-unsupported");
+        let mut failures = vec![io::Error::from(io::ErrorKind::Unsupported)];
+        #[cfg(unix)]
+        failures.extend([io::Error::from_raw_os_error(libc::ENOSYS), io::Error::from_raw_os_error(libc::EOPNOTSUPP)]);
+        for e in failures {
+            let lock = lock_dir_with(&dir, |_| Err(e)).expect("an unsupported lock is tolerated");
+            assert!(lock.is_none(), "carries on unlocked");
+            let mut index = Index::new();
+            index.insert("a.pdf".into(), DocMeta::default());
+            write_index(&dir, &index).unwrap();
+            assert!(read_index(&dir).contains_key("a.pdf"));
+        }
+    }
+
+    #[test]
+    fn a_real_lock_failure_still_fails() {
+        let dir = crate::scratch_dir("doc-lock-denied");
+        let err = lock_dir_with(&dir, |_| Err(io::Error::from(io::ErrorKind::PermissionDenied))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(lock_dir_with(&dir, |_| Ok(())).unwrap().is_some(), "a granted lock is held");
+        assert!(lock_dir(&dir).unwrap().is_some());
+    }
+
+    #[test]
     fn nasty_titles_become_safe_folder_names() {
         assert_eq!(sanitise_title("A/B: C?", "k"), "A_B_ C_");
         assert_eq!(sanitise_title("Zork I.", "k"), "Zork I");
@@ -872,7 +1020,7 @@ mod tests {
         let manual = src_dir.join("Manual.pdf");
         std::fs::write(&manual, b"%PDF-1").unwrap();
         let a = import(&dir, &manual).unwrap().entry().clone();
-        assert_eq!((a.id.as_str(), a.kind, a.size, a.display_name.as_str()), ("Manual.pdf", DocKind::Pdf, 6, "Manual"));
+        assert_eq!((a.id.as_str(), a.kind, a.size, a.display_name.as_str()), ("Manual.pdf", DocKind::Pdf, 6, "Manual.pdf"));
         assert_eq!(a.path, dir.join("Manual.pdf"));
         // The same bytes again are not copied.
         assert_eq!(import(&dir, &manual).unwrap(), Imported::AlreadyPresent(a.clone()));
@@ -1056,5 +1204,76 @@ mod tests {
         let a = got.iter().find(|e| e.id == "a.pdf").unwrap();
         assert_eq!((a.title.as_deref(), a.recorded_size), (Some("Old"), None));
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    // ── the allowlist (SQ-1730) ──────────────────────────────────────────────
+
+    #[test]
+    fn admission_is_an_allowlist_with_a_text_sniff_for_the_rest() {
+        let text = b"Walkthrough\n1. open mailbox\n";
+        let binary = [0u8, 1, 2, 3, 0, 0, 255, 254, 0, 9];
+        for n in ["a.pdf", "a.PNG", "a.jpg", "a.jpeg", "a.gif", "a.txt", "a.md", "a.rtf", "a.html", "a.htm", "a.zip"] {
+            assert!(admitted(n, &binary), "{n} is allowlisted on its name");
+        }
+        assert!(admitted("Walkthrough.sol", text), "text under an unknown extension");
+        assert!(admitted("feelie", text), "no extension");
+        assert!(!admitted("Walkthrough.sol", &binary), "binary under an unknown extension");
+        assert!(!admitted("Walkthrough.sol", b""), "nothing to sniff");
+        for n in ["a.bat", "a.CMD", "a.sh", "a.exe", "a.ps1", "a.js", "a.app", "a.command", "a.jar", "a.desktop", "a.lnk", "a.url", "a.dmg"] {
+            assert!(!admitted(n, text), "{n} is never kept, even as text");
+        }
+        assert!(!admitted("Manual.pdf.bat", text));
+    }
+
+    #[test]
+    fn only_viewer_types_may_reach_the_system_opener() {
+        for n in ["a.pdf", "a.PNG", "a.jpg", "a.jpeg", "a.gif", "a.html", "a.htm"] {
+            assert!(opener_allowed(n), "{n}");
+        }
+        for n in ["a.txt", "a.md", "a.rtf", "a.zip", "a.sol", "a.bat", "a.sh", "a.exe", "a.webp", "a", "Manual.pdf.bat"] {
+            assert!(!opener_allowed(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn a_listed_file_shows_its_real_extension() {
+        let dir = crate::scratch_dir("docs-display");
+        std::fs::write(dir.join("Walkthrough.sol"), b"1. open mailbox\n").unwrap();
+        let got = list(&dir).unwrap();
+        assert_eq!((got[0].display_name.as_str(), got[0].kind), ("Walkthrough.sol", DocKind::Text));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── the one file-name sanitiser (SQ-1732) ────────────────────────────────
+
+    #[test]
+    fn sanitise_filename_is_safe_on_every_platform() {
+        let f = |s: &str| sanitise_filename(s);
+        assert_eq!(f("curses.z5").as_deref(), Some("curses.z5"));
+        assert_eq!(f("../../etc/x.z5").as_deref(), Some("x.z5"));
+        assert_eq!(f("a\\b\\c.z5").as_deref(), Some("c.z5"));
+        assert_eq!(f("Zork: Part 1?.z5").as_deref(), Some("Zork_ Part 1_.z5"), "colon and friends");
+        assert_eq!(f("a*b\"c<d>e|f.txt").as_deref(), Some("a_b_c_d_e_f.txt"));
+        assert_eq!(f("CON.z5").as_deref(), Some("_CON.z5"));
+        assert_eq!(f("con").as_deref(), Some("_con"));
+        assert_eq!(f("Lpt1.txt").as_deref(), Some("_Lpt1.txt"));
+        assert_eq!(f("console.z5").as_deref(), Some("console.z5"), "only the whole device name");
+        assert_eq!(f("x.z5.").as_deref(), Some("x.z5"), "trailing dot");
+        assert_eq!(f("x.z5 ").as_deref(), Some("x.z5"), "trailing space");
+        assert_eq!(f("x.z5. . ").as_deref(), Some("x.z5"));
+        assert_eq!(f("cur\u{7}ses\0.z5").as_deref(), Some("curses.z5"), "controls and NUL");
+        for bad in ["", "   ", ".", "..", "...", ".bashrc", "dir/", "..\\", ". ."] {
+            assert_eq!(f(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitise_filename_drops_bidi_and_format_controls() {
+        // U+202E would show `story\u{202E}3z.exe` as `storyexe.z3`.
+        assert_eq!(sanitise_filename("story\u{202E}3z.exe").as_deref(), Some("story3z.exe"));
+        for c in ['\u{200E}', '\u{200F}', '\u{202A}', '\u{202D}', '\u{2066}', '\u{2069}', '\u{061C}', '\u{FEFF}'] {
+            assert_eq!(sanitise_filename(&format!("a{c}b.txt")).as_deref(), Some("ab.txt"), "U+{:04X}", c as u32);
+        }
+        assert_eq!(sanitise_filename("\u{202E}").as_deref(), None);
     }
 }

@@ -337,6 +337,8 @@ fn the_rows_the_prompt_shows_are_the_glyphs_the_answers_install() {
             set.assist_gutter,
             m.room_numbers_on, m.room_numbers_off, m.centre,
             m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
+            // The command bar's send button (SQ-1801).
+            set.controls.submit,
         ]
     };
 

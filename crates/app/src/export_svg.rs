@@ -2127,7 +2127,7 @@ fn legend_rows(voice: LegendVoice) -> Vec<(String, &'static str)> {
             format!("{}{}", line("edge oneway"), door_mark((30.0, 0.0), (1.0, 0.0))),
             "door — a way through that must be opened",
         ),
-        (line("edge conditional"), "conditional exit — the story gates it"),
+        (line("edge conditional"), "conditional exit — the game gates it"),
         (line("edge distorted"), "distorted — drawn out of true"),
         (
             // SQ-1362: a portal draws the same arrival head every other passage does — the badge

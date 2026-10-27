@@ -91,6 +91,18 @@ pub struct ProbedPassage {
     pub to: RoomId,
 }
 
+/// One step of a walk a shadow replayed: out of `from`, `dir`, into `to` (named `to_name`, for a
+/// room the player never stood in) (SQ-1772). `dir` is [`Direction::Unknown`] for a piece that
+/// changed room without naming a direction -- it goes on the map as a `?` passage for the
+/// relocation probe to name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedStep {
+    pub from: RoomId,
+    pub dir: Direction,
+    pub to: RoomId,
+    pub to_name: String,
+}
+
 impl Mapper {
     /// A mapper around a graph loaded from a save. Both of the fields beside the graph describe the
     /// CURRENT session — the passage just walked, and what the map made of it — and a restore has
@@ -289,8 +301,22 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
+        if newly_seen {
+            self.resolve_scan_landings(location);
+        }
         // Re-evaluate distortion over the whole graph (cheap); no relayout.
         mark_distorted(&mut self.graph, &BTreeSet::new());
+    }
+
+    /// `room` has just entered the graph: every exit-scan stub elsewhere whose hidden landing is
+    /// `room` becomes a verified passage, exactly as a scan that landed on a known room records
+    /// one (SQ-1775). Marked probed, never tried: the player has not typed it. Called from every
+    /// route that adds a room (a walk, a relocation, a chain replay).
+    fn resolve_scan_landings(&mut self, room: RoomId) {
+        for (from, dir) in self.graph.take_scan_landings_to(room) {
+            self.graph.mark_probed(from, dir);
+            self.record_probed_passage(ProbedPassage { from, dir, to: room });
+        }
     }
 
     /// Mint one passage and lay its far end out: the whole of what recording a crossing does to
@@ -351,6 +377,113 @@ impl Mapper {
         true
     }
 
+    /// Give a passage the player walked WITHOUT naming a direction the direction the game itself
+    /// accepted for it (SQ-1771): `climb tree` filed `Forest Path --?--> Up a Tree`, and a shadow
+    /// has since found that `up` reaches the same room. See `app::relocation_probe`.
+    ///
+    /// The `?` stub the unlabelled crossing left is replaced, not joined: minting the directional
+    /// edge makes it redundant (`collapse_unknown_edges`). When the stub was the ONLY thing that
+    /// placed `to` -- the room was first seen this turn -- its cell is cleared first, so the room
+    /// is laid out where `dir` says rather than wherever a `?` stub happened to drop it. A room
+    /// that other passages already pin keeps its cell.
+    ///
+    /// Everything about the PLAYER is recorded as a walked `dir` would have recorded it
+    /// ([`Mapper::arrived_via`], when they are still standing in `to`), except the one thing they
+    /// did not do: `dir` is not marked tried. Returns false, changing nothing, when no `?`
+    /// passage `from` -> `to` exists to upgrade (a stale answer: the map moved on, or was
+    /// rewound), or when a passage already leaves `from` that way.
+    pub fn upgrade_unlabelled_passage(&mut self, passage: ProbedPassage) -> bool {
+        let ProbedPassage { from, dir, to } = passage;
+        let is_stub = |c: &crate::graph::Connection| {
+            c.origin == from && c.dest == to && c.dir == Direction::Unknown
+        };
+        if !self.graph.connections().iter().any(is_stub)
+            || dir == Direction::Unknown
+            || from == to
+            || self.graph.connections().iter().any(|c| c.origin == from && c.dir == dir)
+        {
+            return false;
+        }
+        let pinned_elsewhere = self
+            .graph
+            .connections()
+            .iter()
+            .any(|c| (c.origin == to || c.dest == to) && !is_stub(c));
+        if !pinned_elsewhere {
+            self.graph.clear_pos(to);
+        }
+        let done = self.record_probed_passage(passage);
+        if done && self.graph.current() == Some(to) {
+            self.arrived_via = Some((from, dir));
+        }
+        done
+    }
+
+    /// Replace the `?` passage a chained command line left (`north then east` filed
+    /// `West of House --?--> Behind House`) with the steps a shadow replay actually walked
+    /// (SQ-1772). Rooms the walk passed through that the player never stood in are added; each
+    /// step goes through [`Mapper::mint_passage`], so it is indistinguishable from a walked one.
+    ///
+    /// Stands down, changing nothing and returning false, when the answer is stale: the walk is
+    /// empty, a room it leaves is unknown, or -- for a line that ended in a different room than
+    /// it began -- the `?` passage `origin` -> `dest` is gone (the map moved on, or was rewound).
+    /// A step whose `(from, dir)` already carries a passage is skipped, never overwritten: a real
+    /// traversal is the better authority on its own passage.
+    pub fn replace_unlabelled_with_walk(&mut self, origin: RoomId, dest: RoomId, walk: &[WalkedStep]) -> bool {
+        let stub = |c: &crate::graph::Connection| {
+            c.origin == origin && c.dest == dest && c.dir == Direction::Unknown
+        };
+        let has_stub = self.graph.connections().iter().any(stub);
+        if self.mapping_disabled
+            || walk.is_empty()
+            || self.graph.room(origin).is_none()
+            || (origin != dest && !has_stub)
+        {
+            return false;
+        }
+        if has_stub {
+            let pinned_elsewhere = self
+                .graph
+                .connections()
+                .iter()
+                .any(|c| (c.origin == dest || c.dest == dest) && !stub(c));
+            self.graph.remove_unlabelled(origin, dest);
+            if !pinned_elsewhere {
+                self.graph.clear_pos(dest);
+            }
+        }
+        let mut changed = false;
+        for step in walk {
+            if step.from == step.to || self.graph.room(step.from).is_none() {
+                continue;
+            }
+            let taken = self
+                .graph
+                .connections()
+                .iter()
+                .any(|c| c.origin == step.from && c.dir == step.dir && (step.dir != Direction::Unknown || c.dest == step.to));
+            if taken {
+                continue;
+            }
+            let new_room = self.graph.room(step.to).is_none();
+            if new_room {
+                self.graph.upsert_room(step.to, step.to_name.clone());
+            }
+            self.mint_passage(step.from, step.dir, step.to);
+            if new_room {
+                self.resolve_scan_landings(step.to);
+            }
+            changed = true;
+        }
+        mark_distorted(&mut self.graph, &BTreeSet::new());
+        if let Some(last) = walk.last() {
+            if changed && last.dir != Direction::Unknown && self.graph.current() == Some(last.to) {
+                self.arrived_via = Some((last.from, last.dir));
+            }
+        }
+        changed
+    }
+
     /// The passage the player last walked to reach the current room — `(room left,
     /// direction taken)` — if it was reached by a walked passage at all. See
     /// [`Mapper::arrived_via`].
@@ -387,6 +520,7 @@ impl Mapper {
         // judge either: there is no crossing here to be on either side of.
         self.arrived_via = None;
         self.pending_suggestion = None;
+        let newly_seen = self.graph.room(location).is_none();
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
         if self.graph.room(location).and_then(|r| r.pos).is_none() {
@@ -403,6 +537,9 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
+        if newly_seen {
+            self.resolve_scan_landings(location);
+        }
         mark_distorted(&mut self.graph, &BTreeSet::new());
     }
 
@@ -873,6 +1010,28 @@ mod untried_tests {
 mod probed_passage_tests {
     use super::*;
 
+    /// SQ-1772: `north then east` filed a `?` stub West -> Behind; the replay walked West -N->
+    /// North -E-> Behind, through a room the player never stood in.
+    #[test]
+    fn a_replayed_walk_replaces_the_stub_and_adds_the_room_passed_through() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(3, "Behind House", None); // a chained line: no direction, a `?` stub
+        assert!(m.graph.connections().iter().any(|c| c.dir == Direction::Unknown));
+        let walk = [
+            WalkedStep { from: 1, dir: Direction::N, to: 2, to_name: "North of House".into() },
+            WalkedStep { from: 2, dir: Direction::E, to: 3, to_name: "Behind House".into() },
+        ];
+        assert!(m.replace_unlabelled_with_walk(1, 3, &walk));
+        let c: Vec<_> = m.graph.connections().iter().map(|c| (c.origin, c.dir, c.dest)).collect();
+        assert_eq!(c, [(1, Direction::N, 2), (2, Direction::E, 3)], "{c:?}");
+        assert_eq!(m.graph.room(2).map(|r| r.label().to_string()).as_deref(), Some("North of House"));
+        assert_eq!(m.graph.current(), Some(3));
+        assert_eq!(m.arrived_via(), Some((2, Direction::E)));
+        // A second, stale delivery finds no stub and changes nothing.
+        assert!(!m.replace_unlabelled_with_walk(1, 3, &walk));
+    }
+
     /// Behind House, `enter window`, Kitchen — then the shadow finds that EAST comes back.
     ///
     /// The map gains `Kitchen --E--> Behind House` and nothing else: the outbound passage keeps
@@ -956,6 +1115,39 @@ mod probed_passage_tests {
         assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 404 }));
         assert!(!m.record_probed_passage(ProbedPassage { from: 404, dir: Direction::S, to: 1 }));
         assert_eq!(m.graph.connections().len(), 1, "still only the walked edge");
+    }
+
+    /// SQ-1771: `climb tree` mints a `?` stub and drops the new room on the nearest free cell;
+    /// once a shadow has found that `up` is the game's word for it, the stub becomes `Up`, the
+    /// room moves to the cell above, and the player's arrival is recorded as if they had typed it.
+    #[test]
+    fn an_unlabelled_passage_takes_the_direction_the_game_accepted() {
+        let mut m = Mapper::default();
+        m.observe(1, "Path", None);
+        m.observe(2, "Tree", None); // climb tree: no direction named
+        assert!(m.graph.connections().iter().any(|c| c.dir == Direction::Unknown));
+        let first_cell = m.graph.room(2).unwrap().pos;
+        assert!(m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }));
+        let conns = m.graph.connections();
+        assert_eq!(conns.len(), 1, "the stub was replaced, not joined: {conns:?}");
+        assert_eq!((conns[0].origin, conns[0].dir, conns[0].dest), (1, Direction::Up, 2));
+        let (a, b) = (m.graph.room(1).unwrap().pos.unwrap(), m.graph.room(2).unwrap().pos.unwrap());
+        assert_eq!(b, (a.0, a.1 - 1), "Up lays out one cell above (was {first_cell:?})");
+        assert_eq!(m.arrived_via(), Some((1, Direction::Up)));
+        assert!(!m.graph.room(1).unwrap().tried.contains(&Direction::Up), "the player never typed it");
+    }
+
+    /// The answer may arrive after the map has moved on: with no stub left to upgrade it is a
+    /// no-op, and a direction already leaving the room is not overwritten.
+    #[test]
+    fn an_unlabelled_upgrade_stands_down_when_the_map_moved_on() {
+        let mut m = Mapper::default();
+        m.observe(1, "Path", None);
+        m.observe(2, "Tree", None);
+        m.observe(1, "Path", Some(Direction::Down));
+        assert!(!m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 3 }));
+        assert!(m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }));
+        assert!(!m.upgrade_unlabelled_passage(ProbedPassage { from: 1, dir: Direction::Up, to: 2 }), "stub is gone");
     }
 
     /// After the fact there is no such thing as a probed passage, only a passage — so it must

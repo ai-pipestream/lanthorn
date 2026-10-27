@@ -805,7 +805,7 @@ impl<'a> PickerHeading<'a> {
                 let es = if n == 1 { "" } else { "es" };
                 let progress = if f.done { String::new() } else { format!(" · indexing, {} so far", f.indexed) };
                 format!(
-                    " lanthorn — find a story  ({n} match{es} for “{}” in {}{progress})",
+                    " lanthorn — find a game  ({n} match{es} for “{}” in {}{progress})",
                     f.query,
                     self.root.display()
                 )
@@ -814,7 +814,7 @@ impl<'a> PickerHeading<'a> {
                 let status = self.all_folders.expect("checked");
                 let progress = if status.done { String::new() } else { format!(" · indexing, {} so far", status.indexed) };
                 format!(
-                    " lanthorn — choose a story  ({} in {} and its folders{progress})",
+                    " lanthorn — choose a game  ({} in {} and its folders{progress})",
                     stories.len(),
                     self.dir.display()
                 )
@@ -827,7 +827,7 @@ impl<'a> PickerHeading<'a> {
                     1 => ", 1 folder".to_string(),
                     k => format!(", {k} folders"),
                 };
-                format!(" lanthorn — choose a story  ({n} found{f} in {})", self.dir.display())
+                format!(" lanthorn — choose a game  ({n} found{f} in {})", self.dir.display())
             }
         }
     }
@@ -888,6 +888,32 @@ fn draw_folder_panel(
     draw_str_clipped(buf, x, area.y + 4, &where_, story_info_value, inner);
     draw_str_clipped(buf, x, area.y + 6, "Enter opens it; Backspace goes up.", story_info_value, inner);
     0
+}
+
+/// Whether a fetch result means its row must be re-read from disk, tracking the
+/// game folders this run has written into (SQ-1769).
+///
+/// A Fetched/NotFound result rewrote its folder's sidecar, so it is re-read and
+/// its folder `key` is remembered. A Skipped one wrote nothing, but if an
+/// earlier result in the run already wrote the folder it shares (one release
+/// as a `.z3` and as an Amiga `.adf`), its row is stale too. Failed writes
+/// nothing.
+fn reread_after_fetch(
+    outcome: &app::fetch_worker::Outcome,
+    key: Option<&str>,
+    touched: &mut std::collections::HashSet<String>,
+) -> bool {
+    use app::fetch_worker::Outcome;
+    match outcome {
+        Outcome::Fetched | Outcome::NotFound | Outcome::Linked => {
+            if let Some(k) = key {
+                touched.insert(k.to_string());
+            }
+            true
+        }
+        Outcome::Skipped => key.is_some_and(|k| touched.contains(k)),
+        Outcome::Failed(_) => false,
+    }
 }
 
 /// Reorder `stories` by `sort`, keeping the selection on the same story (by
@@ -1312,6 +1338,7 @@ pub(crate) fn run_story_picker(
     cfg: &app::config::Config,
     roots: &app::data_roots::DataRoots,
     restore: Option<&PickerPosition>,
+    term: &app::term_colors::TermDefaultColors,
 ) -> Option<PickedStory> {
     // The library root, and the folder currently listed. They part company the
     // moment the user descends into a sub-folder (Enter on a folder row) and
@@ -1320,16 +1347,16 @@ pub(crate) fn run_story_picker(
     let (mut dir, mut stories, restored_idx) =
         resolve_picker_position(&source, &root, roots, restore);
     if stories.is_empty() {
-        eprintln!("lanthorn: no Z-machine story files found in '{}'", dir.display());
+        eprintln!("lanthorn: no Z-machine game files found in '{}'", dir.display());
         std::process::exit(1);
     }
 
     // Resolve themed colors the same way the game does, so the picker matches.
-    let (base, _w1) = app::style::load_style_for(cfg);
     // No story is booted here, so no machine names a colour table: the picker
-    // resolves standard colour numbers through §8.3.1's own (SQ-1393).
-    let (cs, _set, _w2) =
-        app::style::resolve(&base, &cfg.user_dir, zvm::screen::Palette::Standard);
+    // resolves standard colour numbers through §8.3.1's own (SQ-1393). The theme
+    // is the game's own, from the same files and the terminal probe taken at
+    // launch, so the list follows style.toml (SQ-1781).
+    let (cs, base) = app::reload::pre_game_colors(cfg, term);
 
     // Row badges: each story's per-game dir under `roots` + one shared hint
     // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
@@ -1443,6 +1470,10 @@ pub(crate) fn run_story_picker(
     // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
     let mut fetch_is_single = false;
     let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
+    // Stories linked to an IFDB record already held, with no request (SQ-1786).
+    let mut sweep_linked = 0u32;
+    // Game-folder keys a fetch wrote into (SQ-1769); see `reread_after_fetch`.
+    let mut fetch_touched_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Manual IFDB-page entry (SQ-0371): `Some` while the user is typing an IFDB
     // URL/id for the selected story; keystrokes route to the field, Enter
     // submits a fetch-by-id, Esc cancels.
@@ -1490,11 +1521,17 @@ pub(crate) fn run_story_picker(
     // One gate for this picker's two IFDB workers (search + documents), so a
     // request from a chooser just closed finishes before the next starts.
     let ifdb_gate = app::ifdb_search::IfdbGate::default();
-    let search_worker = app::ifdb_search::SearchWorker::new(
+    // The finished index is handed to the search worker through this (SQ-1757),
+    // so a chooser's "already in your library" check never re-hashes the library.
+    let shared_index: app::library_match::LibraryIndex = Default::default();
+    let search_worker = app::ifdb_search::SearchWorker::with_library_index(
         ifdb_gate.clone(),
         Box::new(app::ifdb_search::IfdbSearchClient::new()),
         Box::new(app::ifdb::IfdbClient::new()),
         roots.clone(),
+        // A disk set is one release, not a tree: nothing to walk (SQ-1755).
+        index_rx.as_ref().map(|_| root.clone()),
+        std::sync::Arc::clone(&shared_index),
     );
     let mut search_modal: Option<app::ifdb_search_modal::SearchModal> = None;
     let mut search_area = Rect::new(0, 0, 0, 0);
@@ -1677,7 +1714,7 @@ pub(crate) fn run_story_picker(
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
             } else if let Some(field) = &url_prompt {
                 let prompt = format!(
-                    "Story URL (Enter to download, Esc to cancel): {}\u{258f}",
+                    "Game URL (Enter to download, Esc to cancel): {}\u{258f}",
                     field.as_str()
                 );
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
@@ -1902,6 +1939,9 @@ pub(crate) fn run_story_picker(
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             index_done = true;
+                            if let Ok(mut slot) = shared_index.lock() {
+                                *slot = Some(std::sync::Arc::new(index.clone()));
+                            }
                             break;
                         }
                     }
@@ -1922,15 +1962,19 @@ pub(crate) fn run_story_picker(
             match &p.outcome {
                 app::fetch_worker::Outcome::Fetched => sweep_fetched += 1,
                 app::fetch_worker::Outcome::Skipped => sweep_skipped += 1,
+                app::fetch_worker::Outcome::Linked => sweep_linked += 1,
                 app::fetch_worker::Outcome::NotFound => sweep_not_found += 1,
                 app::fetch_worker::Outcome::Failed(_) => sweep_failed += 1,
             }
-            // Only Fetched/NotFound actually (re)write the sidecar (a Skipped
-            // story's cache was already current; a Failed story's write is
-            // withheld so a later `r` retries it) — no point re-reading disk
-            // for the other two.
-            let rewrote_sidecar =
-                matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::NotFound);
+            // Fetched/NotFound (re)write the sidecar; a Failed story's write is
+            // withheld so a later `r` retries it. A Skipped story wrote nothing
+            // itself, but its game folder may be one a Fetched sibling in this
+            // run just filled (the same release as a `.z3` and as an `.adf`
+            // keys one folder), so it is re-read exactly when that folder was
+            // touched (SQ-1769) — not for every Skipped row, which on a
+            // fully-fetched library would re-read every story file.
+            let row_key = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(|e| e.story_key());
+            let rewrote_sidecar = reread_after_fetch(&p.outcome, row_key.as_deref(), &mut fetch_touched_keys);
             if rewrote_sidecar {
                 // By ROW, not by path: a compilation contributes several rows
                 // that share one path, and only the disk entry says which of
@@ -1942,10 +1986,10 @@ pub(crate) fn run_story_picker(
                         *slot = fresh;
                     }
                 }
-                // A fetch may have just written a cover.png; drop any cached
+                // A fetch may have just written a cover; drop any cached
                 // "coverless" decode so the panel re-reads and shows it now,
                 // rather than only after the picker is reopened.
-                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched) {
+                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::Linked) {
                     if let Some(key) = stories
                         .iter()
                         .find(|e| e.is(&p.path, disk_entry))
@@ -1956,10 +2000,27 @@ pub(crate) fn run_story_picker(
                     }
                 }
             }
+            // A one-story fetch landed an entry in the shared store: link the
+            // other copies it lists, with no request (SQ-1787). The same call
+            // an embedding host makes.
+            if fetch_is_single {
+                if let Some(done) = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(app::fetch_worker::FetchTarget::row) {
+                    let all: Vec<app::fetch_worker::FetchTarget> =
+                        stories.iter().filter(|e| !e.is_folder()).map(app::fetch_worker::FetchTarget::row).collect();
+                    for t in app::fetch_worker::link_listed_copies_after(roots, &all, &done, &p.outcome) {
+                        if let Some(fresh) = app::picker::resolve_entry_from(&t.path, t.disk_entry.as_deref(), roots) {
+                            if let Some(slot) = stories.iter_mut().find(|e| e.is(&t.path, t.disk_entry.as_deref())) {
+                                *slot = fresh;
+                            }
+                        }
+                    }
+                }
+            }
             progress_line = Some(if fetch_is_single {
                 match &p.outcome {
                     app::fetch_worker::Outcome::Fetched => format!("Fetched {}", p.title),
                     app::fetch_worker::Outcome::Skipped => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::Linked => format!("Linked {}", p.title),
                     app::fetch_worker::Outcome::NotFound => format!("No IFDB record for {}", p.title),
                     app::fetch_worker::Outcome::Failed(reason) => format!("Fetch failed: {reason}"),
                 }
@@ -1970,6 +2031,9 @@ pub(crate) fn run_story_picker(
                     "Fetched {}, skipped {}, not found {}",
                     sweep_fetched, sweep_skipped, sweep_not_found
                 );
+                if sweep_linked > 0 {
+                    msg.push_str(&format!(", linked {sweep_linked} without asking"));
+                }
                 if sweep_failed > 0 {
                     msg.push_str(&format!(", failed {sweep_failed}"));
                 }
@@ -2432,6 +2496,7 @@ pub(crate) fn run_story_picker(
                                         fetch_is_single = true;
                                         sweep_fetched = 0;
                                         sweep_skipped = 0;
+                                        sweep_linked = 0;
                                         sweep_not_found = 0;
                                         sweep_failed = 0;
                                         progress_line = Some(format!("Fetching {} from IFDB…", entry.title));
@@ -3026,6 +3091,7 @@ pub(crate) fn run_story_picker(
                     fetch_is_single = true;
                     sweep_fetched = 0;
                     sweep_skipped = 0;
+                    sweep_linked = 0;
                     sweep_not_found = 0;
                     sweep_failed = 0;
                     progress_line = Some(format!("Fetching {}…", entry.title));
@@ -3056,6 +3122,7 @@ pub(crate) fn run_story_picker(
                     fetch_is_single = false;
                     sweep_fetched = 0;
                     sweep_skipped = 0;
+                    sweep_linked = 0;
                     sweep_not_found = 0;
                     sweep_failed = 0;
                     progress_line = Some(format!("Fetching 0/{total}"));
@@ -3112,6 +3179,7 @@ pub(crate) fn run_story_picker(
                 // already holds (SQ-0597) — the same `dir` every
                 // download lands in, below.
                 sm.set_download_dir(&dir);
+                sm.set_library_root(&root);
                 let seed_action = sm.open();
                 search_modal = Some(sm);
                 dispatch_search_action(seed_action, &search_worker, &dir, &mut search_modal);
@@ -3917,7 +3985,7 @@ fn draw_info_panel(
     // release and serial that do, it invited exactly that misreading.
     let mut size_line = human_size(meta.size_bytes);
     if meta.story_bytes > 0 && meta.story_bytes != meta.size_bytes {
-        size_line.push_str(&format!(" · story {}", human_size(meta.story_bytes)));
+        size_line.push_str(&format!(" · game {}", human_size(meta.story_bytes)));
     }
     lines.push((size_line, story_info_value));
     // format + version · release.
@@ -4088,7 +4156,7 @@ fn draw_info_panel(
     {
         lines.push((String::new(), story_info_value));
         lines.push((
-            format!("Artwork · {} detected for this story", a.art_candidates.len()),
+            format!("Artwork · {} detected for this game", a.art_candidates.len()),
             story_info_label,
         ));
         for c in &a.art_candidates {
@@ -4829,7 +4897,7 @@ fn ifdb_download_landing(
         Some(idx) => (idx, format!("Downloaded {name}")),
         None => (
             previous.unwrap_or(0).min(len.saturating_sub(1)),
-            format!("Downloaded {name}, but it did not scan as a playable story"),
+            format!("Downloaded {name}, but it did not scan as a playable game"),
         ),
     }
 }
@@ -5654,6 +5722,52 @@ mod tests {
         assert_ne!(no_metadata_fg, author_fg, "sanity: the two styles must actually differ");
     }
 
+    /// SQ-1781: the story list is drawn from the colours `pre_game_colors` gives
+    /// it, and those must follow the player's style.toml `[roles]`/`[elements]`
+    /// like the game does — they used to be the registry defaults whatever the
+    /// file said.
+    #[test]
+    fn story_list_follows_style_toml_theme() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+        let dir = app::scratch_dir("picker-style-theme");
+        let path = dir.join("style.toml");
+        std::fs::write(
+            &path,
+            "[roles]\naccent = { fg = \"#112233\" }\n[elements]\nstory_author = { fg = \"#445566\" }\n",
+        )
+        .unwrap();
+        let mut cfg = app::config::Config::default();
+        cfg.user_dir = dir.clone();
+        cfg.style = Some(path.to_string_lossy().to_string());
+
+        let (cs, base) = app::reload::pre_game_colors(&cfg, &Default::default());
+        assert_eq!(cs.theme.get("accent").style.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(cs.theme.get("story_author").style.fg, Some(Color::Rgb(0x44, 0x55, 0x66)));
+
+        let sym = app::style::finalize_symbols(&base.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Zork", Some("Marc Blank"), Some("1980")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(2);
+        let area = Rect::new(0, 0, 74, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
+        );
+        // Row 1 is unselected (row 0 holds the selection): its author column is
+        // drawn in the file's story_author colour.
+        let row1 = row_text(&buf, 3, area);
+        let x = char_pos(&row1, "Marc Blank") as u16;
+        let cell = buf.cell((area.left() + x, 3)).unwrap();
+        assert_eq!(cell.fg, Color::Rgb(0x44, 0x55, 0x66), "row: {row1:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn columns_drop_year_then_author_as_width_narrows() {
         use ratatui::{buffer::Buffer, layout::Rect};
@@ -6334,7 +6448,7 @@ mod tests {
         assert!(flat.contains(&expected), "file line must render whole:\n  want {expected:?}\n  got  {flat:?}");
         // …and the sizes, on the line below it, are whole too.
         let sizes = norm(&format!(
-            "{} · story {}",
+            "{} · game {}",
             super::human_size(meta.size_bytes),
             super::human_size(meta.story_bytes),
         ));
@@ -6934,7 +7048,7 @@ mod tests {
         adf.disk_image = Some(app::hints::DiskImage::Adf);
         let text = render(&adf, "Zork I - The Great Underground Empire.adf");
         assert!(text.contains("880 KB"), "the container's own size stays: {text:?}");
-        assert!(text.contains("story 91 KB"), "the mounted story's size is named: {text:?}");
+        assert!(text.contains("game 91 KB"), "the mounted story's size is named: {text:?}");
 
         // A plain story file: one size, no second segment.
         let mut bare = minimal_story_meta();
@@ -6942,7 +7056,7 @@ mod tests {
         bare.story_bytes = 93_766;
         let text = render(&bare, "zork1.z3");
         assert!(text.contains("91 KB"), "the size still renders: {text:?}");
-        assert!(!text.contains("story 91 KB"), "no redundant second size: {text:?}");
+        assert!(!text.contains("game 91 KB"), "no redundant second size: {text:?}");
     }
 
     // ── SQ-0348: author/year/genre + blurb ──────────────────────────────────────
@@ -8177,6 +8291,79 @@ mod tests {
         assert_eq!(new_idx, 0, "the new title now sorts first");
         assert!(stories[new_idx].path.ends_with("zork2.z5"), "selection followed its story, not its old index");
         assert_eq!(stories[new_idx].title, "AAA Brand New Title");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// SQ-1769: two rows that key ONE game folder (the same catalogued release
+    /// as two loose files, standing in for a `.z3` and an `.adf`). The second
+    /// fetch result is `Skipped` because the first just wrote the folder, and
+    /// the handler used to re-read only Fetched/NotFound rows, so the second
+    /// row kept its stem title until the picker was reloaded.
+    #[test]
+    fn a_skipped_row_sharing_a_fetched_rows_folder_is_reread() {
+        let stories_dir = temp_dir("shared-folder");
+        // Zork I r88 / 840726: catalogued, so a loose copy keys on its build and
+        // both files name the same folder.
+        let mut zork = minimal_v3_story();
+        zork[0x02..0x04].copy_from_slice(&88u16.to_be_bytes());
+        zork[0x12..0x18].copy_from_slice(b"840726");
+        std::fs::write(stories_dir.join("a-zork.z3"), &zork).unwrap();
+        std::fs::write(stories_dir.join("b-zork-copy.z3"), &zork).unwrap();
+        let data_base = temp_dir("shared-folder-data");
+        let roots = app::data_roots::DataRoots::single(&data_base);
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &roots);
+        assert_eq!(stories.len(), 2);
+        assert_eq!(stories[0].story_key(), stories[1].story_key(), "premise: one shared folder");
+        let ifid = stories[0].meta.ifid.clone();
+        assert_eq!(ifid, stories[1].meta.ifid);
+
+        let mut title_by_ifid = std::collections::HashMap::new();
+        title_by_ifid.insert(ifid, "Shared Fetched Title".to_string());
+        let fetcher = app::fetch_worker::Fetcher::new(
+            Box::new(FakeSource { title_by_ifid }),
+            roots.clone(),
+            std::time::Duration::ZERO,
+        );
+        let order: Vec<app::fetch_worker::FetchTarget> =
+            stories.iter().map(app::fetch_worker::FetchTarget::row).collect();
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+        let mut progress = Vec::new();
+        for _ in 0..2000 {
+            progress.extend(fetcher.drain());
+            if progress.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(progress.len(), 2);
+        assert!(
+            progress.iter().any(|p| matches!(p.outcome, app::fetch_worker::Outcome::Skipped)),
+            "premise: the second row is Skipped"
+        );
+
+        // The picker loop's per-result handling.
+        let mut touched = std::collections::HashSet::new();
+        for p in &progress {
+            let key = stories.iter().find(|e| e.is(&p.path, p.disk_entry.as_deref())).map(|e| e.story_key());
+            if super::reread_after_fetch(&p.outcome, key.as_deref(), &mut touched) {
+                if let Some(fresh) = app::picker::resolve_entry_from(&p.path, p.disk_entry.as_deref(), &roots) {
+                    if let Some(slot) = stories.iter_mut().find(|e| e.is(&p.path, p.disk_entry.as_deref())) {
+                        *slot = fresh;
+                    }
+                }
+            }
+        }
+        for e in &stories {
+            assert_eq!(e.title, "Shared Fetched Title", "{} stayed unlinked", e.path.display());
+        }
+
+        // A Skipped row whose folder nothing in this run touched is NOT re-read.
+        let mut none = std::collections::HashSet::new();
+        assert!(!super::reread_after_fetch(&app::fetch_worker::Outcome::Skipped, Some("k"), &mut none));
+        assert!(!super::reread_after_fetch(&app::fetch_worker::Outcome::Failed("x".into()), Some("k"), &mut none));
 
         let _ = std::fs::remove_dir_all(&stories_dir);
         let _ = std::fs::remove_dir_all(&data_base);

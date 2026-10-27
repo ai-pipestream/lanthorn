@@ -79,7 +79,7 @@ pub struct HintDownloader {
     fetcher: Fetcher,
 }
 
-/// How a URL becomes bytes. The default is [`fetch_bytes`] (ureq); a host, or a
+/// How a URL becomes bytes. The default is [`fetch_bytes_with`] (ureq); a host, or a
 /// test, supplies its own through [`HintDownloader::with_fetcher`].
 pub type Fetcher = std::sync::Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
 
@@ -100,7 +100,12 @@ impl Default for HintDownloader {
 
 impl HintDownloader {
     pub fn new() -> Self {
-        Self::with_fetcher(std::sync::Arc::new(|url: &str| fetch_bytes(url)))
+        Self::with_policy(crate::fetch_policy::FetchPolicy::current())
+    }
+
+    /// A downloader that connects only where `policy` allows (SQ-1738).
+    pub fn with_policy(policy: crate::fetch_policy::FetchPolicy) -> Self {
+        Self::with_fetcher(std::sync::Arc::new(move |url: &str| fetch_bytes_with(url, policy)))
     }
 
     /// A downloader that gets its bytes from `fetcher` instead of the network, so
@@ -154,12 +159,9 @@ impl HintDownloader {
 
 /// GET `url` and return its body bytes. ureq follows the Internet Archive's
 /// 302 redirect to the nearest capture automatically.
-fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .user_agent(user_agent())
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+fn fetch_bytes_with(url: &str, policy: crate::fetch_policy::FetchPolicy) -> Result<Vec<u8>, String> {
+    let builder = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).user_agent(user_agent());
+    let agent = crate::fetch_policy::agent(builder, policy);
     let mut resp = agent.get(url).call().map_err(|e| e.to_string())?;
     resp.body_mut()
         .with_config()
@@ -180,7 +182,7 @@ fn finalize_into(bytes: &[u8], dest: HintDest, url: &str, title: &str) -> (HintD
         HintDest::Documents { dir, filename } => {
             let planned = dir.join(&filename);
             if !looks_like_zmachine(bytes) {
-                return (HintDlOutcome::Failed("downloaded file is not a Z-machine story".to_string()), planned);
+                return (HintDlOutcome::Failed("downloaded file is not a Z-machine game".to_string()), planned);
             }
             let stage = std::env::temp_dir().join(format!(
                 "lanthorn-hint-{}-{}",
@@ -215,7 +217,7 @@ fn finalize_into(bytes: &[u8], dest: HintDest, url: &str, title: &str) -> (HintD
 /// truncated file that the next scan would treat as the hint sidecar.
 fn finalize_download(bytes: &[u8], dest: &Path) -> HintDlOutcome {
     if !looks_like_zmachine(bytes) {
-        return HintDlOutcome::Failed("downloaded file is not a Z-machine story".to_string());
+        return HintDlOutcome::Failed("downloaded file is not a Z-machine game".to_string());
     }
     if dest.exists() {
         return HintDlOutcome::Failed(format!("{} already exists", dest.display()));
@@ -277,6 +279,15 @@ fn user_agent() -> String {
 #[cfg(all(test, feature = "t-guidance"))]
 mod tests {
     use super::*;
+
+    /// SQ-1738: a `PublicOnly` downloader refuses a loopback URL at the resolver.
+    #[test]
+    fn with_policy_public_only_refuses_a_loopback_url() {
+        let err = fetch_bytes_with("http://127.0.0.1:9/hints.z5", crate::fetch_policy::FetchPolicy::PublicOnly)
+            .expect_err("loopback must be refused");
+        assert!(err.contains("fetch policy"), "got {err:?}");
+        let _ = HintDownloader::with_policy(crate::fetch_policy::FetchPolicy::PublicOnly);
+    }
 
     /// A minimal-but-coherent v5 header: high/static memory bases inside the
     /// file, declared length (0x1A, ×4 for v5) matching the 64 bytes.

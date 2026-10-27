@@ -199,7 +199,7 @@ pub fn host_default_colours(
 /// Applies ONLY when the scheme is the unconfigured all-`Reset` one: a real
 /// configured scheme (built-in name or file) is the user's explicit choice and
 /// is never second-guessed. The palette is left untouched, so `from_scheme`'s
-/// per-slot fallback still supplies the cyan/blue/yellow/grey accents.
+/// per-slot fallback still supplies the cyan/yellow/grey accents.
 ///
 /// A PARTIAL probe answer (fg without bg, or bg without fg) is skipped whole
 /// rather than mixed, matching the house rule [`host_default_colour_pair`]
@@ -509,6 +509,45 @@ pub struct ColorScheme {
     /// which is `terminal_default()`, `from_ghostty`, and every `AppState::default`.
     pub machine_palette: zvm::screen::Palette,
 }
+
+/// The sRGB triple behind a colour we can know without asking the terminal: a
+/// literal RGB, or the two named colours whose value no theme moves. Anything the
+/// terminal's palette decides (the other named colours, indexed, `Reset`) is `None`.
+pub(crate) fn known_rgb(c: Color) -> Option<(u8, u8, u8)> {
+    match c {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Black => Some((0, 0, 0)),
+        Color::White => Some((255, 255, 255)),
+        _ => None,
+    }
+}
+
+/// WCAG 2.x contrast ratio (1.0..=21.0) between two colours, or `None` when
+/// either cannot be resolved to RGB without the terminal's palette. Callers treat
+/// `None` as "cannot judge, so do not override" (SQ-1758: a typed command drawn
+/// over a game-coloured prompt line falls back to the game's own ink only when the
+/// theme's input colour is provably hard to read there).
+pub fn contrast_ratio(a: Color, b: Color) -> Option<f64> {
+    Some(contrast_ratio_rgb(known_rgb(a)?, known_rgb(b)?))
+}
+
+/// [`contrast_ratio`] on two known sRGB triples (the renderer-neutral form).
+pub fn contrast_ratio_rgb(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+        let lin = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The smallest [`contrast_ratio`] at which a typed command is left in its chosen
+/// colour (WCAG's floor for large text and UI components).
+pub const MIN_INPUT_CONTRAST: f64 = 3.0;
 
 /// Build the seed `glk_styles` array (SQ-0331): buffer Input(8) ← `input_text`,
 /// buffer Subheader(4) ← `transcript_location`; every other slot inherits its
@@ -862,9 +901,10 @@ fn builtin_scheme_text(name: &str) -> Option<&'static str> {
 
 /// Expand `~` in a path string and resolve relative paths against `base_dir`.
 pub fn expand_path(s: &str, base_dir: &Path) -> std::path::PathBuf {
-    let expanded = if s.starts_with('~') {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home).join(s.trim_start_matches("~/").trim_start_matches('~'))
+    // With no home directory `~` is left as written: it names nothing, and it
+    // must not quietly become the working directory (SQ-1721).
+    let expanded = if let (true, Some(home)) = (s.starts_with('~'), crate::user_dirs::home_dir()) {
+        home.join(s.trim_start_matches('~').trim_start_matches(['/', '\\']))
     } else {
         std::path::PathBuf::from(s)
     };
@@ -1014,6 +1054,33 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 mod tests {
     use super::*;
 
+    /// SQ-1721: `~` is the one home directory helper's answer; with no home it is
+    /// left as written rather than turning into the working directory.
+    #[test]
+    fn tilde_expands_through_the_home_helper_and_never_to_dot() {
+        let base = Path::new("/base");
+        match crate::user_dirs::home_dir() {
+            Some(home) => {
+                assert_eq!(expand_path("~/x/y", base), home.join("x").join("y"));
+                assert_eq!(expand_path("~", base), home);
+            }
+            None => assert_eq!(expand_path("~/x", base), base.join("~/x")),
+        }
+        assert_eq!(expand_path("/abs/p", base), Path::new("/abs/p"));
+        assert_eq!(expand_path("rel/p", base), base.join("rel/p"));
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag_extremes_and_declines_unknown_colours() {
+        let bw = contrast_ratio(Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)).unwrap();
+        assert!((bw - 21.0).abs() < 1e-9, "black on white is 21:1, got {bw}");
+        assert_eq!(contrast_ratio(Color::Black, Color::White), Some(bw), "named black/white resolve");
+        let same = contrast_ratio(Color::Rgb(9, 9, 9), Color::Rgb(9, 9, 9)).unwrap();
+        assert!((same - 1.0).abs() < 1e-9);
+        assert_eq!(contrast_ratio(Color::Blue, Color::White), None, "a palette-dependent colour cannot be judged");
+        assert_eq!(contrast_ratio(Color::Reset, Color::White), None);
+    }
+
     #[test]
     fn seed_glk_styles_copies_input_and_subheader_leaves_rest_none() {
         let styles = seed_glk_styles(
@@ -1091,12 +1158,12 @@ mod tests {
         // ride the theme (registry defaults per docs/design/2026-07-14-styling-
         // role-redesign.md §2's element table).
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Blue));
+        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Cyan));
         assert_eq!(cs.theme.get("transcript_meta").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("transcript_warning").style.fg, Some(Color::Yellow));
         // transcript_location = accent (no bold) — a deliberate SQ-0309 redesign
         // change from the old bold-only-white location header.
-        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Blue));
+        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Cyan));
         assert!(!cs.theme.get("transcript_location").style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(cs.theme.get("transcript_system").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("warning_marker").style.fg, Some(Color::Yellow));
@@ -1124,7 +1191,7 @@ mod tests {
         // 2. Built-in location: line equals room name → transcript_location's
         // accent colour patched over the base (SQ-0309: accent, not bold).
         let loc = cs.resolve_story_style(base, "West of House", Some("West of House"), false);
-        assert_eq!(loc.fg, Some(Color::Blue));
+        assert_eq!(loc.fg, Some(Color::Cyan));
         assert!(!loc.add_modifier.contains(Modifier::BOLD));
 
         // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
@@ -1549,7 +1616,7 @@ unknown-key = ignored
         assert_eq!(seeded.foreground, Color::Rgb(0xc5, 0xc8, 0xc6));
         assert_eq!(seeded.background, Color::Rgb(0xfd, 0xf6, 0xe3));
         // The palette is deliberately untouched: `from_scheme`'s per-slot
-        // fallback still supplies the cyan/blue/yellow/grey accents (SQ-0642).
+        // fallback still supplies the cyan/yellow/grey accents (SQ-0642).
         assert_eq!(seeded.palette, [Color::Reset; 16], "accents keep their per-slot fallback");
     }
 

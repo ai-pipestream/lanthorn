@@ -686,6 +686,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         }
     }
 

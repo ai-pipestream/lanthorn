@@ -97,6 +97,9 @@ pub(crate) struct WrapShape {
     /// The raster wrap breaks by PIXEL (SQ-1009), so the face is a wrap input and
     /// not merely a drawing one.
     pub face: u64,
+    /// The width a width-caching story is told (`AppState::story_told_cols`), which
+    /// decides what the lower window's block shift treats as hand-laid text (SQ-1810).
+    pub told_cols: Option<u16>,
 }
 
 impl WrapShape {
@@ -114,18 +117,11 @@ impl WrapShape {
     /// is the one fact the two paths derive differently — terminal columns
     /// against the native prose box.
     pub(crate) fn of(state: &AppState, width: u16) -> WrapShape {
-        let char_px = state
-            .game_picker
-            .as_ref()
-            .map(|p| {
-                let f = p.font_size();
-                (f.width, f.height)
-            })
-            .unwrap_or((1, 1));
+        let char_px = state.game_imaging().map(|g| g.cell_px).unwrap_or((1, 1));
         WrapShape {
             width,
             filter: state.transcript_filter,
-            images_enabled: state.game_picker.is_some(),
+            images_enabled: state.game_imaging().is_some(),
             char_px,
             clear_anchor: state.top_anchor,
             machine_pair: state.v6_page_pair.get(),
@@ -133,6 +129,7 @@ impl WrapShape {
             period_look: state.period_look,
             hybrid_ring: state.v6_hybrid_ring.get(),
             face: state.v6_text.wrap_fingerprint(),
+            told_cols: state.story_told_cols.get(),
         }
     }
 }
@@ -870,19 +867,19 @@ mod tests {
             let (before_cols, after_cols) = (48u16, 33u16);
 
             let mut live = script_state(honor);
-            live.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            live.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             drive_script(&mut live, before_cols, rows, true);
 
             restore_transcript(&mut live, ARCHIVED);
             // The restore lands on a different pane and a different backend.
-            live.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+            live.set_game_picker(Some(crate::render::graphics::kitty_picker(8, 16)));
             std::hint::black_box(build_main_text(&live, after_cols, rows));
             // PERTURB: the game's next turn prints into the restored screen.
             live.push_transcript_kind("You open the mailbox, revealing a small leaflet.", TranscriptKind::Story);
             std::hint::black_box(build_main_text(&live, after_cols, rows));
 
             let mut fresh = script_state(honor);
-            fresh.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+            fresh.set_game_picker(Some(crate::render::graphics::kitty_picker(8, 16)));
             restore_transcript(&mut fresh, ARCHIVED);
             fresh.push_transcript_kind("You open the mailbox, revealing a small leaflet.", TranscriptKind::Story);
 

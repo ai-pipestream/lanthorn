@@ -7,9 +7,9 @@ what to do when you're playing over SSH and hear nothing at all.
 
 The Z-machine has two sounds built into it — a high bleep and a low one —
 which lanthorn synthesizes for real, no sample needed. Above those, a Blorb's
-`Snd ` resources play as sampled audio (AIFF, Ogg, or ProTracker MOD). Sound resources come from the story file itself if it's a
+`Snd ` resources play as sampled audio (AIFF, Ogg, or ProTracker MOD). Sound resources come from the game file itself if it's a
 Blorb, or from a sibling `.blb`/`.blorb` sitting beside it. On every bleep the
-story pane's border also flashes in a themeable colour — a nice touch when
+game pane's border also flashes in a themeable colour — a nice touch when
 sound is on, and the only cue you get when it's off.
 
 ## Straight off the original floppy

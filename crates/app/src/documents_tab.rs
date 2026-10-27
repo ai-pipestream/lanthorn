@@ -23,8 +23,11 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Rect, Size};
+use ratatui::layout::Rect;
+#[cfg(feature = "terminal")]
+use ratatui::layout::Size;
 use ratatui::style::Style;
+#[cfg(feature = "terminal")]
 use ratatui_image::protocol::Protocol;
 
 use crate::data_roots::DataRoots;
@@ -220,13 +223,16 @@ impl Pager {
 }
 
 /// The area (columns, rows) and cell size (px) a protocol was fitted for.
+#[cfg(feature = "terminal")]
 type FitKey = (u16, u16, u16, u16);
 
 /// An image document: decoded once, its protocol rebuilt only when the area it
 /// is fitted to (or the terminal's cell size) changes.
 pub struct ImageView {
     pub name: String,
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     img: Arc<image::DynamicImage>,
+    #[cfg(feature = "terminal")]
     proto: RefCell<Option<(FitKey, Protocol)>>,
     /// The kitty upload last placed, so closing the view can free it.
     placed: Cell<Option<u32>>,
@@ -297,12 +303,27 @@ pub fn decide_open(entry: &DocEntry) -> OpenDecision {
         DocKind::Image => match read_capped(&entry.path, IMAGE_CAP) {
             Ok((bytes, false)) => match crate::cover::decode(&bytes) {
                 Some(img) => OpenDecision::Image(img),
-                None => OpenDecision::External { note: Some("lanthorn cannot show this image format.".into()) },
+                None => external_if_allowed(entry, "lanthorn cannot show this image format."),
             },
-            Ok((_, true)) => OpenDecision::External { note: Some("This image is too large to show here.".into()) },
+            Ok((_, true)) => external_if_allowed(entry, "This image is too large to show here."),
             Err(e) => OpenDecision::Failed(format!("Could not read {}: {e}", entry.id)),
         },
+        // The system opener only ever gets an allowlisted viewer type (SQ-1730).
+        DocKind::Pdf | DocKind::Other if !crate::documents::opener_allowed(&entry.id) => OpenDecision::Failed(format!(
+            "lanthorn will not open {} outside the app: it is not a document type it trusts. It is at {}",
+            entry.id,
+            entry.path.display()
+        )),
         DocKind::Pdf | DocKind::Other => OpenDecision::External { note: None },
+    }
+}
+
+/// `External` for an allowlisted extension, else a refusal naming the file.
+fn external_if_allowed(entry: &DocEntry, note: &str) -> OpenDecision {
+    if crate::documents::opener_allowed(&entry.id) {
+        OpenDecision::External { note: Some(note.into()) }
+    } else {
+        OpenDecision::Failed(format!("{note} It is at {}", entry.path.display()))
     }
 }
 
@@ -506,6 +527,7 @@ impl DocumentsTab {
                 self.view = DocView::Image(ImageView {
                     name: entry.id.clone(),
                     img: Arc::new(img),
+                    #[cfg(feature = "terminal")]
                     proto: RefCell::new(None),
                     placed: Cell::new(None),
                     last_rect: Cell::new(Rect::default()),
@@ -602,7 +624,9 @@ pub fn answer_spoiler(state: &mut AppState, open: bool) {
 
 /// Close the viewer and free its terminal image.
 pub fn close_viewer(state: &mut AppState) {
-    if let Some(id) = state.documents_tab.close_viewer() {
+    let _placed = state.documents_tab.close_viewer();
+    #[cfg(feature = "terminal")]
+    if let Some(id) = _placed {
         state.graphics_render.borrow_mut().queue_external_deletes([id]);
     }
 }
@@ -610,7 +634,9 @@ pub fn close_viewer(state: &mut AppState) {
 /// Free the image view's terminal upload without closing the view: the Journal
 /// moved to another tab, so nothing re-places it until the tab is back.
 pub fn release_image(state: &mut AppState) {
-    if let Some(id) = state.documents_tab.release_image() {
+    let _placed = state.documents_tab.release_image();
+    #[cfg(feature = "terminal")]
+    if let Some(id) = _placed {
         state.graphics_render.borrow_mut().queue_external_deletes([id]);
     }
 }
@@ -946,10 +972,19 @@ fn draw_pager(p: &Pager, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut D
     }
 }
 
+// Without the `terminal` feature (SQ-1804) there is no image protocol to place the
+// picture with: the title row is all this draws, and a host shows the image itself.
+#[cfg_attr(not(feature = "terminal"), allow(unused_variables))]
 fn draw_image(state: &AppState, v: &ImageView, st: &Styles, area: Rect, buf: &mut Buffer, hits: &mut DocHits) {
     draw_title(&v.name, st, area, buf, hits);
+    #[cfg(feature = "terminal")]
+    draw_image_protocol(state, v, area, buf);
+}
+
+#[cfg(feature = "terminal")]
+fn draw_image_protocol(state: &AppState, v: &ImageView, area: Rect, buf: &mut Buffer) {
     let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
-    let Some(picker) = state.game_picker.as_ref().filter(|_| body.width > 0 && body.height > 0) else {
+    let Some(picker) = state.game_picker().filter(|_| body.width > 0 && body.height > 0) else {
         return;
     };
     let fs = picker.font_size();
@@ -1317,7 +1352,7 @@ mod tests {
         assert_eq!(t.open_entry(0, false, false, &mut |_| {}), OpenOutcome::Opened);
         assert!(matches!(t.view, DocView::Image(_)));
         let mut s = state_with(t);
-        s.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        s.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let _ = render(&s, 40, 12);
         let DocView::Image(v) = &s.documents_tab.view else { panic!("image") };
         let r = v.last_rect.get();
@@ -1522,5 +1557,41 @@ mod tests {
         crate::hints_tab::ensure_started_in(&mut s, &story, "IFID-X", Some(&dir));
         assert_ne!(s.hints_tab.phase, crate::hints_tab::Phase::NotStarted);
         assert_eq!(crate::hints::load_hint_index(&s.config.user_dir).get("IFID-X"), Some(dir.join("zork1inv.z5")));
+    }
+
+    #[test]
+    fn a_text_sol_opens_in_the_pager_and_never_reaches_the_opener() {
+        let (mut tab, dir) = tab_with(&[("Walkthrough.sol", b"1. open mailbox\n2. take leaflet\n")]);
+        let mut opened = Vec::new();
+        let out = tab.open_entry(0, true, false, &mut |t| opened.push(t.to_string()));
+        assert_eq!(out, OpenOutcome::Opened);
+        assert!(matches!(tab.view, DocView::Text(_)), "shown in the pager");
+        assert!(opened.is_empty(), "the system opener was not called: {opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn files_the_opener_must_not_get_are_refused_not_launched() {
+        let binary: &[u8] = &[0, 1, 2, 3, 0, 0, 255, 254, 0, 9];
+        let (mut tab, dir) = tab_with(&[
+            ("blob.sol", binary),
+            ("run.bat", b"echo hi\n"),
+            ("fake.pdf.bat", b"%PDF-1.4 but really a script\n"),
+            ("Manual.pdf", b"%PDF-1.4"),
+        ]);
+        let mut opened = Vec::new();
+        for i in 0..tab.entries.len() {
+            let id = tab.entries[i].id.clone();
+            let out = tab.open_entry(i, true, false, &mut |t| opened.push(t.to_string()));
+            if id == "Manual.pdf" {
+                assert_eq!(out, OpenOutcome::Opened, "{id}");
+            } else {
+                assert!(!matches!(&out, OpenOutcome::Opened) || matches!(tab.view, DocView::Text(_)), "{id}: {out:?}");
+            }
+        }
+        assert!(opened.iter().all(|p| p.ends_with("Manual.pdf")), "only the pdf may be launched: {opened:?}");
+        let blob = tab.entries.iter().find(|e| e.id == "blob.sol").unwrap().clone();
+        assert!(matches!(decide_open(&blob), OpenDecision::Failed(_)), "binary .sol is refused");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

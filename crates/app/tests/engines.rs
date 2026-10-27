@@ -39,6 +39,8 @@ mod sq1596_min_story_screen_floor;
 mod sq1654_scrollback_preserves_screens;
 #[path = "suites/sq1710_restore_syncs_current_room.rs"]
 mod sq1710_restore_syncs_current_room;
+#[path = "suites/sq1741_photopia_clear_view.rs"]
+mod sq1741_photopia_clear_view;
 #[path = "suites/sq1656_preserve_clear_top_anchor.rs"]
 mod sq1656_preserve_clear_top_anchor;
 #[path = "suites/sq1661_topanchor_followease.rs"]
@@ -189,6 +191,8 @@ mod native_disk_font;
 mod story_pick_media;
 #[path = "suites/zip_story_entries.rs"]
 mod zip_story_entries;
+#[path = "suites/zip_scott_titles.rs"]
+mod zip_scott_titles;
 #[path = "suites/v6_dump_windows_face.rs"]
 mod v6_dump_windows_face;
 #[path = "suites/system_face_cascade.rs"]
@@ -201,9 +205,19 @@ mod native_disk_sound;
 mod dialog_story_degradation;
 #[path = "suites/lost_treasures_iso_dedupe.rs"]
 mod lost_treasures_iso_dedupe;
+#[path = "suites/image_read_once.rs"]
+mod image_read_once;
 
 #[path = "suites/sq1515_kerkerkruip_restore_arrange.rs"]
 mod sq1515_kerkerkruip_restore_arrange;
+#[path = "suites/sq1712_restore_window_contents.rs"]
+mod sq1712_restore_window_contents;
+#[path = "suites/sq1715_rewind_transcript.rs"]
+mod sq1715_rewind_transcript;
+#[path = "suites/sq1767_rewind_status_line.rs"]
+mod sq1767_rewind_status_line;
+#[path = "suites/sq1758_typed_input.rs"]
+mod sq1758_typed_input;
 #[path = "suites/sq1529_kerkerkruip_grid_fg_ground.rs"]
 mod sq1529_kerkerkruip_grid_fg_ground;
 #[path = "suites/sq1565_kerkerkruip_title_rule_pixel_height.rs"]

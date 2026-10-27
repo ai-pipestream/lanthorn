@@ -148,7 +148,7 @@ fn hybrid_state(machine: &app::machine_boot::MachineBoot, honor: bool) -> app::s
     let picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 16));
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state.v6_text = machine.text_face();

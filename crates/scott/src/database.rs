@@ -280,6 +280,9 @@ impl Database {
     /// Answers with the same [`ObjectWords`] the Z-machine and Glulx readers
     /// return, so a caller asking "what is this and what can it be called" gets
     /// one shape from all three engines.
+    ///
+    /// [`ObjectWords::holds`] is always `None` here: a Scott Adams item has no
+    /// container or supporter notion to report.
     pub fn item_words(&self, index: usize) -> Option<ObjectWords> {
         let item = self.items.get(index)?;
         let noun = item.auto_noun.as_deref()?;

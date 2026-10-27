@@ -345,6 +345,13 @@ pub struct ProbeStep {
     /// it: a shadow that died was RELOCATED by the game's own resurrection, and wherever it woke
     /// up is not where the direction it typed leads.
     pub died: bool,
+    /// The name the engine gave the room the shadow ended in (SQ-1772): what a replayed walk
+    /// needs to put a room the player never stood in on the map.
+    pub room_name: Option<String>,
+    /// The shadow's state right after this command -- taken ONLY for a sequence
+    /// ([`ShadowProbe::ask_sequence_from`]), where a later question may start from the middle of
+    /// the line. `None` for every ordinary probe.
+    pub after: Option<std::sync::Arc<crate::engine::EngineSave>>,
 }
 
 impl ProbeStep {
@@ -632,6 +639,9 @@ struct Job {
     /// (SQ-1267), applied to the shadow right after every restore in this
     /// job — see [`serve`]. `None` for an engine with no such state.
     room_identity: Option<Vec<u8>>,
+    /// The commands are ONE line played in order from a single restore (SQ-1772), each saved
+    /// after it runs, rather than independent questions each asked from the snapshot.
+    sequence: bool,
 }
 
 /// One answer, on its way back.
@@ -691,6 +701,13 @@ impl ProbeSnapshot {
     /// same session should be made to match.
     pub fn from_save(live: &dyn Engine, save: std::sync::Arc<crate::engine::EngineSave>) -> ProbeSnapshot {
         ProbeSnapshot { save, baseline: WorldPrint::default(), room_identity: live.room_identity_state() }
+    }
+
+    /// Another moment of the same session -- a state the shadow itself saved mid-sequence
+    /// ([`ProbeStep::after`]) -- asked about with the same room-identity state this one carries
+    /// (SQ-1772). The live engine is not on hand when an answer is read, so it is copied across.
+    pub fn with_save(&self, save: std::sync::Arc<crate::engine::EngineSave>) -> ProbeSnapshot {
+        ProbeSnapshot { save, baseline: WorldPrint::default(), room_identity: self.room_identity.clone() }
     }
 }
 
@@ -891,7 +908,16 @@ impl ShadowProbe {
     /// [`snapshot`](Self::snapshot).
     pub fn ask_from(&mut self, from: &ProbeSnapshot, commands: &[String]) -> Option<u64> {
         let reseeds = vec![None; commands.len()];
-        self.send_job(from, commands.to_vec(), reseeds)
+        self.send_job(from, commands.to_vec(), reseeds, false)
+    }
+
+    /// [`ask_from`](Self::ask_from), but the commands are played IN ORDER from one restore --
+    /// each starts where the last left the shadow -- and every step carries the state it left
+    /// ([`ProbeStep::after`]). This is how a chained line (`north then east`) is replayed one
+    /// piece at a time (SQ-1772).
+    pub fn ask_sequence_from(&mut self, from: &ProbeSnapshot, commands: &[String]) -> Option<u64> {
+        let reseeds = vec![None; commands.len()];
+        self.send_job(from, commands.to_vec(), reseeds, true)
     }
 
     /// [`ask_from`], but walking ONE command repeatedly, once per seed in
@@ -911,7 +937,7 @@ impl ShadowProbe {
     ) -> Option<u64> {
         let commands = vec![command.to_string(); seeds.len()];
         let reseeds = seeds.iter().map(|&s| Some(s)).collect();
-        self.send_job(from, commands, reseeds)
+        self.send_job(from, commands, reseeds, false)
     }
 
     /// Common tail of [`ask_from`](Self::ask_from) and
@@ -921,6 +947,7 @@ impl ShadowProbe {
         from: &ProbeSnapshot,
         commands: Vec<String>,
         reseeds: Vec<Option<u32>>,
+        sequence: bool,
     ) -> Option<u64> {
         if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
         {
@@ -934,6 +961,7 @@ impl ShadowProbe {
             commands,
             reseeds,
             room_identity: from.room_identity.clone(),
+            sequence,
         };
         self.worker.as_ref()?.jobs.send(job).ok()?;
         self.next_token = token;
@@ -1043,23 +1071,27 @@ fn serve(
 
     let mut steps = Vec::with_capacity(job.commands.len());
     for (i, command) in job.commands.iter().enumerate() {
-        let t = Instant::now();
-        let restored = engine.restore_state(&job.save);
-        phases.restore += t.elapsed();
-        if restored.is_err() {
-            // A shadow that will not take the live state is no shadow.
-            return Err(());
-        }
-        // SQ-1267: re-sync the shadow's room identity to the LIVE session's
-        // right after every restore, not only at boot — the shadow is reused
-        // across many jobs and a restore never touches this host-side state
-        // (see `Engine::room_identity_state`'s doc comment), so without this a
-        // long-lived shadow answers every question after its own boot from
-        // whatever it happened to learn (or not) on its own exploratory
-        // commands, which can diverge from the live session in either
-        // direction.
-        if let Some(state) = &job.room_identity {
-            engine.apply_room_identity_state(state);
+        // A sequence (SQ-1772) restores once, before its first command, and plays on from there.
+        let continuing = job.sequence && i > 0;
+        if !continuing {
+            let t = Instant::now();
+            let restored = engine.restore_state(&job.save);
+            phases.restore += t.elapsed();
+            if restored.is_err() {
+                // A shadow that will not take the live state is no shadow.
+                return Err(());
+            }
+            // SQ-1267: re-sync the shadow's room identity to the LIVE session's
+            // right after every restore, not only at boot — the shadow is reused
+            // across many jobs and a restore never touches this host-side state
+            // (see `Engine::room_identity_state`'s doc comment), so without this a
+            // long-lived shadow answers every question after its own boot from
+            // whatever it happened to learn (or not) on its own exploratory
+            // commands, which can diverge from the live session in either
+            // direction.
+            if let Some(state) = &job.room_identity {
+                engine.apply_room_identity_state(state);
+            }
         }
         // SQ-1257 Phase 2: force this attempt's own draw, AFTER the restore (a
         // restore touches only memory, never the RNG — see `zvm::quetzal`) and
@@ -1085,6 +1117,8 @@ fn serve(
         let t = Instant::now();
         let world = WorldPrint::of(&**engine);
         phases.world += t.elapsed();
+        let after = (job.sequence && !escaped && !result.quit)
+            .then(|| std::sync::Arc::new(engine.save_state()));
         steps.push(ProbeStep {
             command: command.clone(),
             reply: result.transcript.clone(),
@@ -1093,7 +1127,12 @@ fn serve(
             quit: result.quit,
             escaped,
             died: crate::session::turn_reports_death(&result.transcript),
+            room_name: result.location.as_ref().map(|l| l.name.clone()),
+            after,
         });
+        if job.sequence && (escaped || result.quit) {
+            break; // the line cannot go on: whatever followed is not evidence
+        }
     }
 
     // A shadow the probe QUIT is dead, and restoring memory under it does
@@ -1309,6 +1348,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         };
         let run = ProbeRun {
             baseline: WorldPrint::from_parts(Some(7), None, None),
@@ -1422,6 +1463,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         };
         let run = ProbeRun {
             baseline: WorldPrint::from_parts(Some(7), None, None),
@@ -1463,6 +1506,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         };
         let run = ProbeRun {
             // The LIVE engine's, taken with a status line on screen.
@@ -1716,6 +1761,7 @@ mod tests {
             baseline: WorldPrint::default(),
             reseeds: vec![None; commands.len()],
             room_identity: None,
+            sequence: false,
             commands,
         }
     }

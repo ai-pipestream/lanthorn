@@ -224,6 +224,44 @@ pub fn decode(bytes: &[u8]) -> Result<ScreenState, ZError> {
             Some(V6Windows::new(windows, current))
         }
     };
+    let mut upper = upper;
+    // A grid taller than the split with nothing painted below it is a stranded
+    // allocation, not content (SQ-1806). `upper_rows_stranded_by_split`, the flag
+    // that retires such rows live, is not archived, so a save taken while the grid
+    // had grown (a long status write wrapping on a narrow screen) would otherwise
+    // restore a blank row under the status bar for the rest of the session. Trim
+    // from the data alone, so saves already on disk are cured too. Rows below the
+    // split that DO hold paint are the game's own and stay; v6 is paint and its
+    // `upper` is not consulted.
+    if v6.is_none() {
+        let mut keep = upper.last_painted_row().max(upper_window_rows);
+        // SQ-1808: a window-1 print that ran off the right edge used to WRAP
+        // onto a new row, leaving one styled space (the status bar's reverse
+        // video) at column 1 with the cursor just after it. That is paint to
+        // `last_painted_row`, so saves written by those builds carry a stray
+        // second status row. Recognise exactly that shape and nothing looser:
+        // the deepest painted row lies below the split, the cursor is on it at
+        // column 2, and its only painted cell is a whitespace glyph at column 1.
+        // Rows below the split carrying real text (quote boxes, menus) never
+        // match.
+        if keep > upper_window_rows && keep == upper.last_painted_row() && cursor_row == keep && cursor_col == 2 {
+            let lone_space = (1..=upper.cols).all(|c| {
+                let cell = upper.cell(keep, c);
+                if c == 1 {
+                    cell.ch.is_whitespace()
+                } else {
+                    cell.ch == ' ' && cell.style == 0
+                }
+            });
+            if lone_space {
+                keep = (1..keep).rev().find(|&r| (1..=upper.cols).any(|c| { let x = upper.cell(r, c); x.ch != ' ' || x.style != 0 })).unwrap_or(0).max(upper_window_rows);
+            }
+        }
+        if upper.rows > keep {
+            let cols = upper.cols;
+            upper.resize_preserving(keep, cols);
+        }
+    }
     Ok(ScreenState {
         upper_window_rows,
         current_window,
@@ -554,6 +592,72 @@ mod tests {
         }
     }
 
+    /// SQ-1806: a grid grown past the split whose extra rows are blank comes back
+    /// trimmed to the split, while a painted row below the split survives.
+    #[test]
+    fn blank_rows_below_the_split_are_trimmed_on_decode() {
+        let mut s = sample_v5_screen();
+        s.upper_window_rows = 1;
+        s.upper.put(2, 6, ' ', 0, ZColour::Default, ZColour::Default);
+        s.upper.put(1, 1, 'W', 0, ZColour::Default, ZColour::Default);
+        assert_eq!(s.upper.rows, 2);
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 1);
+        assert_eq!(back.upper.cells.len(), back.upper.cols as usize);
+        assert_eq!(back.upper.cell(1, 1).ch, 'W');
+    }
+
+    /// SQ-1808: wrap residue written by older builds -- a lone reverse-video
+    /// space at column 1 of a row below the split, cursor just after it -- is
+    /// dropped on decode.
+    #[test]
+    fn wrap_residue_below_the_split_is_dropped_on_decode() {
+        let mut s = sample_v5_screen();
+        s.upper.resize(2, 6);
+        s.upper_window_rows = 1;
+        s.upper.put(1, 1, 'W', 1, ZColour::Default, ZColour::Default);
+        s.upper.put(2, 1, ' ', 1, ZColour::Default, ZColour::Default);
+        s.cursor_row = 2;
+        s.cursor_col = 2;
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 1);
+        assert_eq!(back.upper.cell(1, 1).ch, 'W');
+    }
+
+    /// SQ-1808: the same cursor on a row that carries real text (a quote box or
+    /// menu line) is not residue.
+    #[test]
+    fn text_rows_below_the_split_are_not_wrap_residue() {
+        let mut s = sample_v5_screen();
+        s.upper.resize(2, 6);
+        s.upper_window_rows = 1;
+        s.upper.put(1, 1, 'W', 1, ZColour::Default, ZColour::Default);
+        s.upper.put(2, 1, 'Q', 1, ZColour::Default, ZColour::Default);
+        s.cursor_row = 2;
+        s.cursor_col = 2;
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 2);
+        assert_eq!(back.upper.cell(2, 1).ch, 'Q');
+    }
+
+    #[test]
+    fn painted_rows_below_the_split_survive_decode() {
+        let mut s = sample_v5_screen();
+        s.upper_window_rows = 1; // row 2 still holds 'z'
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 2);
+        assert_eq!(back.upper.cell(2, 6).ch, 'z');
+    }
+
+    #[test]
+    fn a_v6_snapshot_keeps_its_upper_grid_on_decode() {
+        let mut s = sample_v6_screen();
+        s.upper.resize(3, 4);
+        s.upper_window_rows = 1;
+        let back = decode(&encode(&s)).expect("decodes");
+        assert_eq!(back.upper.rows, 3);
+    }
+
     #[test]
     fn a_classic_screen_round_trips() {
         let src = sample_v5_screen();
@@ -638,6 +742,7 @@ mod tests {
         let mut src = sample_v5_screen();
         src.upper.cols = 40;
         src.upper.rows = 4;
+        src.upper_window_rows = 4; // a split that owns the rows, so the SQ-1806 trim leaves them
         let back = decode(&encode(&src)).expect("decodes");
         assert_eq!(back.upper.cells.len(), 160);
         assert_eq!(back.upper.cell(1, 1).ch, 'W', "the cells that were there are kept");

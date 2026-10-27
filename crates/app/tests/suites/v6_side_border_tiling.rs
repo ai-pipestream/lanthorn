@@ -320,7 +320,7 @@ fn drive(s: &mut GameSession, turns: usize) {
 fn render_state_with(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(CELL));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(CELL)));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state
@@ -344,8 +344,7 @@ const CELL: ratatui_image::FontSize = ratatui_image::FontSize { width: 8, height
 /// The pane in DEVICE pixels, taken from the picker the render will actually use.
 fn pane_dev(state: &app::state::AppState, pane: (u16, u16)) -> (u32, u32) {
     let fs = state
-        .game_picker
-        .as_ref()
+        .game_picker()
         .expect("every render_state carries a picker; the cell is what this converts")
         .font_size();
     (u32::from(pane.0) * u32::from(fs.width), u32::from(pane.1) * u32::from(fs.height))
@@ -2485,11 +2484,9 @@ fn frame_mags_locked(
     // A case whose whole subject is the ladder has to render on a backend the ladder
     // binds, or it asserts a factor nothing used. The CELL is untouched (`pane_dev`
     // reads it back off this picker), so only the backend changes.
-    state
-        .game_picker
-        .as_mut()
-        .expect("render_state carries a picker")
-        .set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    let mut picker = state.game_picker().cloned().expect("render_state carries a picker");
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    state.set_game_picker(Some(picker));
     state.config.v6_pixel_lock = true;
     state.v6_art_scale = art_scale;
     let area = Rect::new(0, 0, pane.0, pane.1);

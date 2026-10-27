@@ -421,7 +421,7 @@ fn run_zvm_v6_mode(path: &Path, turns: &[usize], repeats: usize, mode: V6RenderM
     state.config.honor_game_colours = true;
     state.config.v6_render = mode;
     state.v6_text = boot.text_face();
-    state.game_picker = Some(kitty_picker(CELL_PX.0, CELL_PX.1));
+    state.set_game_picker(Some(kitty_picker(CELL_PX.0, CELL_PX.1)));
 
     print_header(&title);
     drive_and_measure(&mut engine, &mut state, turns, repeats);

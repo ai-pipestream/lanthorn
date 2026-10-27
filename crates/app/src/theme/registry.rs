@@ -340,8 +340,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.background", Section::Map, Kind::Style, None, Delta::EMPTY),
     // Room fill + cardinal/portal connectors derive from roles so a base scheme
     // recolours them (old from_ghostty: room=foreground, connector=palette[6]).
-    // `text`/`accent` give white/blue for the terminal default (SQ-1531: accent
-    // moved from the cyan slot to the blue one) AND follow the scheme.
+    // `text`/`accent` give white/cyan for the terminal default AND follow the scheme.
     row("map.room", Section::Map, Kind::Style, Some("text"), Delta::EMPTY),
     row("map.room_current", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.room_selected", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
@@ -393,6 +392,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // tunnels being the specimen. Deliberately not `frontier`: this is a random exit is explored,
     // not unexplored ground, so it defaults to `alert` rather than dimmed out of the way like `·`/`×`.
     row("map.matrix.cell:random", Section::Map, Kind::Style, Some("alert"), Delta::EMPTY),
+    // `»` -- a real exit nobody has walked yet (SQ-1773): an exit scan asked the game and the move
+    // worked. Deliberately not `frontier`: that dim dot is a MAYBE, this one is a yes, so it
+    // takes the `accent` role and reads as a way forward instead of being dimmed out of the way.
+    row("map.matrix.cell:exit", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.matrix.footnote", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── Honest asymmetric edges in the DRAWN view (SQ-0666). Both default to the current
     // connector appearance, so nothing changes look until someone styles them.
@@ -441,11 +444,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // floated over and was invisible except for its text (SQ-1139). It reported as
     // "blends into the background" because it *was* the background.
     //
-    // `accent` is not one either, and that is the trap worth naming: the highlight
-    // colour a tooltip wants IS accent's own ink, but accent is `fg(..)` with NO
-    // background (`slot(4, ..)` in resolve.rs — SQ-1531 moved this from the cyan
-    // slot to the blue one), so deriving from it reproduces SQ-1139 exactly — ink
-    // with no fill on whatever the tip floats over. A surface needs the PAIR.
+    // `accent` is not one either, and that is the trap worth naming: the cyan a
+    // tooltip wants IS accent's cyan, but accent is `fg(Cyan)` with NO background
+    // (`slot(6, ..)` in resolve.rs), so deriving from it reproduces SQ-1139 exactly
+    // — cyan ink on whatever the tip floats over. A surface needs the PAIR.
     //
     // `dialog.list_selected` is that pair: it is the Black-on-Cyan row highlight
     // every modal list already uses (Saves, Replay, browser, Config, verb dock), so
@@ -610,6 +612,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("warning_marker", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("input_text", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("input_submit", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     // A Scott Adams game's own chrome window describing the current room —
     // unrelated to our map pane's Room Panel below, hence the `scott_` prefix
@@ -640,6 +643,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("documents_spoiler", Section::Elements, Kind::Style, Some("alert"), mods(false, true, false, false)),
     row("documents_title_match", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
     row("documents_preview", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // SQ-1784: a link that is a web page (opens in the browser by default), and an
+    // online game that no longer plays (opens only).
+    row("documents_web_page", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("documents_obsolete", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     // ── saves manager (SQ-0531) — the Type cell's portability tint. A "Game"
     // save carries standard save-instruction-PC bytes any interpreter reads and
     // gets the accent + the ↗ glyph; a host "State" snapshot stays here. ──
@@ -722,6 +729,15 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // `dialog.list_selected` instead, a fg/bg swap, not REVERSED) and hover is
     // now its only transient highlight — the two must never look the same.
     row("command_panel.quick:hover", Section::Elements, Kind::Style, Some("command_panel.quick"), mods(false, false, false, true)),
+    // What the map knows about a compass/portal direction out of the current room
+    // (SQ-1780); each patches on top of `command_panel.quick`, hover still wins.
+    // Explored and untried read as plain quick; an exit shares the matrix's `»` colour
+    // so a direction looks the same in both places, and blocked is dimmed like the
+    // matrix's frontier cells. Blocked cells stay clickable: a door can open later.
+    row("command_panel.quick:explored", Section::Elements, Kind::Style, Some("command_panel.quick"), Delta::EMPTY),
+    row("command_panel.quick:exit", Section::Elements, Kind::Style, Some("map.matrix.cell:exit"), mods(true, false, false, false)),
+    row("command_panel.quick:blocked", Section::Elements, Kind::Style, Some("map.matrix.cell:frontier"), Delta { dim: Some(true), ..Delta::EMPTY }),
+    row("command_panel.quick:untried", Section::Elements, Kind::Style, Some("command_panel.quick"), Delta::EMPTY),
     // In-column group labels and the "(nothing visible)" placeholder.
     row("command_panel.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // SQ-1135: a noun-column row that came from what the story PRINTED rather
@@ -844,6 +860,7 @@ mod tests {
         "map.matrix.cell:path",
         "map.matrix.cell:frontier",
         "map.matrix.cell:random",
+        "map.matrix.cell:exit",
         "map.matrix.footnote",
         "map.edge:oneway",
         "map.edge:asym",
@@ -948,6 +965,7 @@ mod tests {
         "warning_marker",
         "input_text",
         "input_prompt",
+        "input_submit",
         "upper_window_border",
         "scott_room_panel",
         "palette_query",
@@ -968,6 +986,8 @@ mod tests {
         "documents_spoiler",
         "documents_title_match",
         "documents_preview",
+        "documents_web_page",
+        "documents_obsolete",
         // SQ-0643: hard-coded modal/list styles → themed selectors
         "dialog.list_selected",
         "dialog.list_footer",
@@ -993,6 +1013,10 @@ mod tests {
         "command_panel.column_header:active",
         "command_panel.quick",
         "command_panel.quick:hover",
+        "command_panel.quick:explored",
+        "command_panel.quick:exit",
+        "command_panel.quick:blocked",
+        "command_panel.quick:untried",
         "command_panel.group_label",
         // SQ-1135: the printed-word rows in the noun columns
         "command_panel.item:seen",
@@ -1090,12 +1114,9 @@ mod tests {
         assert_eq!(hint.fg, Some(Color::Yellow));
         assert!(hint.add_modifier.contains(Modifier::DIM));
 
-        // file_browser_cwd: old `.fg(Yellow)`.
+        // file_browser_cwd / file_browser_dir: old `.fg(Yellow)` / `.fg(Cyan)`.
         assert_eq!(theme.get("file_browser_cwd").style.fg, Some(Color::Yellow));
-        // file_browser_dir: old `.fg(Cyan)` — SQ-1531 deliberately moved the
-        // `accent` role's default from cyan to blue, so this one no longer
-        // reproduces the pre-registry hardcoded style.
-        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Blue));
+        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Cyan));
 
         // inspector_edge_ok / inspector_edge_distorted: old `.fg(Green)` / `.fg(Red)`.
         assert_eq!(theme.get("inspector_edge_ok").style.fg, Some(Color::Green));

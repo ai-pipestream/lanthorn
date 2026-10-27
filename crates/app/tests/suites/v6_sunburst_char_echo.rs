@@ -202,7 +202,7 @@ fn a_typed_word_stays_on_the_line_the_player_is_typing_on() {
     for mode in [app::config::V6RenderMode::Hybrid, app::config::V6RenderMode::Raster] {
         let mut st = AppState::default();
         st.colors = app::colors::ColorScheme::terminal_default();
-        st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         st.config.v6_render = mode;
         st.config.honor_game_colours = true;
         st.transcript = state.transcript.clone();

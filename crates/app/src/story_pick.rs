@@ -100,7 +100,7 @@ pub fn pick(
         None => crate::picker::resolve_entries(single_file, roots),
     };
     if entries.is_empty() {
-        return Err(format!("no story to open on {}", single_file.display()));
+        return Err(format!("no game to open on {}", single_file.display()));
     }
     let i = resolve(&entries, want, subject_of(source))?;
     let chosen = &entries[i];
@@ -219,16 +219,16 @@ mod tests {
     #[test]
     fn a_name_that_matches_nothing_refuses_and_shows_the_list() {
         let err = resolve(&disc(), "trinity", "this disk").unwrap_err();
-        assert!(err.starts_with("no story on this disk is named 'trinity':"), "{err}");
+        assert!(err.starts_with("no game on this disk is named 'trinity':"), "{err}");
         assert!(err.contains("Ballyhoo"), "the menu rides along: {err}");
         let err = resolve(&disc(), "9", "this disk").unwrap_err();
-        assert!(err.starts_with("no story 9 on this disk — pick 1 to 3:"), "{err}");
+        assert!(err.starts_with("no game 9 on this disk — pick 1 to 3:"), "{err}");
     }
 
     #[test]
     fn an_ambiguous_name_refuses_rather_than_guessing() {
         let err = resolve(&disc(), "MAC/", "this disk").unwrap_err();
-        assert!(err.starts_with("'MAC/' matches more than one story on this disk:"), "{err}");
+        assert!(err.starts_with("'MAC/' matches more than one game on this disk:"), "{err}");
     }
 
     /// The label is what makes a refusal usable, so it names the build and keeps

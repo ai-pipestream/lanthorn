@@ -32,10 +32,73 @@ pub fn resolved_style_path(style: Option<&str>, user_dir: &Path) -> Option<std::
     }
 }
 
+/// Build the registry theme (`ColorScheme.theme`: everything `[roles]`,
+/// `[elements]`, `[dialog]` … in style.toml controls) from the style files on
+/// disk: the global file, the named player's layer, then the per-game file.
+///
+/// This is the ONE place the theme is built (SQ-1781). `reload_style` (startup,
+/// `/reload-style`, the style watcher and the per-game overlay all funnel through
+/// it) and the pre-game screens — the story list, the fetch-keep prompt and the
+/// font-check dialog, which have no `AppState` yet — all call it, so a screen
+/// drawn before the story boots follows the player's style.toml exactly as the
+/// game does. Those screens pass no `game_dir` and empty `garglk` decls.
+///
+/// `term` seeds an unconfigured scheme from the OSC 10/11 probe (SQ-0510): with no
+/// scheme configured `resolve_base` returns an all-Reset scheme and
+/// `Roles::from_scheme` would fall back to a hard-coded white-on-BLACK `chrome`.
+/// A terminal that did not answer both channels leaves the scheme untouched.
+/// `garglk` is a discovered garglk.ini's colours, the theme's layer between
+/// global and per-game (SQ-0309).
+pub fn build_theme(
+    config: &crate::config::Config,
+    machine_palette: zvm::screen::Palette,
+    term: &crate::term_colors::TermDefaultColors,
+    game_dir: Option<&Path>,
+    garglk: &crate::theme::resolve::Decls,
+) -> crate::theme::resolve::Theme {
+    use crate::theme::{resolve::resolve_theme_layered, toml_schema};
+    let user_dir = config.config_root().to_path_buf();
+    let pointer = config.style.clone();
+    let parse_file = |p: Option<std::path::PathBuf>| -> toml_schema::ParsedStyle {
+        p.and_then(|p| std::fs::read_to_string(&p).ok())
+            .and_then(|t| toml_schema::parse(&t).ok())
+            .unwrap_or_default()
+    };
+    let global = parse_file(resolved_style_path(pointer.as_deref(), &user_dir));
+    let global = match crate::style::player_style_path(config) {
+        Some(p) => global.overlaid(&parse_file(Some(p))),
+        None => global,
+    };
+    let per_game = match game_dir {
+        Some(d) => parse_file(Some(crate::styles::per_game_style_path(d))),
+        None => toml_schema::ParsedStyle::default(),
+    };
+    let (_, gs, _) = crate::colors::resolve_base(global.scheme.as_deref(), &user_dir, machine_palette);
+    let gs = crate::colors::seed_scheme_from_terminal(gs, term);
+    resolve_theme_layered(&gs, &global, garglk, &per_game)
+}
+
+/// The colours and symbols for a screen drawn BEFORE any story boots (SQ-1781):
+/// the story list, the fetch-keep prompt and the font-check dialog. Resolves the
+/// style files the way the game does, then builds the registry theme with
+/// [`build_theme`] — no game directory, no garglk overlay, and `Palette::Standard`
+/// because no story is booted to name a machine (SQ-1393). Returns the parsed
+/// style document too, for the callers that also read its symbols.
+pub fn pre_game_colors(
+    cfg: &crate::config::Config,
+    term: &crate::term_colors::TermDefaultColors,
+) -> (crate::colors::ColorScheme, crate::style::StyleDoc) {
+    let (doc, _w1) = crate::style::load_style_for(cfg);
+    let palette = zvm::screen::Palette::Standard;
+    let (mut cs, _set, _w2) = crate::style::resolve(&doc, cfg.config_root(), palette);
+    cs.theme = build_theme(cfg, palette, term, None, &Default::default());
+    (cs, doc)
+}
+
 /// Re-read and apply `style.toml`. On a real-file read/parse error, the current
 /// `state.colors`/`state.symbols` are left in place.
 pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
-    let user_dir = state.config.user_dir.clone();
+    let user_dir = state.config.config_root().to_path_buf();
     let pointer = state.config.style.clone();
 
     // Build the StyleDoc: a real file parses directly (error → Failed); the
@@ -144,43 +207,17 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     }
 
     // SQ-0309: rebuild the registry theme from the same global + per-game files, with
-    // provenance. Render still reads the legacy fields above; the theme is consumed by
-    // the Wave-5 render migration. New-schema sections drive it; an old-schema file
-    // (only [colors]/[symbols]) parses to empty new-schema decls → registry defaults.
+    // provenance. See `build_theme` (SQ-1781: shared with the pre-game screens).
     {
-        use crate::theme::{resolve::resolve_theme_layered, toml_schema};
-        let parse_file = |p: Option<std::path::PathBuf>| -> toml_schema::ParsedStyle {
-            p.and_then(|p| std::fs::read_to_string(&p).ok())
-                .and_then(|t| toml_schema::parse(&t).ok())
-                .unwrap_or_default()
-        };
-        let global = parse_file(resolved_style_path(pointer.as_deref(), &user_dir));
-        let global = match crate::style::player_style_path(&state.config) {
-            Some(p) => global.overlaid(&parse_file(Some(p))),
-            None => global,
-        };
-        let per_game = if state.game_dir.as_os_str().is_empty() {
-            toml_schema::ParsedStyle::default()
-        } else {
-            parse_file(Some(crate::styles::per_game_style_path(&state.game_dir)))
-        };
-        let (_, gs, _) = crate::colors::resolve_base(global.scheme.as_deref(), &user_dir, machine_palette);
-        // SQ-0510: with no scheme configured, `resolve_base` returns an all-Reset
-        // scheme and `Roles::from_scheme` falls back to a hard-coded white-on-BLACK
-        // `chrome` — a black band across every chrome-derived selector on a
-        // terminal that is not black. Seed the scheme from the OSC 10/11 probe
-        // taken at startup so the theme follows the real terminal. This is the ONE
-        // place the theme is built (startup, `/reload-style`, the style watcher and
-        // the per-game overlay all funnel through `reload_style`), so seeding here
-        // reaches all of them. A terminal that did not answer both channels leaves
-        // the scheme untouched and today's behaviour intact.
-        let gs = crate::colors::seed_scheme_from_terminal(gs, &state.term_default_colors);
-        // SQ-0309: a discovered garglk.ini's colours ride the theme's garglk layer
-        // (between global and per-game) so they survive the migration off the legacy
-        // ColorScheme fields (`ov.apply` still seeds the glk override array, which the
-        // render glk path reads for per-style colours).
         let garglk_decls = state.garglk_overlay.as_ref().map(|o| o.color_decls()).unwrap_or_default();
-        state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
+        let game_dir = (!state.game_dir.as_os_str().is_empty()).then_some(state.game_dir.as_path());
+        state.colors.theme = build_theme(
+            &state.config,
+            machine_palette,
+            &state.term_default_colors,
+            game_dir,
+            &garglk_decls,
+        );
     }
 
     // SQ-0873: and under all of it, the machine's own screen — but only for a
@@ -284,6 +321,39 @@ mod tests {
             state.colors.theme.get("transcript").style.fg, Some(Color::Green),
             "current look preserved on error"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1781: `build_theme` is the one builder; `reload_style` must land on the
+    /// same theme for the same inputs, and a pre-game call (no game dir) sees the
+    /// global file's `[roles]`/`[elements]`.
+    #[test]
+    fn build_theme_matches_reload_style_and_follows_the_style_file() {
+        use ratatui::style::Color;
+        let dir = temp_dir("build-theme");
+        let path = dir.join("style.toml");
+        std::fs::write(
+            &path,
+            "[roles]\naccent = { fg = \"#112233\" }\n[elements]\nstory_author = { fg = \"#445566\" }\n",
+        )
+        .unwrap();
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(path.to_string_lossy().to_string());
+        assert!(matches!(reload_style(&mut state), ReloadOutcome::Reloaded { .. }));
+
+        let built = build_theme(
+            &state.config,
+            state.colors.machine_palette,
+            &state.term_default_colors,
+            None,
+            &Default::default(),
+        );
+        for name in ["accent", "story_author", "transcript", "chrome"] {
+            assert_eq!(built.get(name).style, state.colors.theme.get(name).style, "{name}");
+        }
+        assert_eq!(built.get("accent").style.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(built.get("story_author").style.fg, Some(Color::Rgb(0x44, 0x55, 0x66)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -422,7 +422,7 @@ fn exit_save_on_error_exit(
 /// A *recovered* worker panic still gets its `crash.log` record — the crash is
 /// real and worth diagnosing — but no teardown, no banner, and no chaining to the
 /// default hook, whose own stderr dump would land mid-frame on a live screen.
-fn install_panic_hook(user_dir: std::path::PathBuf) {
+fn install_panic_hook(logs_dir: std::path::PathBuf) {
     PANIC_HOOK_ONCE.call_once(move || {
         let _ = MAIN_THREAD.set(std::thread::current().id());
         let default_hook = std::panic::take_hook();
@@ -432,10 +432,11 @@ fn install_panic_hook(user_dir: std::path::PathBuf) {
                 restore_terminal();
             }
             let backtrace = std::backtrace::Backtrace::force_capture();
-            let log_path = user_dir.join("crash.log");
+            let _ = std::fs::create_dir_all(&logs_dir);
+            let log_path = logs_dir.join("crash.log");
             let path = match write_crash_log(&log_path, info, &backtrace) {
                 Ok(()) => log_path,
-                // Fall back to the temp dir if the user dir isn't writable.
+                // Fall back to the temp dir if the logs folder isn't writable.
                 Err(_) => {
                     let tmp = std::env::temp_dir().join("lanthorn-crash.log");
                     let _ = write_crash_log(&tmp, info, &backtrace);
@@ -1163,7 +1164,7 @@ fn draw_frame(
         } else if state.resize_mode {
             use app::state::ResizeTarget;
             let t = match state.resize_target {
-                ResizeTarget::StoryMap => "story/journal",
+                ResizeTarget::StoryMap => "game/journal",
                 ResizeTarget::CommandBand => "command panel",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
@@ -1196,7 +1197,7 @@ fn draw_frame(
                 }
                 // The hint session holds the keyboard (SQ-1685): say so, and how out.
                 Focus::Hints => app::render::hintbar::literal_hint_bar(
-                    &[("Hints", "keys go to the hint window"), ("PgUp/PgDn", "scroll"), ("Esc", "back to the story")],
+                    &[("Hints", "keys go to the hint window"), ("PgUp/PgDn", "scroll"), ("Esc", "back to the game")],
                     w,
                 ),
                 // Unreachable in practice: `Focus::Map` is only ever set while
@@ -1564,7 +1565,7 @@ fn set_style_watch(
         *watcher = None;
         state.set_status("style watch off");
     } else if let Some(p) =
-        app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+        app::reload::resolved_style_path(state.config.style.as_deref(), state.config.config_root())
     {
         *watcher = app::watch::start(&p);
         if let Some(w) = watcher.as_mut() {
@@ -1666,10 +1667,9 @@ fn handle_map_export(
 /// Abbreviate a leading $HOME in a path to `~` for display.
 fn abbreviate_home(p: &std::path::Path) -> String {
     let s = p.display().to_string();
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            if let Some(rest) = s.strip_prefix(&home) { return format!("~{rest}"); }
-        }
+    if let Some(home) = app::user_dirs::home_dir() {
+        let home = home.display().to_string();
+        if let Some(rest) = s.strip_prefix(&home) { return format!("~{rest}"); }
     }
     s
 }
@@ -1715,10 +1715,10 @@ fn run_headless_fetch(
     let targets = app::picker::fetch_targets(source, roots);
     let total = targets.len();
     if total == 0 {
-        eprintln!("lanthorn: no stories under {}", source.dir().display());
+        eprintln!("lanthorn: no games under {}", source.dir().display());
         return 1;
     }
-    eprintln!("lanthorn: fetching IFDB metadata for {total} stories under {}", source.dir().display());
+    eprintln!("lanthorn: fetching IFDB metadata for {total} games under {}", source.dir().display());
     let fetcher = Fetcher::new(
         Box::new(app::ifdb::IfdbClient::new()),
         roots.clone(),
@@ -1731,6 +1731,7 @@ fn run_headless_fetch(
         done: usize,
         fetched: usize,
         skipped: usize,
+        linked: usize,
         not_found: usize,
         failed: usize,
     }
@@ -1745,6 +1746,10 @@ fn run_headless_fetch(
                 Outcome::Skipped => {
                     self.skipped += 1;
                     "skipped (current)".to_string()
+                }
+                Outcome::Linked => {
+                    self.linked += 1;
+                    "linked (no request)".to_string()
                 }
                 Outcome::NotFound => {
                     self.not_found += 1;
@@ -1788,8 +1793,8 @@ fn run_headless_fetch(
             }
         }
     }
-    let Tally { fetched, skipped, not_found, failed, .. } = tally;
-    println!("lanthorn: {fetched} fetched, {skipped} skipped, {not_found} not on IFDB, {failed} failed");
+    let Tally { fetched, skipped, linked, not_found, failed, .. } = tally;
+    println!("lanthorn: {fetched} fetched, {linked} linked, {skipped} skipped, {not_found} not on IFDB, {failed} failed");
     if failed > 0 { 1 } else { 0 }
 }
 
@@ -1837,7 +1842,7 @@ fn main() {
 
     if let Some(mode) = ctx.cli.fetch {
         let Some(source) = source.as_ref() else {
-            eprintln!("lanthorn: --fetch needs a library directory or a story file");
+            eprintln!("lanthorn: --fetch needs a library directory or a game file");
             std::process::exit(2);
         };
         std::process::exit(run_headless_fetch(source, mode, &ctx.roots));
@@ -1888,6 +1893,7 @@ fn main() {
                 &ctx.cfg,
                 &ctx.roots,
                 picker_position.as_ref(),
+                &ctx.term_default_colors,
             ) {
                 Some(p) => {
                     picker_position = Some(p.position);
@@ -2032,7 +2038,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     let mut watch_dirty: Option<std::time::Instant> = None;
     if state.config.watch_style {
         if let Some(p) =
-            app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+            app::reload::resolved_style_path(state.config.style.as_deref(), state.config.config_root())
         {
             style_watcher = app::watch::start(&p);
             if let Some(w) = style_watcher.as_mut() {
@@ -2144,6 +2150,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // host — the story pane's measured size in $20/$21, and our own default
         // page/ink in $2C/$2D (which a live style reload can change mid-game).
         needs_redraw |= loop_tick::poll_zvm_screen_dims(&mut *session, &state, &last_panes);
+        needs_redraw |= app::hints_tab::sync_screen_dims(&mut state);
         loop_tick::poll_zvm_default_colours(&mut *session, &state);
         // Settle the layout a hidden map deferred, now its pane is back (SQ-1136).
         // Before the poll, so the job it schedules is picked up on the next pass
@@ -2163,6 +2170,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // every tick, so a take/drop moves an object between *here* and
         // *carried* on the very next frame (SQ-0664).
         needs_redraw |= loop_tick::refresh_command_band(&mut state, &*session);
+        needs_redraw |= app::render::command_band::refresh_dir_states(&mut state, &mapper.graph);
         // The Inventory tab's clickable words are LIVE too, and independent of
         // the command band (SQ-1244): the tab cannot piggyback on the band's own
         // object refresh.
@@ -2543,6 +2551,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 .map(|(_, r)| *r)
                 .chain(last_panes.room_dock_tabs.iter().map(|(_, r)| *r))
                 .chain(last_panes.map_card_buttons.iter().map(|(_, r)| *r))
+                // The command bar's send button (SQ-1801) can sit in the last
+                // column of the story pane, against a splitter's grab zone.
+                .chain(state.input_submit_area())
                 .collect();
             match app::pane_drag::on_mouse(&mut state, m, &last_panes.pane_layout, &last_panes.boundaries, &last_panes.border_controls, &dock_chrome) {
                 DragOutcome::Ignored => {}
@@ -3267,7 +3278,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         );
                         if !withhold_arrow {
                             if let Some(result) = ki.and_then(|ki| {
-                                app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_key({ki:?})"));
+                                app::trace::hostio(state.config.logs_root(), state.config.trace.hostio, format!("input_key({ki:?})"));
                                 session.submit_key(ki)
                             })
                             {
@@ -3367,6 +3378,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     }
                     KeyResolve::None => Action::None,
                 }
+            }
+            // ── Command bar's send button (SQ-1801) ───────────────────────────
+            // A left-click on the button is Enter: it routes to the very same
+            // `Action::SubmitCommand` arm below (so slash commands, history and
+            // the pending-input checks all behave identically). A click on the
+            // bar's text is not matched here and keeps placing the caret.
+            Event::Mouse(m) if app::input::submit_button_action(&state, &m).is_some() => {
+                app::input::submit_button_action(&state, &m).expect("guarded by the match arm")
             }
             // ── Command band (SQ-0664) ────────────────────────────────────────
             // The band is NOT a modal, so unlike the old verb dock it cannot
@@ -3967,7 +3986,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // above still has to run here too, since a slash command never
                 // reaches that function at all.
 
-                app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_line({cmd:?})"));
+                app::trace::hostio(state.config.logs_root(), state.config.trace.hostio, format!("input_line({cmd:?})"));
                 let result = session.submit(&cmd);
                 if turn::finish_command_turn(
                     &cmd, true, result, &mut state, &mut mapper, &mut *session,
@@ -4039,8 +4058,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 }
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
-                                state.clear_anchor = None;
-                                state.top_anchor = None;
+                                state.clear_anchor = ac.anchors.clear;
+                                state.pending_clear = false;
+                                state.top_anchor = ac.anchors.top;
                                 state.transcript_kinds = ac.transcript_kinds;
                                 state.transcript_runs = ac.transcript_runs;
                                 state.transcript_para = ac.transcript_para;

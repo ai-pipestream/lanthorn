@@ -180,7 +180,7 @@ fn journey_hybrid_ring_shows_the_menu_band() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 80, 25);
     let mut buf = Buffer::empty(area);
@@ -217,7 +217,7 @@ fn journey_hybrid_menu_is_terminal_cells_picture_stays_ring() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 80, 25);
     let mut buf = Buffer::empty(area);
@@ -325,7 +325,7 @@ fn journey_hybrid_header_bar_spans_full_pane_width() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 80, 25);
     let mut buf = Buffer::empty(area);
@@ -364,7 +364,7 @@ fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // 100×30 → pane_dev 800×480, native 640×400, scale = min(1.25, 1.2) = 1.2:
     // the menu's six native rows spread to seven terminal rows (one is a gap).
@@ -454,7 +454,7 @@ fn journey_hybrid_menu_items_not_merged() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
@@ -549,7 +549,7 @@ fn journey_hybrid_tall_pane_menu_pinned_to_bottom() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 90, 40);
     let mut buf = Buffer::empty(area);
@@ -589,7 +589,7 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 90, 40);
     let mut buf = Buffer::empty(area);
@@ -717,7 +717,7 @@ fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 90, 40);
     let mut buf = Buffer::empty(area);
@@ -799,8 +799,7 @@ fn journey_hybrid_flank_panel_meets_the_menu_at_every_width() {
     for w in [96u16, 104, 110, 116, 122, 128, 134, 138, 144, 150] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker =
-            Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+        state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         let area = Rect::new(0, 0, w, 51);
         let mut buf = Buffer::empty(area);
@@ -916,8 +915,7 @@ fn journey_hybrid_menu_clicks_hit_the_row_they_land_on() {
     for w in [96u16, 110, 122, 138, 150] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker =
-            Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+        state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         let area = Rect::new(0, 0, w, 51);
         let mut buf = Buffer::empty(area);
@@ -1028,14 +1026,14 @@ fn journey_frameless_shows_picture_column_and_pins_menu_to_the_bottom() {
         for (w, h) in [(80u16, 25u16), (80, 40)] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             // Force the CELL path: SQ-0895 removed frameless, which was the
             // deliberate route in. Dropping the picker is the substitute whose
             // ONLY effect is the one frameless contributed here — draw no game
             // image. (A modal overlay also lands on the cell path, but it
             // additionally suppresses the inlined input line, which shifts row
             // counts.)
-            state.game_picker = None;
+            state.set_game_picker(None);
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);

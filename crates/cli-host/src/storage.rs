@@ -383,20 +383,41 @@ pub fn story_key_at_from(story_path: &Path, entry: Option<&str>) -> String {
 /// `disk_entry` names which story when the image holds several; without one the
 /// format's own tiebreak decides, as it always did.
 fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuild> {
-    let raw = std::fs::read(story_path).ok()?;
-    // `detect` first: mounting consumes the bytes, and the overwhelming majority
-    // of calls are about an ordinary story file. Its answer is only a
-    // pre-filter here — see the per-story lookup below for why the medium
-    // itself is not taken from it.
-    if blorb::medium::DiskImage::detect(&raw).is_none() {
-        // Not a disk image at all. A story named inside a CONTAINER (a zip
-        // entry) has no build to find in these bytes — they are the archive's,
-        // not any one entry's — so that case is left to `story_key_for`'s
-        // `(None, Some(entry))` arm, unaffected. A genuinely loose file
-        // (`disk_entry: None`) may still be a KNOWN commercial release read
-        // straight off its own header (SQ-1635) — see `build_for_key`'s docs.
-        return if disk_entry.is_some() { None } else { build_for_key(&raw, None) };
-    }
+    // One read of the file however many steps ask about it (SQ-1762): an image
+    // comes back mountable, an ordinary story file as the bytes read to find
+    // that out. The medium is only a pre-filter here — see the per-story lookup
+    // below for why it is not taken from the container.
+    let file = match blorb::image::open(story_path).ok()? {
+        blorb::image::Opened::Disk(file) => file,
+        blorb::image::Opened::Plain(raw) => {
+            // Not a disk image at all. A story named inside a CONTAINER (a zip
+            // entry) has no build to find in these bytes — they are the
+            // archive's, not any one entry's — so that case is left to
+            // `story_key_for`'s `(None, Some(entry))` arm, unaffected. A
+            // genuinely loose file (`disk_entry: None`) may still be a KNOWN
+            // commercial release read straight off its own header (SQ-1635) —
+            // see `build_for_key`'s docs.
+            //
+            // A Blorb (`.zblorb`) is the same game as the bare Z-code inside it:
+            // the picker row reads its release and serial off that executable
+            // (SQ-1768), so the key must too — the raw `FORM` bytes carry no
+            // Z-machine header and used to fall back to the file name, filing a
+            // fetch's details under a folder the row never read.
+            if disk_entry.is_some() {
+                return None;
+            }
+            return match blorb::Blorb::is_blorb(&raw)
+                .then(|| blorb::Blorb::parse(raw.clone()).ok())
+                .flatten()
+            {
+                Some(b) => match b.executable() {
+                    Ok((blorb::ExecKind::ZCode, exec)) => build_for_key(exec, None),
+                    _ => None,
+                },
+                None => build_for_key(&raw, None),
+            };
+        }
+    };
     // Across the SET, exactly as the launch path mounts (SQ-0952). This used to
     // be `MountedDisk::mount` — the platter alone — so a volume whose story comes
     // from the RELEASE rather than from itself found nothing, returned `None`,
@@ -414,12 +435,9 @@ fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuil
     // Costs sibling reads only when the platter yields nothing: `mount_at`
     // returns as soon as the named volume has a story of its own, which is every
     // loose file and every single-disk press.
-    let disk = crate::disk_set::mount_at(story_path, raw).ok()?;
+    let disk = crate::disk_set::mount_file_at(story_path, &file).ok()?;
     let chosen = match disk_entry {
-        Some(want) => disk
-            .stories()
-            .into_iter()
-            .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))?,
+        Some(want) => disk.story_named(want)?,
         None => disk.story()?,
     };
     // The medium is asked of THIS story, not of the container (SQ-1517): on a
@@ -1002,6 +1020,52 @@ mod tests {
         std::fs::write(&v6_path, header(6, 54, "890606")).unwrap();
         assert_eq!(story_key_at(&v6_path), "arthur-somewhere.z6");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **SQ-1768.** A `.zblorb` keys on the Z-code INSIDE it, not on its file
+    /// name — the picker row reads the release and serial off that executable,
+    /// and a fetch keyed on the file name wrote its details to a folder the row
+    /// never read.
+    #[test]
+    fn a_zblorb_keys_on_the_zcode_inside_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = ty.to_vec();
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        // Zork I r88 / 840726, a catalogued, non-v6 release.
+        let mut z = header(3, 88, "840726");
+        z.resize(0x100, 0);
+        let off = 12 + 8 + 4 + 12;
+        let mut ridx = 1u32.to_be_bytes().to_vec();
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes());
+        ridx.extend_from_slice(&(off as u32).to_be_bytes());
+        let mut inner = b"IFRS".to_vec();
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"ZCOD", &z));
+        let mut file = b"FORM".to_vec();
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("cli-host-storage-sq1768-{}-{nth}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zork-with-sound.zblorb");
+        std::fs::write(&path, &file).unwrap();
+
+        // The same key the bare Z-code would get, not the file name's.
+        assert_eq!(story_key_at(&path), disk_story_key(&build(88, "840726")));
+        assert_ne!(story_key_at(&path), "zork-with-sound.zblorb");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

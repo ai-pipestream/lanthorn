@@ -122,7 +122,7 @@ fn render_state(mode: app::config::V6RenderMode, honor: bool) -> app::state::App
     state.colors = app::colors::ColorScheme::terminal_default();
     // Halfblocks is the protocol, which is what lets a case assert on the pane's
     // own CELLS: the image lands in them.
-    state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = mode;
     state.config.honor_game_colours = honor;
     state

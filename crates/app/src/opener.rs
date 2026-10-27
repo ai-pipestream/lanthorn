@@ -1,5 +1,5 @@
 //! Hand a URL or a file path to the platform's opener (`open` on macOS,
-//! `xdg-open` on Linux, `cmd /C start` on Windows). One implementation for the
+//! `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler` on Windows). One implementation for the
 //! story picker (SQ-0367: an IFDB link) and the Journal's Documents tab
 //! (SQ-1681: a PDF), so there is one place that knows how each OS does it.
 
@@ -11,8 +11,9 @@ pub fn open(target: &str) {
     let mut cmd = std::process::Command::new("open");
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
+        // Not `cmd /C start`: cmd parses the target, and a `&` in a URL ends the command.
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
         c
     };
     #[cfg(all(unix, not(target_os = "macos")))]

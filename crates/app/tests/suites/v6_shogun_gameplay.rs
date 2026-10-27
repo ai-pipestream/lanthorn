@@ -301,14 +301,14 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     // Force the CELL path: SQ-0895 removed frameless, which was the
     // deliberate route in. Dropping the picker is the substitute whose
     // ONLY effect is the one frameless contributed here — draw no game
     // image. (A modal overlay also lands on the cell path, but it
     // additionally suppresses the inlined input line, which shifts row
     // counts.)
-    state.game_picker = None;
+    state.set_game_picker(None);
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -382,7 +382,7 @@ fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_ba
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
@@ -503,14 +503,14 @@ fn shogun_frameless_status_band_fills_row_background() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     // Force the CELL path: SQ-0895 removed frameless, which was the
     // deliberate route in. Dropping the picker is the substitute whose
     // ONLY effect is the one frameless contributed here — draw no game
     // image. (A modal overlay also lands on the cell path, but it
     // additionally suppresses the inlined input line, which shifts row
     // counts.)
-    state.game_picker = None;
+    state.set_game_picker(None);
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
     // Pre-dirty every cell with a sentinel glyph: a band that fills its whole
@@ -569,7 +569,7 @@ fn shogun_hybrid_status_band_floods_game_background() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // honor_game_colours defaults true; assert so the pin below is meaningful.
     assert!(state.config.honor_game_colours, "game colours honoured by default");
@@ -671,7 +671,7 @@ fn shogun_input_caret_sits_on_the_prompt_row_beside_a_tall_float() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.focus = app::state::Focus::Game;
     // Feed the turn's ordered elements exactly as the run loop does, so the ship
@@ -748,7 +748,7 @@ fn shogun_hybrid_status_band_rows_stay_adjacent_at_a_large_pane() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // The reported geometry: a big pane, where the old device-pixel mapping spread
     // the band. (Small panes never showed it — the scale was near 1.)
@@ -813,7 +813,7 @@ fn shogun_hybrid_tall_pane_frame_reclaim() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 90, 40);
     let mut buf = Buffer::empty(area);
@@ -870,14 +870,14 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     // Force the CELL path: SQ-0895 removed frameless, which was the
     // deliberate route in. Dropping the picker is the substitute whose
     // ONLY effect is the one frameless contributed here — draw no game
     // image. (A modal overlay also lands on the cell path, but it
     // additionally suppresses the inlined input line, which shifts row
     // counts.)
-    state.game_picker = None;
+    state.set_game_picker(None);
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -1143,7 +1143,7 @@ fn shogun_ornament_columns_are_one_strip_and_span_the_same_rows() {
             #[allow(deprecated)] // `from_fontsize`: a headless test has no terminal to query.
             let picker =
                 ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
-            state.game_picker = Some(picker);
+            state.set_game_picker(Some(picker));
             state.config.v6_render = app::config::V6RenderMode::Hybrid;
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, w, h);

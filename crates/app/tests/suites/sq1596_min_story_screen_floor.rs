@@ -84,6 +84,10 @@ fn headless_config(home: &Path) -> Config {
         user_dir: home.to_path_buf(),
         config_file: home.join("config.toml"),
         random_seed: Some(1),
+        // SQ-1809: under the default `auto` Bureaucracy caches the width and is
+        // told 80 whatever the pane, so it never needs this floor. The floor is a
+        // host mechanism for a story that IS told the pane, which `pane` restores.
+        status_width: app::config::StatusWidth::Pane,
         ..Config::default()
     }
 }
@@ -545,23 +549,16 @@ fn v1_to_3_stories_are_exempt_from_the_pane_space_floor_too() {
 // ── SQ-1606 (third follow-up): the search must probe the RAW pane ──────────
 //
 // `min_story_pane_for_floor`'s Z-machine probe used to call
-// `declared_story_screen_dims`, which floors its own result at
-// `boot_screen_cols` (SQ-0679/SQ-0680 — a running story's header column count
-// must never shrink below what it booted with). That floor is correct for
-// WRITING the header (`sync_zvm_screen_dims`), but wrong as this search's own
-// yardstick: a host that also seeds `TerminalFacts::min_story_screen` at boot
-// has already widened the pre-boot terminal until the RAW pre-boot pane
-// clears the floor (`min_terminal_size_for_story_floor`), so
-// `boot_screen_cols` itself ends up >= the floor from the moment the session
-// boots. Probing with the header-floored function then makes EVERY
-// candidate's returned cols >= boot_cols >= floor_cols trivially, so the very
-// first probe "passes" regardless of the candidate's actual raw width, and
-// the search returns `real` completely unchanged even though the pane's real
-// rendered grid is still narrower than `floor`.
+// `declared_story_screen_dims`, whose answer for a story told a FIXED width
+// (SQ-1809; before it, a floor at the session's boot width) is the same at every
+// candidate pane. That is right for WRITING the header
+// (`sync_zvm_screen_dims`), but wrong as this search's own yardstick: the
+// question is what RAW pane makes the rendered grid at least `floor` wide, so
+// the very first probe would "pass" regardless of the candidate's actual raw
+// width and the search would return `real` unchanged.
 //
 // Falsified by reverting `min_story_pane_for_floor`'s probe back to
-// `declared_story_screen_dims(..., version, gs.boot_screen_cols)` — this test
-// then fails, `got` reading back as the unchanged `REAL_PANE` (or its raw
+// `declared_story_screen_dims` — this test then fails, `got` reading back as the unchanged `REAL_PANE` (or its raw
 // `story_screen_dims` reading short of `FLOOR.0`), exactly the originally
 // reported symptom.
 #[test]

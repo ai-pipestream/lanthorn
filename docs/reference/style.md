@@ -93,6 +93,7 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `map.matrix.cell:path` | Map | Style | `accent` | `bold underline` | |
 | `map.matrix.cell:frontier` | Map | Style | `muted` |  | |
 | `map.matrix.cell:random` | Map | Style | `alert` |  | |
+| `map.matrix.cell:exit` | Map | Style | `accent` |  | |
 | `map.matrix.footnote` | Map | Style | `muted` |  | |
 | `map.edge:oneway` | Map | Style | `map.connector` |  | |
 | `map.edge:asym` | Map | Style | `map.connector` |  | |
@@ -191,6 +192,7 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `warning_marker` | Elements | Style | `alert` |  | |
 | `input_text` | Elements | Style | `text` |  | |
 | `input_prompt` | Elements | Style | `text` |  | |
+| `input_submit` | Elements | Style | `text` |  | |
 | `upper_window_border` | Elements | Style | `line` |  | |
 | `scott_room_panel` | Elements | Style | `accent` | `reversed` | |
 | `palette_query` | Elements | Style | `text` |  | |
@@ -208,6 +210,8 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `documents_spoiler` | Elements | Style | `alert` | `italic` | |
 | `documents_title_match` | Elements | Style | `accent` | `bold` | |
 | `documents_preview` | Elements | Style | `muted` |  | |
+| `documents_web_page` | Elements | Style | `accent` |  | |
+| `documents_obsolete` | Elements | Style | `alert` |  | |
 | `saves_portable` | Elements | Style | `accent` | `glyph="↗"` | |
 | `saves_host_only` | Elements | Style | `muted` |  | |
 | `dialog.list_selected` | Dialog | Style |  | `fg=Black bg=Cyan bold` | |
@@ -229,6 +233,10 @@ Every themeable `style.toml` selector: which role or selector it derives from, a
 | `command_panel.column_header:active` | Elements | Style | `accent` | `bold` | |
 | `command_panel.quick` | Elements | Style | `text` |  | |
 | `command_panel.quick:hover` | Elements | Style | `command_panel.quick` | `reversed` | |
+| `command_panel.quick:explored` | Elements | Style | `command_panel.quick` |  | |
+| `command_panel.quick:exit` | Elements | Style | `map.matrix.cell:exit` | `bold` | |
+| `command_panel.quick:blocked` | Elements | Style | `map.matrix.cell:frontier` | `dim` | |
+| `command_panel.quick:untried` | Elements | Style | `command_panel.quick` |  | |
 | `command_panel.group_label` | Elements | Style | `heading` |  | |
 | `command_panel.item:seen` | Elements | Style | `muted` |  | |
 | `file_browser_cwd` | Elements | Style | `alert` |  | |

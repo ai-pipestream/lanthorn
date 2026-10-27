@@ -175,17 +175,23 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
     // patched row: seven slots showing `# # ¤ − + M M` in both rows, identical,
     // inviting a "yes" on the strength of glyphs the answer does not install.
     // The case below caught exactly that, which is the argument for having it.
-    let (set, mark, map_controls) = if nerdfont {
+    let (set, mark, map_controls, submit) = if nerdfont {
         (
             SymbolSet::from_preset_names("rounded", NERD_ARROWS, NERD_PORTALS, "light"),
             ASSIST_LAMP,
             crate::symbols::MapControlGlyphs::preset(NERD_MAP_CONTROLS)
                 .unwrap_or_else(|| SymbolSet::default().map_controls),
+            // The command bar's send button (SQ-1801) is the one border-control
+            // glyph that sits in the player's way while typing, so it is sampled
+            // from the preset the "yes" installs, like every other slot.
+            crate::symbols::ControlGlyphs::preset(NERD_CONTROLS)
+                .unwrap_or_else(|| SymbolSet::default().controls)
+                .submit,
         )
     } else {
         let d = SymbolSet::default();
-        let (mark, mc) = (d.assist_gutter, d.map_controls);
-        (d, mark, mc)
+        let (mark, mc, submit) = (d.assist_gutter, d.map_controls, d.controls.submit);
+        (d, mark, mc, submit)
     };
     vec![
         set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west,
@@ -195,23 +201,26 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
     ]
     .into_iter()
     .chain(map_control_slots(&map_controls))
+    .chain([submit])
     .collect()
 }
 
-/// One sample row as it is drawn: the slots space-separated, in four groups
-/// (arrows · portals · the Guiding Light's mark · the map cluster) so a
+/// One sample row as it is drawn: the slots space-separated, in five groups
+/// (arrows · portals · the Guiding Light's mark · the map cluster · the command
+/// bar's send button) so a
 /// fallback glyph's wrong advance shows up as a group that does not line up
 /// with the row above it. Two spaces between groups rather than three, which is
-/// what keeps eighteen slots inside `DIALOG_W`.
+/// what keeps nineteen slots inside `DIALOG_W`.
 pub fn sample_row(nerdfont: bool) -> String {
     let g = sample_glyphs(nerdfont);
     let join = |r: &[char]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
     format!(
-        "{}  {}  {}  {}",
+        "{}  {}  {}  {}  {}",
         join(&g[0..4]),
         join(&g[4..10]),
         join(&g[10..11]),
         join(&g[11..18]),
+        join(&g[18..19]),
     )
 }
 
@@ -501,6 +510,7 @@ mod tests {
         assert!(g.contains(&'\u{F12BD}'), "MDI stairs-up, from PortalGlyphs::nerdfont-stairs");
         assert!(g.contains(&ASSIST_LAMP), "md-post_lamp, the Guiding Light's mark");
         assert!(g.contains(&'\u{F02C1}'), "md-grid, from MapControlGlyphs::nerdfont");
+        assert!(g.contains(&'\u{F0311}'), "md-keyboard_return, the command bar's send button");
         // And the plain row must be free of the private-use area entirely, or it
         // is not the answer that works everywhere.
         assert!(
@@ -552,6 +562,22 @@ mod tests {
         for c in [set.portal.marker, set.portal.up, set.portal.down, set.portal.in_, set.portal.out] {
             assert!(g.contains(&c), "an installed portal icon is not in the row");
         }
+    }
+
+    /// SQ-1801: the command bar's send button is in the row each answer installs
+    /// it from, patched and plain alike.
+    #[test]
+    fn both_rows_sample_the_command_bars_send_button() {
+        for nerd in [true, false] {
+            let want = if nerd {
+                crate::symbols::ControlGlyphs::preset(NERD_CONTROLS).expect("preset").submit
+            } else {
+                SymbolSet::default().controls.submit
+            };
+            assert!(sample_glyphs(nerd).contains(&want), "nerd={nerd}: send button U+{:05X} not sampled", want as u32);
+            assert!(sample_row(nerd).contains(want));
+        }
+        assert_eq!(SymbolSet::default().controls.submit, '\u{21B5}');
     }
 
     /// The plain row shows the same seven slots, so the comparison is a

@@ -73,7 +73,7 @@ fn boot_zork0() -> Option<GameSession> {
 fn render_state(mode: app::config::V6RenderMode) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = mode;
     state
 }
@@ -83,7 +83,7 @@ fn render_state(mode: app::config::V6RenderMode) -> app::state::AppState {
 /// whose only effect is the one frameless contributed — draw no game image.
 fn cell_path_state() -> app::state::AppState {
     let mut state = render_state(app::config::V6RenderMode::Hybrid);
-    state.game_picker = None;
+    state.set_game_picker(None);
     state
 }
 
@@ -222,8 +222,9 @@ fn zork0_hybrid_status_on_art_stays_in_the_ring() {
     for protocol in [ProtocolType::Kitty, ProtocolType::Halfblocks] {
         let glyphs_over_art = protocol == ProtocolType::Halfblocks;
         let mut state = render_state(app::config::V6RenderMode::Hybrid);
-        if let Some(p) = state.game_picker.as_mut() {
+        if let Some(mut p) = state.game_picker().cloned() {
             p.set_protocol_type(protocol);
+            state.set_game_picker(Some(p));
         }
         state.push_transcript("West of House");
         let area = Rect::new(0, 0, 80, 30);

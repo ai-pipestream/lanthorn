@@ -65,7 +65,7 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
             buf,
             content.x,
             content.y,
-            "A save was found for this story.",
+            "A save was found for this game.",
             body_style,
             content,
         );

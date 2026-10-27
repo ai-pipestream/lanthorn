@@ -421,7 +421,7 @@ pub fn answer_file_prompt(
                 ifid,
                 map_view,
             );
-            return turn::TurnOutcome { quit: loaded.quit, ..Default::default() };
+            return loaded.outcome;
         }
         (Some(FilePrompt::Restore), None) => state.overlays.saves = None,
         (Some(FilePrompt::Filename(_)), choice) => {

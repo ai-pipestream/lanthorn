@@ -148,11 +148,11 @@ fn zork0_hint_header_is_raster_on_the_banner_and_the_topics_are_glyphs() {
         let glyphs_over_art = protocol == ratatui_image::picker::ProtocolType::Halfblocks;
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some({
+        state.set_game_picker(Some({
             let mut p = ratatui_image::picker::Picker::halfblocks();
             p.set_protocol_type(protocol);
             p
-        });
+        }));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         let area = Rect::new(0, 0, 100, 34);
         let mut buf = Buffer::empty(area);
@@ -230,7 +230,7 @@ fn zork0_hint_menu_draws_the_ring_and_keeps_its_bands_across_the_round_trip() {
         state.colors = app::colors::ColorScheme::terminal_default();
         // A real kitty cell size: the band cache and its uploads only exist on the
         // pixel path, and that is what the resume gate protects.
-        state.game_picker = Some(app::render::graphics::kitty_picker(14, 28));
+        state.set_game_picker(Some(app::render::graphics::kitty_picker(14, 28)));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         state.config.honor_game_colours = honor;
         let area = Rect::new(0, 0, 100, 40);
@@ -448,7 +448,7 @@ fn a_promoted_menu_grid_is_not_a_transcript_surface_in_raster() {
             let state = |lines: usize| {
                 let mut st = app::state::AppState::default();
                 st.colors = app::colors::ColorScheme::terminal_default();
-                st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
                 st.config.v6_render = app::config::V6RenderMode::Raster;
                 st.config.honor_game_colours = honor;
                 st.transcript = (0..lines).map(|i| format!("ZZ transcript row {i} ZZ")).collect();
@@ -576,7 +576,7 @@ fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
     for (w, h) in [(136u16, 50u16), (100, 34), (114, 50), (90, 30), (160, 60)] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);

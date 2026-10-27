@@ -122,7 +122,7 @@ fn zork0_title_splash_fills_the_screen_and_carves_no_story_viewport() {
     // And the hybrid render must not paint the prior transcript over the splash.
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // Seed a distinctive transcript line as the running app would have.
     state.push_transcript("The king is dead!");

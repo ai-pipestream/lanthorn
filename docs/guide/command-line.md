@@ -37,7 +37,7 @@ file live, as it happens, so a screen reader or a second terminal's
 A turn that prints more than a screenful stops at the bottom of the page with
 a `[MORE]` bar and waits for a key, the way the original interpreters did.
 `--pager off` turns that off. `--pin bottom` (alias `--scrollback`) moves the
-status line to the bottom of the screen instead of the top, so the story
+status line to the bottom of the screen instead of the top, so the game
 scrolls straight into your terminal's own history — its scroll wheel, its
 selection, its search — rather than standing in the way. Swap between the
 two mid-game with `/pin`.
@@ -85,7 +85,7 @@ files per game instead, and appends to them; see
 
 ## Maintaining a library without the TUI
 
-`--fetch missing` walks a directory of stories and fetches titles, blurbs,
+`--fetch missing` walks a directory of games and fetches titles, blurbs,
 ratings and cover art from IFDB for everything that's missing them, with no
 terminal needed — handy for a server or a big library you'd rather populate
 in one pass than one keypress at a time in the picker. `--fetch all`
@@ -109,17 +109,17 @@ Names are 1 to 29 characters of letters, digits, `.`, `_` and `-`, and may not
 start with a dot; anything else is refused with an error before lanthorn
 touches a file.
 
-**What is shared.** Everything IFDB gave a story (title, author, blurb, rating,
-cover), what lanthorn has learned about a Glulx story's insides, your
+**What is shared.** Everything IFDB gave a game (title, author, blurb, rating,
+cover), what lanthorn has learned about a Glulx game's insides, your
 `config.toml` and `style.toml` as the starting point for every player, and the
 install-wide extras (hint files, logs, system fonts and disks). One player's
 metadata fetch shows up for everyone.
 
-**What is per player.** Everything under `~/.lanthorn/users/<name>/`: their
+**What is per player.** Everything under `users/<name>/` in your data folder: their
 saves and quick-saves, in-game saves, auto-resume, map and turn history,
 transcripts and scripts, and each game's own settings. A game one player has
 saved shows as played only for them; deleting or resetting your saves never
-removes the shared story information.
+removes the shared game information.
 
 **Settings layer.** A player's own `config.toml` (and `style.toml`) sits on top
 of the shared one. It starts empty, and lanthorn writes only the settings that player
@@ -129,12 +129,13 @@ hears it. `[keymap]` and `[hotkeys]` layer the same way. The default player's
 `config.toml` *is* the shared one, so their changes become everyone's defaults
 unless a player has set their own.
 
-`--user-dir` moves the whole `.lanthorn`, player trees included. `--data-dir`
-stands in for `~/.lanthorn/saves`, the shared catalogue (and the default
-player's saves); a named player's files always sit under `users/` in the user
-directory. The per-game documents folders (manuals and maps, see
-[the story picker](getting-started.md#the-story-picker)) are shared by every
-player too: they live in `~/.lanthorn/documents` whatever `--data-dir` and
+`--user-dir <folder>` puts everything (config, saves, player trees, documents and
+cache) in that one folder. `--data-dir`
+stands in for `saves/` in your data folder, the shared catalogue (and the default
+player's saves); a named player's files always sit under `users/` in the data
+folder. The per-game documents folders (manuals and maps, see
+[the game picker](getting-started.md#the-game-picker)) are shared by every
+player too: they live in `documents/` in your data folder whatever `--data-dir` and
 `--player` say, unless the shared `config.toml` sets `documents_dir`.
 
 **Lanthorn does not check who you are.** `--player amy` means "act as amy", and

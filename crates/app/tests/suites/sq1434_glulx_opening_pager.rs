@@ -77,7 +77,7 @@ fn key(code: KeyCode) -> KeyEvent {
 fn render_state() -> AppState {
     let mut st = AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     st
 }
 

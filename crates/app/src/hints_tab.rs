@@ -32,16 +32,87 @@ use ratatui::style::{Modifier, Style};
 use crate::engine::Engine;
 use crate::hint_download::{HintDlOutcome, HintDlResult, HintDownloader};
 use crate::hints::HintStory;
-use crate::host::hints::{already_running, game_hint_status, no_hint_message, start, GameHintStatus, HintStart};
+use crate::host::hints::{already_running, game_hint_status_with_tuid, no_hint_message, start_with_tuid, GameHintStatus, HintStart};
 use crate::render::transcript::wrap_line;
 use crate::state::{AppState, Focus, HintSession, HintSource};
 
 /// The registry command the tab's button runs.
 pub const CMD_DOWNLOAD: &str = "download-hints";
 const DOWNLOAD_LABEL: &str = " [ Download hints… ] ";
-const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in the story.";
+const BUILTIN_LINE: &str = "This game has its own hints \u{2014} type HINT in the game.";
 /// Lines scrolled per PageUp/PageDown while the session has the keyboard.
+/// The narrowest width a standalone hint program is told (SQ-1809). The `*inv`
+/// InvisiClues programs lay their menus out from header byte $21 on every screen
+/// entry and collide below this: `stationinv`'s 39-column submenu title meets the
+/// 33-column right-aligned legend on one row and breaks at 70, `spellbinv` clips
+/// its question rows until 76 and is clean at 72 (measured on SQ-1809 with
+/// `crates/zvm/examples/hint_probe.rs`). The `*izm` programs have their own,
+/// smaller floor, [`HINTS_MIN_COLS_IZM`]; this one is for every other program.
+/// A panel narrower than this still shows the program laid out at 72, drawn
+/// through the upper window's column plan (`render::upper_window::column_plan`),
+/// which removes the blank gap between title and legend.
+pub const HINTS_MIN_COLS: u16 = 72;
+/// The narrowest width an `*izm` hint program (a file stem ending in `izm`, the
+/// side-panel family) is told (SQ-1812). Measured on SQ-1809: the `*izm` programs
+/// lay out cleanly from 40 to 60 columns, and the worst five (`arthrizm`,
+/// `bzorkizm`, `cutthizm`, `infdlizm`, `journizm`) need 60.
+pub const HINTS_MIN_COLS_IZM: u16 = 60;
+
+/// The width floor for the hint program called `program` (its file name; `None`
+/// when not known yet): [`HINTS_MIN_COLS_IZM`] for an `*izm` file stem, else
+/// [`HINTS_MIN_COLS`], so an unknown program stays on the safe side.
+///
+/// For an embedding host: this is the one rule the TUI's Hints tab floors its boot
+/// width with. Take the larger of your panel's width and this before handing `screen`
+/// to [`crate::host::hints::open`], and you floor exactly as the TUI does, including
+/// any future change to the rule. `program` is the hint file's name or path; its stem
+/// is what is read, case-insensitively.
+pub fn hint_program_min_cols(program: Option<&str>) -> u16 {
+    let stem = program.map(|p| Path::new(p).file_stem().and_then(|s| s.to_str()).unwrap_or(p));
+    match stem {
+        Some(s) if s.to_ascii_lowercase().ends_with("izm") => HINTS_MIN_COLS_IZM,
+        _ => HINTS_MIN_COLS,
+    }
+}
+
+/// The file name of the hint program a start will open, known before it boots so the
+/// boot width can use its floor: the pick, else what the resolver finds.
+///
+/// For an embedding host: feed the result to [`hint_program_min_cols`] to floor the panel
+/// width passed to `host::hints::open` exactly as the TUI does, without restating the
+/// resolver. `picked` is a hint file the player chose by hand (for instance from a chooser
+/// when several candidates tied); its file name is returned as is. `None` lets the resolver
+/// find the program the way `open` will. The answer is `None` when nothing resolves
+/// automatically; a zip entry yields its last path component.
+pub fn hint_program_name(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    picked: Option<&Path>,
+    index: &crate::hints::HintIndex,
+) -> Option<String> {
+    use crate::hints::HintResolution;
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    if let Some(p) = picked {
+        return name(p);
+    }
+    match crate::hints::resolve_hint_source_with_tuid(story_path, story, tuid, index) {
+        HintResolution::File(p) => name(&p),
+        HintResolution::ZipEntry { entry, .. } => entry.rsplit('/').next().map(str::to_owned),
+        _ => None,
+    }
+}
 const HINT_PAGE_LINES: i32 = 10;
+
+/// The dictionary the built-in-HINT check reads: empty when the story's `HINT`
+/// only advertises Infocom's InvisiClues booklets (SQ-1745).
+fn builtin_hint_words(state: &AppState) -> &[String] {
+    if state.hint_booklet_notice {
+        &[]
+    } else {
+        &state.dict_words
+    }
+}
 
 /// Where the tab's session stands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -128,6 +199,15 @@ impl HintsTab {
     }
 
     /// Where the last draw put things.
+    /// The `(rows, cols)` the hint program should be laid out at: the panel the last
+    /// draw gave it, less the input row, the width floored at [`HINTS_MIN_COLS`], or at
+    /// [`HINTS_MIN_COLS_IZM`] when `program` (the hint file's name) is an `*izm` program
+    /// (SQ-1812). `None` before the tab has been drawn at all (SQ-1753).
+    pub fn panel_screen(&self, program: Option<&str>) -> Option<(u16, u16)> {
+        let area = self.hits.borrow().area;
+        (area.width > 0 && area.height > 1).then(|| (area.height - 1, area.width.max(hint_program_min_cols(program))))
+    }
+
     pub fn hits(&self) -> HintsHits {
         self.hits.borrow().clone()
     }
@@ -152,6 +232,14 @@ pub fn game_documents_dir(state: &AppState, story_path: &Path) -> Option<PathBuf
     crate::documents::locate(roots, entry.meta.ifdb_tuid.as_deref(), &entry.title).path().map(Path::to_path_buf)
 }
 
+/// The running game's IFDB tuid, from its library record; `None` when the game is
+/// not linked or the host has no library. The identity fallback for an IFID the
+/// registry does not know ([`crate::hints::hint_download_for_with_tuid`]).
+pub fn game_ifdb_tuid(state: &AppState, story_path: &Path) -> Option<String> {
+    let roots = state.data_roots.as_ref()?;
+    crate::picker::resolve_entry_from(story_path, state.source.disk_entry.as_deref(), roots)?.meta.ifdb_tuid
+}
+
 /// Start the session the first time the tab is on screen. Called once per loop
 /// turn; `true` when something changed and a redraw is due.
 ///
@@ -164,12 +252,24 @@ pub fn ensure_started(state: &mut AppState, story_path: &Path, ifid: &str) -> bo
         return false;
     }
     let documents = game_documents_dir(state, story_path);
-    ensure_started_in(state, story_path, ifid, documents.as_deref())
+    let tuid = game_ifdb_tuid(state, story_path);
+    ensure_started_in_with_tuid(state, story_path, ifid, tuid.as_deref(), documents.as_deref())
 }
 
 /// [`ensure_started`] with the game's documents folder already known (the seam the
 /// tests use; `documents` is what [`game_documents_dir`] answers).
 pub fn ensure_started_in(state: &mut AppState, story_path: &Path, ifid: &str, documents: Option<&Path>) -> bool {
+    ensure_started_in_with_tuid(state, story_path, ifid, None, documents)
+}
+
+/// [`ensure_started_in`] with the game's IFDB tuid (see [`game_ifdb_tuid`]).
+pub fn ensure_started_in_with_tuid(
+    state: &mut AppState,
+    story_path: &Path,
+    ifid: &str,
+    tuid: Option<&str>,
+    documents: Option<&Path>,
+) -> bool {
     if !state.hints_tab_visible() {
         return false;
     }
@@ -187,8 +287,10 @@ pub fn ensure_started_in(state: &mut AppState, story_path: &Path, ifid: &str, do
     };
     state.hints_tab.phase = Phase::NotStarted;
     let index = crate::hints::load_hint_index(&state.config.user_dir);
-    state.hints_tab.status = game_hint_status(story_path, story, &index);
-    match start(story_path, story, picked.as_deref(), running.as_deref(), &state.dict_words, &state.config) {
+    state.hints_tab.status = game_hint_status_with_tuid(story_path, story, tuid, &index);
+    let program = hint_program_name(story_path, story, tuid, picked.as_deref(), &index);
+    let screen = state.hints_tab.panel_screen(program.as_deref());
+    match start_with_tuid(story_path, story, tuid, picked.as_deref(), running.as_deref(), builtin_hint_words(state), &state.config, screen) {
         HintStart::Started(session) => {
             state.overlays.hints = Some(*session);
             state.hints_tab.phase = Phase::Running;
@@ -201,6 +303,30 @@ pub fn ensure_started_in(state: &mut AppState, story_path: &Path, ifid: &str, do
         HintStart::NoHint(_) => state.hints_tab.phase = Phase::NoHint,
         HintStart::Failed(e) => state.hints_tab.phase = Phase::Failed(e.to_string()),
     }
+    true
+}
+
+/// Tell a running hint program the panel's size when the panel has been resized since
+/// it booted, the way the story pane's `sync_zvm_screen_dims` does for the story (SQ-1753).
+/// Returns `true` when the program's header changed. The boot size is what the program
+/// laid itself out at (see [`crate::host::hints::open`]); this keeps its later menu
+/// redraws and wrapping in step.
+pub fn sync_screen_dims(state: &mut AppState) -> bool {
+    use crate::engine::Engine;
+    let program = state.overlays.hints.as_ref().map(|hs| hs.label.clone());
+    let Some((rows, cols)) = state.hints_tab.panel_screen(program.as_deref()) else { return false };
+    let Some(HintSession { source: HintSource::Zcode(vm), .. }) = state.overlays.hints.as_mut() else {
+        return false;
+    };
+    let version = vm.machine.mem.version();
+    if version < 4 || version == 6 {
+        return false;
+    }
+    let current = (vm.machine.mem.read_byte(0x20) as u16, vm.machine.mem.read_byte(0x21) as u16);
+    if current == (rows.min(255), cols.min(255)) {
+        return false;
+    }
+    vm.set_screen_dims(rows, cols);
     true
 }
 
@@ -240,15 +366,27 @@ fn end_session(state: &mut AppState) {
 /// result arrives through [`poll_download`].
 pub fn start_download(state: &mut AppState, story_path: &Path) {
     let documents = game_documents_dir(state, story_path);
-    start_download_in(state, story_path, documents);
+    let tuid = game_ifdb_tuid(state, story_path);
+    start_download_in_with_tuid(state, story_path, tuid.as_deref(), documents);
 }
 
 /// [`start_download`] with the documents folder already known.
 pub fn start_download_in(state: &mut AppState, story_path: &Path, documents: Option<PathBuf>) {
+    start_download_in_with_tuid(state, story_path, None, documents);
+}
+
+/// [`start_download_in`] with the game's IFDB tuid (see [`game_ifdb_tuid`]).
+pub fn start_download_in_with_tuid(
+    state: &mut AppState,
+    story_path: &Path,
+    tuid: Option<&str>,
+    documents: Option<PathBuf>,
+) {
     let running = state.hints_tab.phase == Phase::Running;
-    let line = crate::host::hints::start_game_download(
+    let line = crate::host::hints::start_game_download_with_tuid(
         &mut state.hints_tab.downloader,
         &state.ifid,
+        tuid,
         &state.title,
         story_path,
         state.source.disk_entry.as_deref(),
@@ -646,7 +784,7 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
     fill(buf, input_rect, input_style);
     let line = if char_mode {
         if focused {
-            "(press a key \u{00b7} \u{2191}/\u{2193}/Enter navigate \u{00b7} Esc back to the story)".to_string()
+            "(press a key \u{00b7} \u{2191}/\u{2193}/Enter navigate \u{00b7} Esc back to the game)".to_string()
         } else {
             "(click here, or Tab, to use the hint menu)".to_string()
         }
@@ -691,8 +829,9 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
     }
 
     // The built-in-HINT suggestion takes the first row under the menu.
-    let hint_rows: u16 = u16::from(session.builtin_hint);
-    if session.builtin_hint && transcript_area.height >= 1 {
+    let show_builtin = session.shows_builtin_line();
+    let hint_rows: u16 = u16::from(show_builtin);
+    if show_builtin && transcript_area.height >= 1 {
         crate::render::draw_str_clipped(
             buf, transcript_area.x, transcript_area.y, BUILTIN_LINE, st.builtin, transcript_area,
         );
@@ -706,14 +845,20 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
 
     // Word-wrap each logical transcript line to the width, then show the window of
     // `body_h` rows honouring `session.scroll` (the eased value while animating).
-    let wrapped: Vec<String> = session
-        .transcript
-        .iter()
-        .flat_map(|line| wrap_line(line, body_area.width))
-        .collect();
+    let mut wrapped: Vec<String> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(session.transcript.len());
+    for line in &session.transcript {
+        starts.push(wrapped.len());
+        wrapped.extend(wrap_line(line, body_area.width));
+    }
     let n = wrapped.len();
     let rows = body_h as usize;
-    let max_scroll = n.saturating_sub(rows).min(u16::MAX as usize) as u16;
+    // Top-anchor the post-clear screen exactly as the story pane does (shared
+    // `render::transcript` helpers, SQ-1789): at the bottom, output since the
+    // program's last screen clear sits at the TOP with blanks below, older text
+    // reachable by scrolling up.
+    let anchor_row = crate::render::transcript::anchor_row_at(&starts, n, session.top_anchor);
+    let max_scroll = crate::render::transcript::anchored_max_scroll(n, anchor_row, rows).min(u16::MAX as usize) as u16;
     hits.max_scroll = max_scroll;
     let scroll = (session.effective_scroll() as usize).min(max_scroll as usize);
 
@@ -722,8 +867,7 @@ fn draw_session(state: &AppState, session: &HintSession, st: &Styles, area: Rect
     let text_w = if scrollbar_visible { body_area.width.saturating_sub(1) } else { body_area.width };
     let text_area = Rect::new(body_area.x, body_area.y, text_w, body_area.height);
 
-    let end = n.saturating_sub(scroll);
-    let start = end.saturating_sub(rows);
+    let (start, end) = crate::render::transcript::anchored_window_bounds(n, anchor_row, rows, scroll);
     for (i, line) in wrapped[start..end].iter().enumerate() {
         let row_y = body_top + i as u16;
         if row_y >= text_area.bottom() {
@@ -780,7 +924,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec!["pick a topic".to_string()],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: "3".to_string(),
             label: "Hints: X".to_string(),
@@ -809,16 +953,149 @@ mod tests {
         rows
     }
 
+    /// SQ-1789: after a screen clear the panel's rows start at the post-clear text
+    /// (the intro printed before the FIRST clear is not on screen), and scrolling up
+    /// brings the intro back.
     #[test]
-    fn tab_renders_transcript_suggestion_and_input() {
+    fn the_panel_pins_to_the_text_since_the_programs_last_clear() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        let turn = |text: &str, erase_lower: bool| crate::session::TurnResult {
+            transcript: text.to_string(),
+            erase_lower,
+            ..crate::session::TurnResult::default()
+        };
+        hs.apply_turn(&turn("intro one\nSample Question", false));
+        hs.apply_turn(&turn("menu alpha\nmenu beta", true));
+        let mut state = tab_state(hs);
+
+        let rows = screen_rows(60, 20, &state);
+        assert!(!rows.iter().any(|r| r.contains("intro one") || r.contains("Sample Question")), "{rows:#?}");
+        let alpha = rows.iter().position(|r| r.contains("menu alpha")).expect("menu drawn");
+        assert!(rows[alpha + 1].contains("menu beta"));
+        assert!(rows[alpha + 2].trim_matches(|c: char| !c.is_alphanumeric()).is_empty(), "blank below the pinned text");
+
+        state.overlays.hints.as_mut().unwrap().scroll = 2;
+        let rows = screen_rows(60, 20, &state);
+        let intro = rows.iter().position(|r| r.contains("intro one")).expect("scrollback reachable");
+        let alpha = rows.iter().position(|r| r.contains("menu alpha")).unwrap();
+        assert!(intro < alpha, "scrolling up reveals the intro above the pinned text");
+    }
+
+    /// SQ-1789, real program: hhgginv.z5 prints its introduction and a "Sample Question"
+    /// before its first screen clear. After the clear the visible screen is only what it
+    /// printed since; the intro stays reachable as scrollback. Skips when absent.
+    #[test]
+    fn hhgginv_intro_is_cleared_off_the_screen_but_kept_as_scrollback() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/hhgginv.z5");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: stories/hhgginv.z5 absent");
+            return;
+        };
+        let mut vm = crate::session::GameSession::new(bytes, true, false, None).expect("boot");
+        let opening = vm.take_transcript();
+        let mut hs = HintSession {
+            source: HintSource::Zcode(vm),
+            transcript: opening.split('\n').map(str::to_owned).collect(),
+            scroll: 0,
+            clear_anchor: None,
+            top_anchor: None,
+            scroll_anim: None,
+            input: String::new(),
+            label: "hhgginv.z5".to_string(),
+            builtin_hint: false,
+        };
+        assert!(hs.transcript.iter().any(|l| l.contains("Sample Question")), "premise: intro is up");
+        for _ in 0..3 {
+            let HintSource::Zcode(vm) = &mut hs.source;
+            let result = vm.submit_char(b' ');
+            hs.apply_turn(&result);
+        }
+        let anchor = hs.top_anchor.expect("the program cleared its screen");
+        let screen = &hs.transcript[anchor..];
+        assert!(!screen.iter().any(|l| l.contains("Sample Question") || l.contains("InvisiClues")), "{screen:?}");
+        assert!(screen.iter().any(|l| l.contains("press 'H' for a hint")), "{screen:?}");
+        assert!(hs.transcript[..anchor].iter().any(|l| l.contains("Sample Question")), "intro kept as scrollback");
+
+        let state = tab_state(hs);
+        let rows = screen_rows(80, 24, &state);
+        assert!(!rows.iter().any(|r| r.contains("Sample Question")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("press 'H' for a hint")));
+    }
+
+    /// SQ-1753: the panel's drawn size is what a running hint program is told, and a later
+    /// resize of the panel is re-declared; before the first draw there is no size to give.
+    #[test]
+    fn a_running_hint_program_follows_the_panel_size() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stories/Tangle.z5");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: Tangle.z5 fixture absent");
+            return;
+        };
+        let vm = crate::session::GameSession::new(bytes, true, false, None).expect("v5 session");
+        let hs = HintSession {
+            source: HintSource::Zcode(vm),
+            transcript: Vec::new(),
+            scroll: 0,
+            clear_anchor: None, top_anchor: None,
+            scroll_anim: None,
+            input: String::new(),
+            label: "Hints: X".to_string(),
+            builtin_hint: false,
+        };
+        let mut state = tab_state(hs);
+        assert_eq!(state.hints_tab.panel_screen(None), None, "nothing drawn yet, so no size to give");
+        assert!(!sync_screen_dims(&mut state));
+
+        let _ = screen_rows(60, 20, &state);
+        assert_eq!(state.hints_tab.panel_screen(Some("Hints: X")), Some((17, HINTS_MIN_COLS)), "the framed panel less its input row, width floored (SQ-1809)");
+        assert!(sync_screen_dims(&mut state), "the header changes to the panel's size");
+        let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
+        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (17, HINTS_MIN_COLS as u8));
+        assert!(!sync_screen_dims(&mut state), "a second call has nothing to change");
+
+        let _ = screen_rows(50, 14, &state);
+        assert!(sync_screen_dims(&mut state), "a later resize is re-declared");
+        let HintSource::Zcode(vm) = &state.overlays.hints.as_ref().unwrap().source;
+        assert_eq!((vm.machine.mem.read_byte(0x20), vm.machine.mem.read_byte(0x21)), (11, HINTS_MIN_COLS as u8));
+    }
+
+    /// SQ-1812: the floor follows the program's family: `*izm` programs (side-panel
+    /// hints) are told 60, everything else, `*inv` included, keeps 72.
+    #[test]
+    fn an_izm_program_is_floored_at_60_and_an_inv_program_at_72() {
+        let tab = HintsTab::default();
+        tab.hits.borrow_mut().area = ratatui::layout::Rect::new(0, 0, 50, 18);
+        assert_eq!(tab.panel_screen(Some("arthrizm.z5")), Some((17, HINTS_MIN_COLS_IZM)));
+        assert_eq!(tab.panel_screen(Some("ARTHRIZM.Z5")), Some((17, 60)), "case-insensitive");
+        assert_eq!(tab.panel_screen(Some("stationinv.z5")), Some((17, HINTS_MIN_COLS)));
+        assert_eq!(tab.panel_screen(Some("Hints: X")), Some((17, 72)), "an unknown program stays on the safe side");
+        assert_eq!(tab.panel_screen(None), Some((17, 72)), "no program known yet");
+        tab.hits.borrow_mut().area = ratatui::layout::Rect::new(0, 0, 66, 18);
+        assert_eq!(tab.panel_screen(Some("arthrizm.z5")), Some((17, 66)), "a wider panel is told its own width");
+    }
+
+    #[test]
+    fn a_booklet_only_hint_word_does_not_count_as_builtin_hints() {
+        let mut state = AppState::default();
+        state.dict_words = vec!["hint".to_string(), "look".to_string()];
+        assert!(crate::hints::story_supports_hint(builtin_hint_words(&state).iter().cloned()));
+        state.hint_booklet_notice = true;
+        assert!(!crate::hints::story_supports_hint(builtin_hint_words(&state).iter().cloned()));
+    }
+
+    #[test]
+    fn tab_renders_transcript_and_input_without_the_builtin_suggestion_while_a_companion_runs() {
         let Some(hs) = make_hint_session() else {
             eprintln!("SKIP: minizork.z3 fixture absent");
             return;
         };
+        assert!(hs.builtin_hint, "non-vacuity: the session was told the story has a HINT word");
+        assert!(!hs.shows_builtin_line());
         let state = tab_state(hs);
         let all = screen_rows(80, 30, &state).join("\n");
         assert!(all.contains("pick a topic"), "transcript text must appear");
-        assert!(all.contains("HINT"), "built-in hint suggestion ('type HINT') must appear");
+        assert!(!all.contains("type HINT"), "SQ-1745: no 'type HINT' line above a running companion");
         assert!(all.contains("> 3"), "the input row shows the buffer");
         assert!(state.hints_tab.hits().input.height == 1, "the input row's rect is recorded");
     }

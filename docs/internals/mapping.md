@@ -297,7 +297,7 @@ The map is a place you can move through, not just a picture.
   will cross again — the way out when you were noticed leaving, the trapdoor itself when
   you were noticed inside. **Not now** re-arms
   the seam for your next crossing, **not this passage** silences that one passage for good,
-  **never for this story** silences the whole prompt — every trigger, every passage — for the
+  **never for this game** silences the whole prompt — every trigger, every passage — for the
   rest of this map, and folding a layer back into another silences every passage it just
   closed — you have already said those rooms belong together. A prompt that comes back on
   the very next step is worse than no prompt at all, because it teaches you to dismiss it
@@ -671,7 +671,8 @@ hidden however empty the column looks.
 | `↩`    | self-loop — this direction leads back into this very room |
 | `⇱out` | leaves the layer; the destination is footnoted below the table |
 | `×`    | tried, and there is no path that way |
-| `·`    | untried — the exploration frontier |
+| `·`    | untried — the exploration frontier (a room nobody has scanned) |
+| `»`    | a real exit nobody has walked yet: an exit scan found it (SQ-1773; `scan_exits`). The landing id is kept hidden (`scan_landings`, SQ-1775) and, when that room first enters the graph by any route, the stub becomes a probed passage (`Mapper::resolve_scan_landings`) |
 
 A move that got you *killed* leaves no `×` behind. Dying says nothing about whether
 the passage is open, so the attempt is taken back and the cell stays `·`, still on

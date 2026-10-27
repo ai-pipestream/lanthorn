@@ -18,8 +18,8 @@
 //! Five nouns printed in three lines of prose, and the line the reveal draws
 //! runs between two of the three groups, not three (SQ-1135):
 //!
-//! - **`mailbox`, `house`, `door` — words this story knows.** They light.
-//! - **`window` — a word this story knows, for something elsewhere.** It would
+//! - **`mailbox`, `house`, `door` — words this game knows.** They light.
+//! - **`window` — a word this game knows, for something elsewhere.** It would
 //!   light too, wherever the prose printed it; nothing here does.
 //! - **`field` — not a word at all.** The story has never heard it, so nothing
 //!   lights it. It is also the word the room description leads with, which is
@@ -675,6 +675,36 @@ fn glulx_glue_words_stay_out_of_the_object_word_set() {
     }
     for thing in ["tavern", "devil"] {
         assert!(set.contains(thing), "{thing:?} is a real object name in the very array the glue rides in on");
+    }
+}
+
+/// **SQ-1748's contract.** Inform's compass objects (`north`/`n`, `up`/`u`,
+/// `outside`/`out`, ...) and I7's pronoun-group objects (`man`/`woman` groups
+/// answering to `he him she her`) store those words in their `name` arrays, and
+/// the reveal lit `up`, `out` and `he` in Toby's Nose's opening text. Asked of
+/// the SET directly. `carpet` and `sofa` — real nouns the story's own tutorial
+/// types — stay lit, and so does `direction` (a kind word, not a direction).
+///
+/// Non-vacuity: the specimen's object list really does carry the words, so the
+/// case fails the moment `DIRECTIONS`/`PRONOUNS` come out of
+/// `ObjectWordSet::build`.
+#[test]
+fn glulx_direction_words_and_pronouns_stay_out_of_the_object_word_set() {
+    use app::engine::Introspect;
+    let Some(session) = glulx_session("Toby's Nose.gblorb") else { return };
+    let all = Introspect::all_object_words(&session).expect("Toby's Nose answers");
+    for carried in ["north", "out", "he", "him", "she", "her"] {
+        assert!(
+            all.iter().any(|o| o.words.iter().any(|w| w == carried)),
+            "sanity: an object of this story must carry {carried:?}, or this proves nothing"
+        );
+    }
+    let set = Introspect::object_word_set(&session).expect("Toby's Nose answers");
+    for w in grammar_model::DIRECTIONS.iter().chain(grammar_model::PRONOUNS.iter()) {
+        assert!(!set.contains(w), "{w:?} is a direction or pronoun and must not light (SQ-1748)");
+    }
+    for thing in ["carpet", "sofa", "direction"] {
+        assert!(set.contains(thing), "{thing:?} is a real name word and stays lit");
     }
 }
 

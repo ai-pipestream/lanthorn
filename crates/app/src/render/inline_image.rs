@@ -11,10 +11,14 @@
 //! resample the whole picture once per band row (SQ-0513).
 
 use ratatui::buffer::Buffer;
+#[cfg(feature = "terminal")]
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Style};
+#[cfg(feature = "terminal")]
 use ratatui_image::picker::Picker;
+#[cfg(feature = "terminal")]
 use ratatui_image::protocol::Protocol;
+#[cfg(feature = "terminal")]
 use ratatui_image::Resize;
 
 use crate::render::transcript::ImageBand;
@@ -23,7 +27,10 @@ use crate::state::AppState;
 /// If `wr` is an inline-image band row, blit it and return true (caller does
 /// `continue`). A band row is consumed (no text drawn over it) even when no
 /// game picker is present — matches the prior duplicated behavior at both call
-/// sites (transcript draw loop and non-primary buffer windows).
+/// sites (transcript draw loop and non-primary buffer windows). Without the
+/// `terminal` feature (SQ-1804) there is never a picker, so the row is consumed
+/// and nothing is blitted.
+#[cfg_attr(not(feature = "terminal"), allow(unused_variables))]
 pub(crate) fn try_blit_band_row(
     state: &AppState,
     wr: &super::transcript::WrappedRow,
@@ -33,7 +40,8 @@ pub(crate) fn try_blit_band_row(
     buf: &mut Buffer,
 ) -> bool {
     if let Some(band) = &wr.band {
-        if let Some(picker) = state.game_picker.as_ref() {
+        #[cfg(feature = "terminal")]
+        if let Some(picker) = state.game_picker() {
             let suppress = sixel_scroll_suppress(state, picker);
             blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
         }
@@ -48,6 +56,7 @@ pub(crate) fn try_blit_band_row(
 /// protocol with no image ids, so scrolling a placed image past its anchor cell
 /// re-emits the whole payload rather than re-placing an existing upload the way
 /// kitty does. Kitty and half-blocks are untouched: neither pays that cost.
+#[cfg(feature = "terminal")]
 fn sixel_scroll_suppress(state: &AppState, picker: &Picker) -> bool {
     picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel && state.transcript_scroll_in_motion()
 }
@@ -56,6 +65,7 @@ fn sixel_scroll_suppress(state: &AppState, picker: &Picker) -> bool {
 /// [`try_blit_band_row`] this does NOT consume the row — the caller has already
 /// drawn the row's text to the right of the picture, so this only lays the image
 /// down over the left `cols` columns. No-op without a game picker. (SQ-0454)
+#[cfg_attr(not(feature = "terminal"), allow(unused_variables))]
 pub(crate) fn blit_float_row(
     state: &AppState,
     band: &ImageBand,
@@ -64,7 +74,8 @@ pub(crate) fn blit_float_row(
     row_y: u16,
     buf: &mut Buffer,
 ) {
-    if let Some(picker) = state.game_picker.as_ref() {
+    #[cfg(feature = "terminal")]
+    if let Some(picker) = state.game_picker() {
         let suppress = sixel_scroll_suppress(state, picker);
         blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
     }
@@ -75,6 +86,7 @@ pub(crate) fn blit_float_row(
 /// buffer windows (Task 9): both offset by `band.x_off`, clamp the width to the
 /// drawable body, and render the strip via `InlineImageRender::render_row`, so a
 /// game-supplied band can never exceed the area.
+#[cfg(feature = "terminal")]
 pub(crate) fn blit_band(
     render: &std::cell::RefCell<InlineImageRender>,
     picker: &Picker,
@@ -114,11 +126,13 @@ pub(crate) fn blit_band(
 /// clears `GraphicsRender` outright — but `InlineImageRender` is a sibling field
 /// on `AppState` and got neither. It is a key rather than a second invalidation
 /// call so there is nothing for a future resize path to forget.
+#[cfg(feature = "terminal")]
 type BandCacheKey = (usize, u16, u16, u16, u32, u16, u16);
 
 /// Cache key for a band's shared fit: [`BandCacheKey`] without the row or the
 /// page, since the fit is the whole picture and predates both. It carries the
 /// cell size for the same reason (SQ-1003).
+#[cfg(feature = "terminal")]
 type FittedKey = (usize, u16, u16, u16, u16);
 
 /// Fold a resolved page into the `u32` both [`BandCacheKey`] and [`FittedKey`]
@@ -127,6 +141,7 @@ type FittedKey = (usize, u16, u16, u16, u16);
 /// by [`InlineImageRender::render_row`] (building a key) and
 /// [`InlineImageRender::retain_live`] (matching against the CURRENT one), so
 /// the two can never encode the same page two different ways.
+#[cfg(feature = "terminal")]
 fn page_cache_key(page: Option<image::Rgba<u8>>) -> u32 {
     page.map_or(0, |p| u32::from_be_bytes([1, p[0], p[1], p[2]]))
 }
@@ -187,6 +202,7 @@ pub fn fit_preserving_aspect(
 /// composites must not be left to pick the colour for us. It also resolves the
 /// margin [`fit_preserving_aspect`] leaves, so the padding around a picture whose
 /// shape differs from its cell box is the story's page, not a hole.
+#[cfg(feature = "terminal")]
 pub(crate) fn flatten_onto(strip: &mut image::RgbaImage, page: image::Rgba<u8>) {
     for px in strip.pixels_mut() {
         let a = px[3] as u32;
@@ -265,6 +281,7 @@ pub(crate) fn page_for(
 }
 
 #[derive(Default)]
+#[cfg(feature = "terminal")]
 pub struct InlineImageRender {
     /// Value pins the source `Arc` alongside the built protocol: holding the
     /// `Arc` keeps its pixel-buffer address reserved while cached, so the
@@ -290,12 +307,14 @@ pub struct InlineImageRender {
     fitted: std::collections::HashMap<FittedKey, (std::sync::Arc<image::RgbaImage>, image::DynamicImage)>,
 }
 
+#[cfg(feature = "terminal")]
 impl std::fmt::Debug for InlineImageRender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InlineImageRender").field("cached", &self.cache.len()).finish()
     }
 }
 
+#[cfg(feature = "terminal")]
 impl InlineImageRender {
     /// Blit the strip for `band.row` (of `band.rows`) into the 1-row `dest`.
     ///

@@ -227,6 +227,14 @@ pub struct ControlGlyphs {
     /// look broken. The tooltip carries the rest, and carries more weight here
     /// than on its neighbours, since the glyph alone cannot say what a press does.
     pub reveal: char,
+    /// The command bar's send button (SQ-1801) — a return key, in one state.
+    ///
+    /// **A TRIGGER, like `reveal`:** it has no state to report, it submits the
+    /// typed line exactly as Enter does. Unlike every other control it sits
+    /// inside the input bar rather than on a pane border, and it is drawn only
+    /// while there is something to send. The plain mark is `↵` (U+21B5, Arrows),
+    /// which is why the plain-preset test exempts it from Geometric Shapes.
+    pub submit: char,
 }
 
 /// The story picker's row badges (SQ-0559), as one preset rather than six loose
@@ -482,6 +490,10 @@ impl Default for SymbolSet {
                 // the Guiding Light sits one column away as ●/○, and a third disc
                 // beside that pair would read as a third state of the same lamp.
                 reveal: '◈',
+                // ↵ (U+21B5) — the return-key arrow, the mark every terminal
+                // user already reads as "Enter". Not Geometric Shapes like its
+                // neighbours: no shape in that block says "send".
+                submit: '\u{21B5}',
             },
             // The unpatched pointer: a flat two-cell tab in half blocks. Flush
             // with the box by construction, and in every font (SQ-1139).
@@ -908,6 +920,9 @@ impl ControlGlyphs {
                 // which is the whole feature. Read from the font's own `post`
                 // table, like every codepoint here; do not substitute a name.
                 reveal: '\u{F0244}',
+                // md-keyboard_return — read from the font's own `post` table
+                // (SymbolsNerdFontMono-Regular.ttf, name -> cmap), U+F0311.
+                submit: '\u{F0311}',
             },
             _ => return None,
         })
@@ -1255,6 +1270,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.lock_off"       => s.controls.lock_off = ch,
         "control.return_probe"   => s.controls.return_probe = ch,
         "control.reveal"         => s.controls.reveal = ch,
+        "control.submit"         => s.controls.submit = ch,
         // The map pane's own cluster (SQ-1148). Both halves of each two-mode
         // pair are settable, which is the point of keeping the pair: the plain
         // preset spells one mark twice, and a player who wants a shape change
@@ -1626,6 +1642,7 @@ mod tests {
             ("md-lock", c.lock_on, '\u{F033E}'),
             ("md-shoe_print", c.return_probe, '\u{F0DFA}'),
             ("md-flashlight", c.reveal, '\u{F0244}'),
+            ("md-keyboard_return", c.submit, '\u{F0311}'),
         ] {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
@@ -1668,6 +1685,7 @@ mod tests {
             ("render_extended", c.render_extended),
             ("lock_on", c.lock_on), ("lock_off", c.lock_off),
             ("return_probe", c.return_probe), ("inventory_open", c.inventory_open),
+            ("submit", c.submit),
         ] {
             assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
         }
@@ -1814,7 +1832,7 @@ mod tests {
             "control.inventory_open",
             "control.guidance_on", "control.guidance_off", "control.render_hybrid",
             "control.render_raster", "control.render_extended", "control.lock_on",
-            "control.lock_off",
+            "control.lock_off", "control.submit",
         ] {
             let mut cfg = crate::config::SymbolConfig::default();
             cfg.overrides.insert(key.into(), "#".into());

@@ -124,81 +124,7 @@ pub(crate) fn dispatch_slash_outcome(
             // all "NOT DRAWN this frame" — the one thing a reader is here to learn.
             // The game halves stay live: a modal runs no game code, so the window
             // table and the model still describe the frame being reported.
-            let (frame, frame_line) = state.v6_dump_frame();
-            let cells = frame.as_ref().map(|f| f.cells.clone()).unwrap_or_default();
-            let history: Vec<String> = state
-                .v6_path_log
-                .borrow()
-                .iter()
-                .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
-                .collect();
-            let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
-                Some(gs) if !gs.v6_window_dump(&cells, Some(&state.v6_text)).is_empty() => {
-                    gs.v6_window_dump(&cells, Some(&state.v6_text))
-                }
-                _ => session.window_dump(),
-            };
-            out.push(frame_line);
-            // The ring's plan and clip belong to the frame that drew them, so they
-            // ride the same snapshot; with no game frame recorded there is nothing
-            // honest to print (SQ-0756).
-            let clip = match frame.as_ref() {
-                None => "unavailable — no game frame recorded".to_string(),
-                Some(f) => match f.ring_clip {
-                    Some((art, row)) if art == u16::MAX => {
-                        format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", f.ring_plan)
-                    }
-                    Some((art, row)) => format!(
-                        "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
-                        f.ring_plan
-                    ),
-                    None => format!("plan {}, ring not clipped", f.ring_plan),
-                },
-            };
-            out.push(format!("  ring: {clip}"));
-            // SQ-0588: windows whose recorded ops did not reproduce their canvas at
-            // save time. Each is a draw path we are not recording — the archive fell
-            // back to a PNG for it, so it restores correctly but cannot be recoloured
-            // by a later palette change.
-            let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
-            for msg in &save_diags {
-                out.push(format!("  save: {msg}"));
-            }
-            // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
-            // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
-            // among them — so a wrong value here makes the game's own artwork come out
-            // the wrong size, with nothing downstream to blame. Two ways it can be
-            // wrong, and this line tells them apart: with no image protocol we fall
-            // back to a hardcoded 8x16 regardless of the real font, and where there IS
-            // one the Picker reports LOGICAL points, which on a 2x HiDPI display are
-            // half the device pixels the terminal actually paints (the same mismatch
-            // that keeps pixel-precise mouse reporting switched off, see startup.rs).
-            // Compare `implies` against the real window size to tell which.
-            let (raw_w, raw_h, src) = match state.game_picker.as_ref() {
-                Some(p) => {
-                    let f = p.font_size();
-                    (f.width as u32, f.height as u32, "terminal-reported")
-                }
-                None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
-            };
-            // What the game actually sees, after SQ-0593 scaling. Reporting the raw
-            // terminal value alone was misleading the moment the divisor existed.
-            let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
-            out.push(format!(
-                "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
-                 → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
-                story_rect.width, story_rect.height,
-                cw * story_rect.width as u32, ch * story_rect.height as u32
-            ));
-            let encodes = state.graphics_render.borrow().band_encodes;
-            out.push(format!("  band uploads since launch: {encodes}"));
-            let bands = state.graphics_render.borrow().band_log.clone();
-            for b in bands {
-                out.push(format!("  {b}"));
-            }
-            if !history.is_empty() {
-                out.push(format!("  recent render paths (oldest first): {}", history.join(" · ")));
-            }
+            let out = window_dump_lines(state, &*session, story_rect);
             for line in &out {
                 state.push_transcript_internal(line, TranscriptKind::Meta);
             }
@@ -207,7 +133,7 @@ pub(crate) fn dispatch_slash_outcome(
             // a terminal selection over the dump takes them with it — the user's paste
             // came back placeholder-dense and truncated mid-field (SQ-0756). The log
             // is readable from another terminal while the game is still running.
-            let msg = match app::export::append_window_dump(&state.config.user_dir, &out) {
+            let msg = match app::export::append_window_dump(state.config.logs_root(), &out) {
                 Ok(p) => format!("  [dump appended to {} — copy it from there, not off the screen]", crate::abbreviate_home(&p)),
                 Err(e) => format!("  [dump log failed: {e}]"),
             };
@@ -224,7 +150,7 @@ pub(crate) fn dispatch_slash_outcome(
                 None => "[dump-cells] no frame has been drawn yet — nothing to dump".to_string(),
                 Some(frame) => {
                     let lines = frame.lines();
-                    match app::export::append_cell_dump(&state.config.user_dir, &lines) {
+                    match app::export::append_cell_dump(state.config.logs_root(), &lines) {
                         Ok(p) => format!(
                             "[dump-cells] {} rows x {} cols of glyphs + styling appended to {} \
                              — copy it from there, not off the screen",
@@ -265,7 +191,7 @@ pub(crate) fn dispatch_slash_outcome(
             // on-screen copy is exactly the thing that cannot be pasted into a bug
             // report. This is the report most likely to be wanted in one.
             let text = app::terminal_dump::dump_text(&snap);
-            let msg = match app::export::append_terminal_dump(&state.config.user_dir, &text) {
+            let msg = match app::export::append_terminal_dump(state.config.logs_root(), &text) {
                 Ok(p) => format!(
                     "  [report appended to {} — copy it from there, not off the screen]",
                     crate::abbreviate_home(&p)
@@ -273,6 +199,9 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => format!("  [dump log failed: {e}]"),
             };
             state.push_transcript_internal(&msg, TranscriptKind::Meta);
+        }
+        SlashOutcome::ReportBug { open } => {
+            report_bug(state, mapper, &*session, story_bytes, story_path, story_rect, map_rect, open);
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
@@ -418,7 +347,7 @@ pub(crate) fn dispatch_slash_outcome(
                     // The restore and everything the archive carries back is the
                     // library's (`host::persist::restore_file`, SQ-1539).
                     let restored = app::host::persist::restore_file(&mut *session, mapper, state, path, map_view(map_rect));
-                    app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("restore_state({})", path.display()));
+                    app::trace::hostio(state.config.logs_root(), state.config.trace.hostio, format!("restore_state({})", path.display()));
                     match restored {
                         Ok(app::host::persist::Restored::GameSave { .. }) => state.set_status("restored"),
                         Ok(app::host::persist::Restored::Resumed) => state.set_status("loaded"),
@@ -478,7 +407,7 @@ pub(crate) fn dispatch_slash_outcome(
         SlashOutcome::QuitToLibrary => {
             // Only meaningful when launched from a directory (a picker exists).
             if !state.launched_from_library {
-                state.set_status("No story library — launched with a single file");
+                state.set_status("No game library — launched with a single file");
             } else {
                 // Return-to-library mirrors Quit's save handling, but resolves
                 // the loop to the library instead of exiting. The break sites
@@ -774,14 +703,14 @@ pub(crate) fn dispatch_slash_outcome(
                 // speak, because each names the reason nothing lit.
                 Armed::Lit { .. } => {}
                 Armed::Nothing => {
-                    state.set_status("[nothing on screen is a word this story takes]")
+                    state.set_status("[nothing on screen is a word this game takes]")
                 }
                 // A different sentence, because it is a different claim: the one
                 // above is about the ROOM, and this one is about US (SQ-1150).
                 Armed::NoVocabulary => {
-                    state.set_status("[lanthorn cannot read this story's words]")
+                    state.set_status("[lanthorn cannot read this game's words]")
                 }
-                Armed::NoText => state.set_status("[no story text on screen to read]"),
+                Armed::NoText => state.set_status("[no game text on screen to read]"),
                 Armed::GuidanceOff => state.set_status(
                     "[the Guiding Light is out — /set-guidance on to use the reveal]",
                 ),
@@ -913,10 +842,248 @@ pub(crate) fn dispatch_slash_outcome(
         // resolved in the wrong context, and the honest answer is to say so
         // rather than silently swallow the key.
         SlashOutcome::Browser(_) => {
-            state.set_status("[that command belongs to the story browser]".to_string());
+            state.set_status("[that command belongs to the game browser]".to_string());
         }
     }
     false
+}
+
+/// The lines `/dump-windows` prints: the engine's window dump merged with the last
+/// game frame's render mapping, ring plan, save diagnostics and cell size. Shared by
+/// `/report-bug` (SQ-1795) so the two cannot drift.
+fn window_dump_lines(state: &AppState, session: &dyn Engine, story_rect: Rect) -> Vec<String> {
+    let (frame, frame_line) = state.v6_dump_frame();
+    let cells = frame.as_ref().map(|f| f.cells.clone()).unwrap_or_default();
+    let history: Vec<String> = state
+        .v6_path_log
+        .borrow()
+        .iter()
+        .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
+        .collect();
+    let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
+        Some(gs) if !gs.v6_window_dump(&cells, Some(&state.v6_text)).is_empty() => {
+            gs.v6_window_dump(&cells, Some(&state.v6_text))
+        }
+        _ => session.window_dump(),
+    };
+    out.push(frame_line);
+    // The ring's plan and clip belong to the frame that drew them, so they
+    // ride the same snapshot; with no game frame recorded there is nothing
+    // honest to print (SQ-0756).
+    let clip = match frame.as_ref() {
+        None => "unavailable — no game frame recorded".to_string(),
+        Some(f) => match f.ring_clip {
+            Some((art, row)) if art == u16::MAX => {
+                format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", f.ring_plan)
+            }
+            Some((art, row)) => format!(
+                "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
+                f.ring_plan
+            ),
+            None => format!("plan {}, ring not clipped", f.ring_plan),
+        },
+    };
+    out.push(format!("  ring: {clip}"));
+    // SQ-0588: windows whose recorded ops did not reproduce their canvas at
+    // save time. Each is a draw path we are not recording — the archive fell
+    // back to a PNG for it, so it restores correctly but cannot be recoloured
+    // by a later palette change.
+    let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
+    for msg in &save_diags {
+        out.push(format!("  save: {msg}"));
+    }
+    // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
+    // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
+    // among them — so a wrong value here makes the game's own artwork come out
+    // the wrong size, with nothing downstream to blame. Two ways it can be
+    // wrong, and this line tells them apart: with no image protocol we fall
+    // back to a hardcoded 8x16 regardless of the real font, and where there IS
+    // one the Picker reports LOGICAL points, which on a 2x HiDPI display are
+    // half the device pixels the terminal actually paints (the same mismatch
+    // that keeps pixel-precise mouse reporting switched off, see startup.rs).
+    // Compare `implies` against the real window size to tell which.
+    let (raw_w, raw_h, src) = match state.game_picker() {
+        Some(p) => {
+            let f = p.font_size();
+            (f.width as u32, f.height as u32, "terminal-reported")
+        }
+        None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
+    };
+    // What the game actually sees, after SQ-0593 scaling. Reporting the raw
+    // terminal value alone was misleading the moment the divisor existed.
+    let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
+    out.push(format!(
+        "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
+         → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
+        story_rect.width, story_rect.height,
+        cw * story_rect.width as u32, ch * story_rect.height as u32
+    ));
+    let encodes = state.graphics_render.borrow().band_encodes;
+    out.push(format!("  band uploads since launch: {encodes}"));
+    let bands = state.graphics_render.borrow().band_log.clone();
+    for b in bands {
+        out.push(format!("  {b}"));
+    }
+    if !history.is_empty() {
+        out.push(format!("  recent render paths (oldest first): {}", history.join(" · ")));
+    }
+    out
+}
+
+/// Gather the facts `/report-bug` reports (SQ-1795). Reads only state something
+/// already tracks, and reuses the producers `/dump-terminal`, `/dump-windows` and
+/// `/export-json` use; the formatting and privacy rules are in
+/// [`app::bug_report::build`].
+fn bug_report_facts(
+    state: &AppState,
+    mapper: &Mapper,
+    session: &dyn Engine,
+    story_bytes: &[u8],
+    story_path: &std::path::Path,
+    story_rect: Rect,
+    map_rect: Rect,
+) -> app::bug_report::BugReportFacts {
+    use app::bug_report::{BugReportFacts, GraphicsFacts, SettingsFacts, SharedFacts, TerminalHostFacts};
+
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut term_program = env("TERM_PROGRAM");
+    if term_program.is_none() && std::env::var_os("WT_SESSION").is_some() {
+        term_program = Some("Windows Terminal".to_string());
+    }
+    let present = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
+
+    let snap = terminal_snapshot(state, session, story_rect);
+    let config = &state.config;
+    let has_game = !story_path.as_os_str().is_empty();
+
+    let shown = state.layout == app::state::Layout::Split;
+    let session_facts = app::bug_report::gather_session_facts(&app::bug_report::SessionInputs {
+        session,
+        mapper,
+        story_bytes,
+        story_path,
+        title: &state.title,
+        ifid: &state.ifid,
+        ifdb_tuid: if has_game { app::hints_tab::game_ifdb_tuid(state, story_path) } else { None },
+        disk_entry: state.source.disk_entry.clone(),
+        profile: config.interpreter_profile,
+        profile_source: config.interpreter_source,
+        map_shown: shown,
+        map_pane: shown.then_some((map_rect.width, map_rect.height)),
+        zoom: format!("{:?}", state.zoom),
+        commands: &state.command_history,
+    });
+
+    let host = TerminalHostFacts {
+        term_program,
+        term_program_version: env("TERM_PROGRAM_VERSION"),
+        term: env("TERM"),
+        tmux: present("TMUX"),
+        ssh: ssh_env(),
+        graphics: GraphicsFacts::from_snapshot(&snap),
+        settings: SettingsFacts {
+            images: config.images,
+            v6_render: format!("{:?}", config.v6_render).to_lowercase(),
+            pixel_lock: config.v6_pixel_lock,
+            game_colours: config.honor_game_colours,
+            // A style may be a path; only its file name is the player's to share.
+            style: config.style.as_deref().map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .map_or_else(|| s.to_string(), |n| n.to_string_lossy().into_owned())
+            }),
+            sound: config.enable_sound,
+            audio_device: state.audio.is_some(),
+        },
+        terminal_dump: app::terminal_dump::dump_text(&snap),
+        window_dump: has_game.then(|| window_dump_lines(state, session, story_rect)),
+    };
+
+    BugReportFacts {
+        shared: SharedFacts {
+            version: buildinfo::LONG.to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            timestamp: jiff::Timestamp::now().to_string(),
+            home: app::user_dirs::home_dir().map(|h| h.display().to_string()),
+            game: session_facts.game,
+            map: session_facts.map,
+            map_json: session_facts.map_json,
+            commands: session_facts.commands,
+            report_file: crate::abbreviate_home(&app::export::bug_report_path(config.logs_root())),
+            save_error: None,
+        },
+        host: host.into_host_part(),
+    }
+}
+
+/// The SSH environment value (`SSH_CONNECTION`, else `SSH_TTY`) when this session is remote.
+fn ssh_env() -> Option<String> {
+    let present = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned());
+    present("SSH_CONNECTION").or_else(|| present("SSH_TTY"))
+}
+
+/// `/report-bug` (SQ-1795): summary to the transcript and the clipboard, the full
+/// report to `report-bug.txt` in the logs folder.
+fn report_bug(
+    state: &mut AppState,
+    mapper: &Mapper,
+    session: &dyn Engine,
+    story_bytes: &[u8],
+    story_path: &std::path::Path,
+    story_rect: Rect,
+    map_rect: Rect,
+    open: bool,
+) {
+    let mut facts = bug_report_facts(state, mapper, session, story_bytes, story_path, story_rect, map_rect);
+    // Write the file FIRST: the summary's `attach:` line has to say whether it is there.
+    let mut report = app::bug_report::build(&facts);
+    let saved = app::export::write_bug_report(state.config.logs_root(), &report.full);
+    if let Err(e) = &saved {
+        facts.shared.save_error = Some(e.to_string());
+        report = app::bug_report::build(&facts);
+    }
+    for line in report.summary.lines() {
+        state.push_transcript_internal(line, TranscriptKind::Meta);
+    }
+    // The clipboard goes out the way a mouse-selection copy does: OSC 52 on
+    // stdout. Terminals that refuse it simply ignore it, hence the wording below.
+    {
+        use std::io::Write;
+        let seq = app::clipboard::osc52_copy_sequence(&report.summary);
+        let mut out = std::io::stdout();
+        let _ = out.write_all(seq.as_bytes());
+        let _ = out.flush();
+    }
+    state.push_transcript_internal(
+        "Copied to your clipboard \u{2014} paste it into the issue form (if nothing pastes, copy the summary above).",
+        TranscriptKind::Meta,
+    );
+    let second = match saved {
+        Ok(_) => "Attach report-bug.txt from the line above; it includes your commands this session.",
+        Err(_) => "The full report could not be saved \u{2014} see the attach line above.",
+    };
+    state.push_transcript_internal(second, TranscriptKind::Meta);
+
+    // SQ-1799. The transcript cannot carry a clickable link (the app holds mouse
+    // capture, and a Meta line is plain text), so the issue is offered by command.
+    let url = app::bug_report::issue_url(&report.summary);
+    state.push_transcript_internal(
+        "Open a prefilled GitHub issue: run /report-bug open (it fills the form with the summary above).",
+        TranscriptKind::Meta,
+    );
+    if open {
+        match app::bug_report::open_plan(ssh_env().is_some(), app::opener::is_web_mode()) {
+            app::bug_report::OpenPlan::Launch => app::opener::open(&url),
+            app::bug_report::OpenPlan::CannotOpen => {
+                state.push_transcript_internal(
+                    "Can't open a browser from here \u{2014} copy this address into one instead:",
+                    TranscriptKind::Meta,
+                );
+                state.push_transcript_internal(&url, TranscriptKind::Meta);
+            }
+        }
+    }
 }
 
 /// Gather everything `/dump-terminal` reports (SQ-0994).
@@ -938,7 +1105,7 @@ fn terminal_snapshot(
     use app::terminal_dump::{CellSource, OpCounts, Probe, RenderFacts, TerminalSnapshot, TrafficStats};
     use ratatui_image::picker::{Capability, ProtocolType};
 
-    let picker = state.game_picker.as_ref();
+    let picker = state.game_picker();
     let protocol = picker.map(|p| {
         match p.protocol_type() {
             ProtocolType::Halfblocks => "halfblocks",
@@ -1145,7 +1312,7 @@ pub(crate) fn apply_slash_save_result(result: Result<String, String>, session: &
             // Progress is now captured in a Save State — quitting is safe.
             state.unsaved_progress = false;
             if state.config.trace.hostio {
-                app::trace::hostio(&state.config.user_dir, true, format!("save_state({} bytes)", session.save_state().bytes.len()));
+                app::trace::hostio(state.config.logs_root(), true, format!("save_state({} bytes)", session.save_state().bytes.len()));
             }
             state.set_status(msg);
         }
@@ -1451,7 +1618,7 @@ mod debug_dispatch_tests {
         assert_eq!(state.exit_target, ExitTarget::Exit, "target must stay Exit");
         assert!(!state.overlays.quit_dialog, "no save prompt should open");
         assert!(
-            state.notifications.history().iter().any(|m| m.contains("No story library")),
+            state.notifications.history().iter().any(|m| m.contains("No game library")),
             "a status explaining the missing library should be shown"
         );
     }
@@ -1879,7 +2046,7 @@ mod debug_dispatch_tests {
         // builds exactly this, and its empty capability list is the "nobody
         // asked" kind of empty rather than the "the terminal said no" kind.
         state.config.image_protocol = app::config::ImageProtocol::Halfblocks;
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         let traffic: app::terminal_dump::TrafficHandle = Default::default();
         state.term_traffic = Some(std::sync::Arc::clone(&traffic));
 
@@ -1909,6 +2076,73 @@ mod debug_dispatch_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn dispatch_report_bug(state: &mut AppState, dir: &std::path::Path, story: &[u8], story_path: &std::path::Path) {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::ReportBug { open: false },
+            state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, dir, story, story_path,
+            Rect::new(0, 0, 40, 30), Rect::new(0, 0, 80, 24), true,
+        );
+        assert!(!should_break, "a diagnostic never breaks the run loop");
+    }
+
+    /// SQ-1795, real-game smoke: a booted fixture's identity lands in the summary by
+    /// FILE NAME, the full report is written (overwritten, not appended), and the
+    /// closing transcript line names it.
+    #[test]
+    fn report_bug_names_the_game_and_writes_the_full_report() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
+        let Ok(bytes) = std::fs::read(&fixture) else { return }; // fixture absent: vacuous, like the other real-game suites
+        let dir = temp_dir("report-bug");
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.title = "Mini-Zork".into();
+        state.ifid = "ZCODE-34-871124-A3C7".into();
+        state.record_command("look");
+
+        dispatch_report_bug(&mut state, &dir, &bytes, &fixture);
+        dispatch_report_bug(&mut state, &dir, &bytes, &fixture);
+
+        let text = state.transcript.join("\n");
+        assert!(text.contains("game:     Mini-Zork · minizork-r34-s871124.z3 · Z-machine v3 r34 s871124"), "{text}");
+        assert!(text.contains("IFID ZCODE-34-871124-A3C7 · machine IBM PC (default)"), "{text}");
+        assert!(text.contains("0 rooms · 0 connections · 1 layer\n"), "{text}");
+        assert!(!text.contains(&*fixture.parent().unwrap().to_string_lossy()), "never the story's directory: {text}");
+        assert!(text.contains("attach:   ") && text.contains("report-bug.txt (the full report: drag it into the issue)"), "{text}");
+        assert!(!text.contains("logs:"), "{text}");
+        assert!(text.ends_with(
+            "Copied to your clipboard \u{2014} paste it into the issue form (if nothing pastes, copy the summary above).\n\
+             Attach report-bug.txt from the line above; it includes your commands this session.\n\
+             Open a prefilled GitHub issue: run /report-bug open (it fills the form with the summary above)."
+        ), "{text}");
+
+        let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");
+        assert_eq!(written.matches("== /dump-terminal ==").count(), 1, "overwritten, not appended");
+        assert!(written.contains("== window layout (/dump-windows) =="), "{written}");
+        assert!(written.contains("== map (lanthorn-map JSON) =="), "{written}");
+        assert!(written.contains("\nlook\n"), "the command typed this session: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no game, the game and map sections are simply absent.
+    #[test]
+    fn report_bug_works_with_no_game() {
+        let dir = temp_dir("report-bug-nogame");
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        dispatch_report_bug(&mut state, &dir, &[], std::path::Path::new(""));
+        let text = state.transcript.join("\n");
+        assert!(text.contains("lanthorn "), "{text}");
+        assert!(!text.contains("game:") && !text.contains("map:"), "{text}");
+        let written = std::fs::read_to_string(app::export::bug_report_path(&dir)).expect("report written");
+        assert!(!written.contains("== map (lanthorn-map JSON) =="), "{written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The counters are the writer's, not a fresh sample — a report that read
     /// zero while the session had emitted megabytes would be worse than no
     /// report. And with no writer at all the arm must say so rather than print a
@@ -1919,7 +2153,7 @@ mod debug_dispatch_tests {
         let dir = temp_dir("dumpterm-traffic");
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
 
         let traffic: app::terminal_dump::TrafficHandle = Default::default();
         {

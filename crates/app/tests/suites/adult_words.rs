@@ -522,9 +522,9 @@ fn zork_i_stops_proposing_a_hidden_word_and_keeps_every_other_proposal() {
     assert_eq!(
         hidden,
         vec![
-            "this story knows — damn",
-            "this story knows — set · curse",
-            "this story knows — wear · put on",
+            "this game knows — damn",
+            "this game knows — set · curse",
+            "this game knows — wear · put on",
         ]
     );
 
@@ -539,9 +539,9 @@ fn zork_i_stops_proposing_a_hidden_word_and_keeps_every_other_proposal() {
     assert_eq!(
         shown,
         vec![
-            "this story knows — shit · fuck · damn",
-            "this story knows — fuck · set · curse",
-            "this story knows — wear · put on",
+            "this game knows — shit · fuck · damn",
+            "this game knows — fuck · set · curse",
+            "this game knows — wear · put on",
         ],
         "the unfiltered lines the SQ-1144 lane measured, which the switch restores whole"
     );

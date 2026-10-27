@@ -109,6 +109,32 @@ struct PendingShow {
     next_picture: Option<u16>,
 }
 
+/// The short MAP label for a `*`-literal room's full description (SQ-1744).
+///
+/// A literal room carries its own lead-in ("I'm on the shore of a lake"), which is right
+/// in the room text and wrong as a map name. Strips a leading "I'm"/"I am"/"You are"/
+/// "You're" + on/in/at/by (+ optional the/a/an) and a trailing period.
+/// Anything that would strip to nothing keeps the original. Room text elsewhere stays full.
+pub fn map_label(desc: &str) -> String {
+    fn strip_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+        let head = s.get(..word.len())?;
+        let rest = &s[word.len()..];
+        (head.eq_ignore_ascii_case(word) && rest.starts_with(' ')).then(|| rest.trim_start())
+    }
+    let mut s = desc.trim();
+    let lead = ["I'm", "I am", "You are", "You're"].iter().find_map(|w| strip_word(s, w));
+    if let Some(rest) = lead {
+        // Only a real lead-in ("... on/in/at/by ...") is stripped, never a bare "I'm".
+        if let Some(rest) = ["on", "in", "at", "by"].iter().find_map(|p| strip_word(rest, p)) {
+            s = ["the", "a", "an"].iter().find_map(|a| strip_word(rest, a)).unwrap_or(rest);
+        }
+    }
+    match s.trim_end_matches('.').trim_end() {
+        "" => desc.to_string(),
+        s => s.to_string(),
+    }
+}
+
 /// A running Scott Adams (ScottFree `.dat`) game session.
 pub struct ScottSession {
     vm: scott::Vm,
@@ -675,7 +701,9 @@ impl ScottSession {
 
     fn snapshot_location(&self) -> Option<LocationInfo> {
         let r = self.vm.current_room();
-        Some(LocationInfo { number: r as mapper::graph::RoomId, parent: 0, name: self.vm.room_name(r).to_string() })
+        let desc = self.vm.room_name(r);
+        let name = if self.vm.room_is_literal() { map_label(desc) } else { desc.to_string() };
+        Some(LocationInfo { number: r as mapper::graph::RoomId, parent: 0, name })
     }
 
     /// An item's current location (`-1`/`255` = carried, `0` = nowhere, else
@@ -879,7 +907,7 @@ impl Engine for ScottSession {
                     win: 1,
                     canvas: Arc::clone(canvas),
                     version: self.pic_version,
-                    upscale: true,
+                    upscale: true, undrawn: false,
                 })),
                 second: Box::new(text),
             },
@@ -1104,6 +1132,34 @@ impl Engine for ScottSession {
         self.snapshot_location()
     }
 
+    /// The database's own room exit table (SQ-1773): `Room(x)` when room `origin` lists room `x`
+    /// for `dir`. Scott has only n s e w u d, in the table's own order; anything else, a room the
+    /// database does not hold and a zero entry (the table's "no exit") are `Unknown`.
+    ///
+    /// Read from the table and never from anything walked, so a self-loop (a maze room whose
+    /// north leads back to itself) is declared as `Room(origin)` -- which the exit scan needs to
+    /// tell it from a wall, as both leave the player in the same room.
+    fn declared_exit(
+        &self,
+        origin: mapper::graph::RoomId,
+        dir: mapper::direction::Direction,
+    ) -> crate::engine::DeclaredExit {
+        use mapper::direction::Direction as D;
+        let slot = match dir {
+            D::N => 0,
+            D::S => 1,
+            D::E => 2,
+            D::W => 3,
+            D::Up => 4,
+            D::Down => 5,
+            _ => return crate::engine::DeclaredExit::Unknown,
+        };
+        match self.vm.database().rooms.get(origin as usize).map(|r| r.exits[slot]) {
+            Some(x) if x != 0 => crate::engine::DeclaredExit::Room(x as mapper::graph::RoomId),
+            _ => crate::engine::DeclaredExit::Unknown,
+        }
+    }
+
     fn set_debug_trace(&mut self, on: bool) {
         // Turning the inspector on enables fired-action tracing; off stops it.
         // The cumulative `ever_fired` set (permanent colour + persisted coverage)
@@ -1136,12 +1192,9 @@ impl Engine for ScottSession {
             std::collections::BTreeMap::new();
         let mut verbs: Vec<Verb> = Vec::new();
         for (i, entry) in db.verbs.iter().enumerate() {
-            let word = entry.trim_start_matches('*').trim().to_lowercase();
-            // A database pads its vocabulary lists with `.` for a slot no word
-            // reaches; it is a placeholder, not a word somebody could type.
-            if !word.chars().any(char::is_alphanumeric) {
+            let Some(word) = vocabulary_word(entry) else {
                 continue;
-            }
+            };
             words.entry(word.clone()).or_default().verb = true;
             if entry.starts_with('*') {
                 // A synonym of the nearest preceding canonical verb.
@@ -1157,8 +1210,7 @@ impl Engine for ScottSession {
             }
         }
         for entry in &db.nouns {
-            let word = entry.trim_start_matches('*').trim().to_lowercase();
-            if word.chars().any(char::is_alphanumeric) {
+            if let Some(word) = vocabulary_word(entry) {
                 words.entry(word).or_default().noun = true;
             }
         }
@@ -1173,6 +1225,51 @@ impl Engine for ScottSession {
         ))
     }
 
+    /// Treasures stored in the treasure room - the score `scott-cli` announces.
+    fn score(&self) -> Option<i32> {
+        Some(self.vm.treasures_stored().0)
+    }
+
+    /// Every word in the database's own text: room descriptions, messages and
+    /// item texts, lowercased and split on non-alphanumerics (the `/WORD/`
+    /// markers fall away as punctuation, their words stay). What spells a
+    /// three-letter `lam` out as `lamp` (SQ-1763).
+    fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
+        let db = self.vm.database();
+        let texts = db
+            .rooms
+            .iter()
+            .map(|r| r.desc.as_str())
+            .chain(db.messages.iter().map(String::as_str))
+            .chain(db.items.iter().map(|i| i.text.as_str()));
+        // The engine prints the six direction names itself ("Obvious exits:
+        // North. Down."), so they are part of the game's text though no
+        // database string holds them.
+        let directions = ["North", "South", "East", "West", "Up", "Down"];
+        Some(
+            texts
+                .chain(directions)
+                .flat_map(|t| t.split(|c: char| !c.is_alphanumeric()))
+                .filter(|w| !w.is_empty())
+                .map(str::to_lowercase)
+                .collect(),
+        )
+    }
+
+    /// Verbs then nouns as stored, de-duplicated, in database order: a Scott
+    /// Adams session has no `Introspect`, so this is its raw word list
+    /// ([`Engine::vocabulary_words`] spells it out) (SQ-1763).
+    fn dictionary_words(&self) -> Vec<String> {
+        let db = self.vm.database();
+        let mut seen = std::collections::HashSet::new();
+        db.verbs
+            .iter()
+            .chain(&db.nouns)
+            .filter_map(|entry| vocabulary_word(entry))
+            .filter(|w| seen.insert(w.clone()))
+            .collect()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1180,6 +1277,16 @@ impl Engine for ScottSession {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+/// One vocabulary-table entry as a typable word: the leading `*` synonym
+/// marker stripped, trimmed, lowercased. `None` for a `.`-style padding entry
+/// (a database pads its lists for a slot no word reaches; it is a placeholder,
+/// not a word somebody could type). The one rule `story_vocabulary` and
+/// `vocabulary_words` share.
+fn vocabulary_word(entry: &str) -> Option<String> {
+    let word = entry.trim_start_matches('*').trim().to_lowercase();
+    word.chars().any(char::is_alphanumeric).then_some(word)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1275,6 +1382,144 @@ mod tests {
             showing: VecDeque::new(),
             showing_title_card: false,
             deferred_save: false,
+        }
+    }
+
+    /// SQ-1763: a session over a hand-built database whose vocabulary tables
+    /// carry every shape the word list must handle.
+    fn vocabulary_session() -> ScottSession {
+        vocabulary_session_with(
+            &[],
+            &["AUTO", "GO", "GET", "*TAKE", ".", "LOOK"],
+            &["ANY", "NORTH", "N", "*NORTH", "LAMP", ".", "get", "Keyboard"],
+            3,
+        )
+    }
+
+    fn vocabulary_session_with(text: &[&str], verbs: &[&str], nouns: &[&str], word_length: usize) -> ScottSession {
+        session_with_items(text, verbs, nouns, word_length, vec![], 0)
+    }
+
+    /// SQ-1764: one treasure, `treasure_room` 1, starting in `start_loc`.
+    fn treasure_session(start_loc: i32) -> ScottSession {
+        let treasure = scott::database::Item {
+            text: "a gold coin".into(),
+            treasure: true,
+            auto_noun: None,
+            start_loc,
+        };
+        session_with_items(&[], &["GO"], &["COIN"], 3, vec![treasure], 1)
+    }
+
+    fn session_with_items(
+        text: &[&str],
+        verbs: &[&str],
+        nouns: &[&str],
+        word_length: usize,
+        items: Vec<scott::database::Item>,
+        treasure_room: usize,
+    ) -> ScottSession {
+        use scott::{Database, Vm};
+        let s = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length,
+            light_time: -1,
+            treasure_room,
+            actions: vec![],
+            // verb 0 is the AUTO slot; `*` marks a synonym; `.` is padding.
+            verbs: s(verbs),
+            nouns: s(nouns),
+            rooms: vec![scott::database::Room { exits: [0; 6], desc: "limbo".into(), literal: true }; 2],
+            messages: s(text),
+            items,
+            adventure_number: 0,
+            ti99: None,
+            mysterious: false,
+            saga_us: None,
+        };
+        ScottSession {
+            vm: Vm::new(db),
+            intro: String::new(),
+            aux: BTreeMap::new(),
+            aux_dirty: false,
+            picts: crate::graphics::PictSource::new(None),
+            current_canvas: None,
+            current_pic_num: None,
+            current_overlays: Vec::new(),
+            pic_version: 0,
+            showing: VecDeque::new(),
+            showing_title_card: false,
+            deferred_save: false,
+        }
+    }
+
+    /// SQ-1764: `score` is the treasures stored in the treasure room, the number
+    /// the scott CLI announces - 1 with the coin there, 0 with it elsewhere.
+    #[test]
+    fn score_counts_treasures_stored() {
+        assert_eq!(treasure_session(0).score(), Some(0));
+        assert_eq!(treasure_session(1).score(), Some(1));
+    }
+
+    /// SQ-1763: `dictionary_words` is verbs then nouns, `*` stripped, padding
+    /// dropped, lowercased, as stored (no truncation to `word_length` 3), and
+    /// a word in both lists appears once. With no text to spell from,
+    /// `vocabulary_words` agrees.
+    #[test]
+    fn dictionary_words_lists_verbs_then_nouns_deduplicated() {
+        let sess = vocabulary_session();
+        let expected =
+            ["auto", "go", "get", "take", "look", "any", "north", "n", "lamp", "keyboard"];
+        assert_eq!(sess.dictionary_words(), expected);
+        assert_eq!(sess.vocabulary_words(), expected);
+    }
+
+    /// SQ-1763: a stored `lam` is spelled out as `lamp` when the database's
+    /// own text says `lamp` (the `/LAMP/` marker is punctuation) and no other
+    /// word starting `lam`.
+    #[test]
+    fn vocabulary_words_spell_a_truncated_key_from_the_database_text() {
+        let sess = vocabulary_session_with(&["a brass lamp/LAMP/"], &["GO"], &["LAM"], 3);
+        assert_eq!(sess.dictionary_words(), ["go", "lam"]);
+        assert_eq!(sess.vocabulary_words(), ["go", "lamp"]);
+    }
+
+    /// SQ-1763: `lamp` and `lampshade` both start `lam`, so the key stays as
+    /// stored - the ambiguous rule of SQ-1553.
+    #[test]
+    fn vocabulary_words_keep_an_ambiguous_key_as_stored() {
+        let sess = vocabulary_session_with(&["a lamp", "a lampshade"], &["GO"], &["LAM"], 3);
+        assert_eq!(sess.vocabulary_words(), ["go", "lam"]);
+    }
+
+    /// SQ-1763: sharing the walk with `vocabulary_words` left `story_vocabulary`'s
+    /// answer alone — the same words, `take` still a synonym of `get`.
+    #[test]
+    fn story_vocabulary_is_unchanged_by_the_shared_word_rule() {
+        let sess = vocabulary_session();
+        let v = sess.story_vocabulary().expect("scott gives a vocabulary");
+        for w in ["go", "get", "take", "look", "north", "n", "lamp", "keyboard"] {
+            assert!(v.knows(w), "{w} is a known word");
+        }
+        assert!(!v.knows("."), "padding is not a word");
+        assert_eq!(v.verb_named("take").map(|x| x.words.clone()), Some(vec!["get".into(), "take".into()]));
+        assert_eq!(v.nouns().collect::<Vec<_>>(), ["any", "keyboard", "lamp", "n", "north"]);
+    }
+
+    /// SQ-1763: a real Scott game, off the gitignored Apple II press, offers
+    /// its lamp and directions in full (`lamp`, `north`), recovered from its
+    /// own text; the stored forms are three letters. Skips vacuously without
+    /// the fixture.
+    #[test]
+    fn adventureland_vocabulary_words_include_lamp_and_north() {
+        let Some(s) = adventureland_apple_session() else { return };
+        let stored = s.dictionary_words();        assert!(stored.iter().any(|x| x == "lam"), "premise: stored three-letter");
+        let words = s.vocabulary_words();
+        for w in ["lamp", "north"] {
+            assert!(words.iter().any(|x| x == w), "{w} missing from {words:?}");
         }
     }
 

@@ -806,18 +806,31 @@ pub fn find_player_object(machine: &Machine) -> Option<u16> {
 /// building one — see [`PlayerCandidates`]'s doc comment.
 pub fn find_player_object_with(machine: &Machine, candidates: &PlayerCandidates) -> Option<u16> {
     let cands = &candidates.widened;
-    // One candidate needs no discrimination — and skipping `detect_location_with`
-    // keeps the common case (most Inform games, minizork) as cheap as it was.
+    let room_of = || detect_location_with(machine, candidates).and_then(|l| l.object().map(|o| o.number));
+    // One candidate needs no discrimination between candidates, but it still has to be IN the
+    // player's room when a room can be detected: Solid Gold Hitchhiker's v5 has only a global
+    // "yourself" (#19, parked under #58) matching by name while the real avatar answers to a
+    // parse word the pool missed, and returning it made every carried item read as vanished
+    // (SQ-1785). When no room can be detected the lone candidate stands as before, so a story
+    // with nothing to check against keeps its avatar.
     if cands.len() < 2 {
-        return cands.first().copied();
+        let lone = cands.first().copied()?;
+        return match room_of() {
+            Some(r) if !has_ancestor(machine, lone, r) => None,
+            _ => Some(lone),
+        };
     }
     let situated: Vec<u16> =
         cands.iter().copied().filter(|&obj| get_parent(&machine.mem, obj) != 0).collect();
     let pool: &[u16] = if situated.is_empty() { cands } else { &situated };
     if pool.len() < 2 {
-        return pool.first().copied();
+        let lone = pool.first().copied()?;
+        return match room_of() {
+            Some(r) if !has_ancestor(machine, lone, r) => None,
+            _ => Some(lone),
+        };
     }
-    let room = detect_location_with(machine, candidates).and_then(|l| l.object().map(|o| o.number));
+    let room = room_of();
     pool.iter().copied().find(|&obj| room.is_some_and(|r| has_ancestor(machine, obj, r)))
 }
 
@@ -889,6 +902,11 @@ const PLAYER_NAMES: [&str; 9] =
 /// Inform) is a second specimen of the same shape — its own avatar object
 /// prints "it" (nothing in [`PLAYER_NAMES`]) and its only parse word is
 /// "protag" (`PROTAGONIST`, truncated to the v3 dictionary's 6 characters).
+/// The list spells the word in FULL: `ObjectWords::refers_to` cuts the query to
+/// the story's own dictionary resolution (6 on v3, 9 on v4+), so the same entry
+/// meets "protag" on r59 (v3) and "protagoni" on the Solid Gold r31 (v5), where
+/// the real avatar is #202 and "yourself" #19 is a global parked under #58
+/// (SQ-1785).
 /// Without it, `find_player_object_with` never resolves an avatar for this
 /// story at all: the object still followed the player into every room turn
 /// after turn (its parent tracked `detect_location`'s own room exactly), so
@@ -903,7 +921,7 @@ const PLAYER_NAMES: [&str; 9] =
 /// positive elsewhere is harmless unless it also happens to sit exactly
 /// where the player does.
 #[cfg(feature = "grammar")]
-const PLAYER_WORDS: [&str; 5] = ["me", "myself", "self", "yourself", "protag"];
+const PLAYER_WORDS: [&str; 5] = ["me", "myself", "self", "yourself", "protagonist"];
 
 /// The story's avatar-candidate pools — everything `detect_location` and
 /// `find_player_object` need that is STATIC per story (SQ-1259 perf
@@ -1212,6 +1230,39 @@ fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> 
         .map(|(_, obj)| object_snapshot(mem, obj))
 }
 
+/// May the status line's `name` stand as the room when no avatar's ancestor chain validated
+/// it exactly (SQ-1752)?
+///
+/// A pre-game screen paints a status-line-shaped row that is not a room — Beyond Zork's
+/// character sheet shows the player's name, "Frank Booth", in the room slot. The object tree
+/// is the game's own state and is what tells the two apart: when the story HAS player
+/// candidates, a real room is one their ancestor chain reaches, by name — exactly, or with
+/// the spaces elided (a compiler identifier: `partsRoom` for "Parts Room"). When no player
+/// candidate exists at all there is no tree evidence either way, so the text stands, which
+/// is what keeps the games with no identifiable avatar (Dialog's nameless objects,
+/// Facility) mapped; `apply_turn`'s heading corroboration (SQ-1743) is the check for those.
+fn status_name_corroborated(machine: &Machine, candidates: &PlayerCandidates, name: &str) -> bool {
+    if candidates.widened.is_empty() {
+        return true;
+    }
+    let mem = &machine.mem;
+    let wanted = normalize_name(name).replace(' ', "");
+    candidates.widened.iter().any(|&player| {
+        let mut cur = get_parent(mem, player);
+        for _ in 0..32 {
+            if cur == 0 {
+                return false;
+            }
+            let sn = printed_name(mem, cur);
+            if status_name_matches(name, &sn) || (!wanted.is_empty() && normalize_name(&sn).replace(' ', "") == wanted) {
+                return true;
+            }
+            cur = get_parent(mem, cur);
+        }
+        false
+    })
+}
+
 /// True when some object's short name is `name` with the spaces taken out.
 ///
 /// A compiler's object identifier is not the name the player reads. Dialog calls
@@ -1376,6 +1427,9 @@ pub fn detect_location_with(machine: &Machine, candidates: &PlayerCandidates) ->
             if names_an_object_ignoring_spaces(machine, &field) {
                 return Some(Location::NameOnly(field));
             }
+        }
+        if !status_name_corroborated(machine, candidates, &name) {
+            return None;
         }
         return Some(Location::NameOnly(name));
     }
@@ -1900,6 +1954,13 @@ mod tests {
 
     #[test]
     fn player_candidates_widen_to_hhggs_own_protag_parse_word() {
+        // SQ-1785: the v3 story stores "protag" (6 chars, covered by the real-game suite
+        // `item_tracking`); a v4+ dictionary has 9-char resolution and stores "protagoni"
+        // (Solid Gold r31). The one list entry must meet both.
+        protag_parse_word_is_found_as_the_player("protagoni");
+    }
+
+    fn protag_parse_word_is_found_as_the_player(stored: &str) {
         // SQ-1649: The Hitchhiker's Guide to the Galaxy's own avatar object shape, reproduced
         // synthetically — its printed short name is the bare pronoun "it" (nothing in
         // PLAYER_NAMES) and its ONLY parse word is "protag" ("PROTAGONIST" truncated to a v3
@@ -1920,9 +1981,9 @@ mod tests {
         buf[DICT] = 0;
         buf[DICT + 1] = 7;
         put_word(&mut buf, DICT + 2, 2);
-        let protag = crate::text::encode::encode_word("protag", 5);
+        let protag = crate::text::encode::encode_word(stored, 5);
         let filler_word = crate::text::encode::encode_word("filler", 5);
-        assert_eq!(protag.len(), 6);
+        assert_eq!(protag.len(), 6, "{stored}");
         assert_eq!(filler_word.len(), 6);
         buf[DICT + 4..DICT + 10].copy_from_slice(&protag);
         buf[DICT + 11..DICT + 17].copy_from_slice(&filler_word);
@@ -2354,6 +2415,24 @@ mod tests {
             None,
             "no situated candidate and no ancestor chain reaches the room: refuse rather than guess"
         );
+    }
+
+    /// SQ-1785. A lone name-matching candidate that is not in the detected room is a
+    /// decoy (Solid Gold Hitchhiker's "yourself" #19 under a globals object), not the avatar.
+    #[test]
+    fn find_player_object_rejects_a_lone_candidate_outside_the_detected_room() {
+        let mut buf = build_v3_story();
+        let name = z_name("you");
+        buf[PROP3_TBL as usize] = (name.len() / 2) as u8;
+        buf[PROP3_TBL as usize + 1..PROP3_TBL as usize + 1 + name.len()].copy_from_slice(&name);
+        put_word(&mut buf, GLOBAL_VARS as usize, 1); // global 0: the player is in room #1
+        assert_eq!(buf[OBJ3_ENTRY as usize + 4], 1, "\"you\" starts inside the room");
+        let m = make_machine(buf.clone());
+        assert_eq!(find_player_object(&m), Some(3));
+        // Detach it: now a lone candidate that is NOT in the room global 0 names.
+        buf[OBJ3_ENTRY as usize + 4] = 0;
+        let m = make_machine(buf);
+        assert_eq!(find_player_object(&m), None, "the lone candidate is not in the room");
     }
 
     #[test]

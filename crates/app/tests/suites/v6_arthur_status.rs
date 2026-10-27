@@ -132,7 +132,7 @@ fn arthur_hybrid_status_row_is_solid_terminal_bar() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, 80, 25);
     let mut buf = Buffer::empty(area);
@@ -212,7 +212,7 @@ fn arthur_hybrid_status_churchyard_is_one_word_date_right() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // 100×30 → scale 1.2: at 1.0 the fixed 8-px runs already lined up; only a
     // non-unit scale exposed the per-run rounding that split the word.
@@ -261,7 +261,7 @@ fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     // 90×40 → scale 1.40625 (width-limited), ~238 px of vertical letterbox slack.
     let area = Rect::new(0, 0, 90, 40);
@@ -336,14 +336,14 @@ fn arthur_frameless_status_bar_anchors_to_the_top() {
         for (w, h) in [(80u16, 25u16), (100, 40)] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             // Force the CELL path: SQ-0895 removed frameless, which was the
             // deliberate route in. Dropping the picker is the substitute whose
             // ONLY effect is the one frameless contributed here — draw no game
             // image. (A modal overlay also lands on the cell path, but it
             // additionally suppresses the inlined input line, which shifts row
             // counts.)
-            state.game_picker = None;
+            state.set_game_picker(None);
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);
@@ -405,7 +405,7 @@ fn render_hybrid(model: &app::engine::ScreenModel, cols: u16, rows: u16) -> (Rec
     #[allow(deprecated)]
     let mut picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 17));
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, cols, rows);
     let mut buf = Buffer::empty(area);
@@ -543,7 +543,7 @@ fn hybrid_anchor(model: &app::engine::ScreenModel, cols: u16, rows: u16) -> i32 
     #[allow(deprecated)]
     let mut picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 17));
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     let area = Rect::new(0, 0, cols, rows);
     let mut buf = Buffer::empty(area);
@@ -748,7 +748,7 @@ fn mac_arthur_raster_score_bar_is_one_ribbon_not_the_location_alone() {
 
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Raster;
         state.config.honor_game_colours = honor;
         state.v6_text = face;

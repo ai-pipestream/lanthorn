@@ -27,7 +27,7 @@
 //! - **The body is capped** at [`MAX_DOWNLOAD`], rejected on an honest
 //!   `Content-Length` before a byte is read and again while reading (the
 //!   `read_capped` the IFDB downloader already uses).
-//! - **The filename is derived, never adopted.** [`safe_basename`] keeps only
+//! - **The filename is derived, never adopted.** [`sanitise_filename`] keeps only
 //!   the final path component under BOTH separators, drops control and
 //!   path-significant characters and refuses `.`/`..`/leading-dot names, so a
 //!   `Content-Disposition: filename="../../.bashrc"` cannot escape the
@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
+use crate::documents::sanitise_filename;
 use crate::ifdb_search::{
     read_capped, unique_dest, BODY_TIMEOUT, CONNECT_TIMEOUT, HEADERS_TIMEOUT, MAX_DOWNLOAD,
 };
@@ -156,7 +157,12 @@ pub struct HttpSource {
 
 impl HttpSource {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder()
+        Self::with_policy(crate::fetch_policy::FetchPolicy::current())
+    }
+
+    /// A fetcher that connects only where `policy` allows (SQ-1731).
+    pub fn with_policy(policy: crate::fetch_policy::FetchPolicy) -> Self {
+        let builder = ureq::Agent::config_builder()
             // Per PHASE, never end-to-end. `timeout_global` is documented as
             // "from DNS lookup to finishing reading the response body", so any
             // value small enough to be a useful stall detector is also small
@@ -172,9 +178,8 @@ impl HttpSource {
             // A chain longer than the cap must FAIL, not quietly hand back the
             // last redirect's body — a login wall would otherwise be written to
             // disk as the story.
-            .max_redirects_will_error(true)
-            .build();
-        Self { agent: ureq::Agent::new_with_config(config) }
+            .max_redirects_will_error(true);
+        Self { agent: crate::fetch_policy::agent(builder, policy) }
     }
 }
 
@@ -204,7 +209,7 @@ impl UrlSource for HttpSource {
             resp.headers().get("content-disposition").and_then(|v| v.to_str().ok()).map(str::to_string);
         let bytes = read_capped(resp.body_mut().as_reader(), MAX_DOWNLOAD)
             .map_err(|e| match e {
-                crate::ifdb_search::SearchError::TooLarge => FetchError::TooLarge,
+                crate::ifdb_search::SearchError::TooLarge { .. } => FetchError::TooLarge,
                 other => FetchError::Transport(other.to_string()),
             })?;
         Ok(Payload { disposition, bytes })
@@ -289,34 +294,12 @@ pub fn describe_payload(bytes: &[u8]) -> String {
     } else if bytes.is_empty() {
         "an empty response"
     } else {
-        "not a story file of any kind lanthorn opens"
+        "not a game file of any kind lanthorn opens"
     };
     format!("the server sent {} ({} bytes)", kind, bytes.len())
 }
 
 // ── Naming the local file ────────────────────────────────────────────────────
-
-/// Reduce an untrusted name to a safe basename — the final component under both
-/// separators, control and path characters dropped, `.`/`..`/leading-dot names
-/// refused. Unlike `ifdb_search::sanitize_filename` this does NOT require a
-/// story extension, because a fetched file's extension is settled by its
-/// CONTENT ([`local_filename`]) and plenty of legitimate download URLs end in
-/// `/download` or a query string.
-pub fn safe_basename(raw: &str) -> Option<String> {
-    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
-    if base.is_empty() || base.starts_with('.') {
-        return None;
-    }
-    let cleaned: String = base
-        .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0' | ':'))
-        .collect();
-    let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() || cleaned == ".." || cleaned.chars().all(|c| c == '.') {
-        return None;
-    }
-    Some(cleaned)
-}
 
 /// The last path segment of a URL, percent-decoded, query and fragment stripped.
 fn basename_from_url(url: &str) -> Option<String> {
@@ -355,8 +338,8 @@ pub fn local_filename(disposition: Option<&str>, url: &str, bytes: &[u8]) -> Opt
     let ext = content_extension(bytes)?;
     let stem = disposition
         .and_then(filename_from_disposition)
-        .and_then(|n| safe_basename(&n))
-        .or_else(|| basename_from_url(url).and_then(|n| safe_basename(&n)))
+        .and_then(|n| sanitise_filename(&n))
+        .or_else(|| basename_from_url(url).and_then(|n| sanitise_filename(&n)))
         .unwrap_or_else(|| "story".to_string());
     // `picker::has_story_ext` includes `.zip` (SQ-1086), so an archive keeps its
     // own name rather than being relabelled after the story inside it — the
@@ -471,7 +454,7 @@ pub struct ArchiveImage {
     /// `Journey/disks/journey_s1.dsk`.
     pub entry: String,
     /// What it lands in the library as: the final component only
-    /// ([`safe_basename`]).
+    /// ([`sanitise_filename`]).
     ///
     /// **Flattened, never recreated.** A multi-disk release whose images landed
     /// in a subdirectory would not be found as siblings by
@@ -551,7 +534,7 @@ pub fn zip_disk_images(path: &Path) -> Result<Vec<ArchiveImage>, FetchError> {
         if escapes_destination(&entry) {
             return Err(FetchError::UnsafeEntry(entry));
         }
-        match safe_basename(&entry) {
+        match sanitise_filename(&entry) {
             Some(name) if is_disk_image_name(&name) => out.push(ArchiveImage { entry, name }),
             _ => return Err(FetchError::UnsafeEntry(entry)),
         }
@@ -579,7 +562,7 @@ pub fn unpack_disk_images(
     for image in &archive.images {
         // Re-asked at the write, not trusted from the scan: the value that
         // decides where bytes land must be checked where the bytes land.
-        if escapes_destination(&image.entry) || safe_basename(&image.name).as_deref() != Some(image.name.as_str()) {
+        if escapes_destination(&image.entry) || sanitise_filename(&image.name).as_deref() != Some(image.name.as_str()) {
             return Err(FetchError::UnsafeEntry(image.entry.clone()));
         }
         let plain = library_dir.join(&image.name);
@@ -587,7 +570,7 @@ pub fn unpack_disk_images(
             KeepMode::Replace if !written.contains(&plain) => plain,
             _ => unique_dest(library_dir, &image.name),
         };
-        // Belt and braces over `safe_basename`, the same guard `keep_in_library`
+        // Belt and braces over `sanitise_filename`, the same guard `keep_in_library`
         // applies: the destination must be a direct child of the library.
         if dest.parent() != Some(library_dir) {
             return Err(FetchError::UnsafeEntry(image.entry.clone()));
@@ -694,19 +677,36 @@ pub fn keep_in_library(
     let name = fetched
         .file_name()
         .and_then(|n| n.to_str())
-        .and_then(safe_basename)
+        .and_then(sanitise_filename)
         .ok_or(FetchError::NoFilename)?;
     std::fs::create_dir_all(library_dir).map_err(|e| FetchError::Io(e.to_string()))?;
     let dest = match mode {
         KeepMode::Replace => library_dir.join(&name),
         KeepMode::KeepBoth => unique_dest(library_dir, &name),
     };
-    // Belt and braces over `safe_basename`: the destination must be a direct
+    // Belt and braces over `sanitise_filename`: the destination must be a direct
     // child of the library directory, whatever the name claimed.
     if dest.parent() != Some(library_dir) {
         return Err(FetchError::NoFilename);
     }
-    std::fs::copy(fetched, &dest).map_err(|e| FetchError::Io(e.to_string()))?;
+    // Copy to a fresh file beside the destination, then rename over it. `fs::copy`
+    // straight onto `dest` would follow a symlink sitting there and overwrite
+    // its target; a rename replaces the link itself (SQ-1734).
+    static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let tmp = library_dir.join(format!(
+        ".keep-{}-{}.tmp",
+        std::process::id(),
+        NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let io_err = |e: std::io::Error| FetchError::Io(e.to_string());
+    let copied = std::fs::File::open(fetched).and_then(|mut src| {
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        std::io::copy(&mut src, &mut out).map(|_| ())
+    });
+    if let Err(e) = copied.and_then(|()| std::fs::rename(&tmp, &dest)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(e));
+    }
     Ok(dest)
 }
 
@@ -766,7 +766,7 @@ impl UrlDownloader {
                     let n = a.images.len();
                     let _ = std::fs::remove_file(&a.path);
                     Err(format!(
-                        "this download holds {n} disk image{} and no story; lanthorn does not run \
+                        "this download holds {n} disk image{} and no game; lanthorn does not run \
                          disk images from inside a zip — launch `lanthorn <url>` to unpack them \
                          into your library",
                         if n == 1 { "" } else { "s" },
@@ -868,19 +868,20 @@ mod tests {
 
     /// A remote name must never escape the directory it is written into.
     #[test]
-    fn safe_basename_refuses_everything_that_escapes() {
-        assert_eq!(safe_basename("curses.z5").as_deref(), Some("curses.z5"));
-        assert_eq!(safe_basename("../../etc/passwd").as_deref(), Some("passwd"));
-        assert_eq!(safe_basename("..\\..\\windows\\system32\\x").as_deref(), Some("x"));
-        assert_eq!(safe_basename("/etc/passwd").as_deref(), Some("passwd"));
-        assert_eq!(safe_basename(".."), None);
-        assert_eq!(safe_basename("."), None);
-        assert_eq!(safe_basename(".bashrc"), None, "a leading dot is never a story file");
-        assert_eq!(safe_basename(""), None);
-        assert_eq!(safe_basename("   "), None);
+    fn sanitise_filename_refuses_everything_that_escapes() {
+        assert_eq!(sanitise_filename("curses.z5").as_deref(), Some("curses.z5"));
+        assert_eq!(sanitise_filename("../../etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(sanitise_filename("..\\..\\windows\\system32\\x").as_deref(), Some("x"));
+        assert_eq!(sanitise_filename("/etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(sanitise_filename(".."), None);
+        assert_eq!(sanitise_filename("."), None);
+        assert_eq!(sanitise_filename(".bashrc"), None, "a leading dot is never a story file");
+        assert_eq!(sanitise_filename(""), None);
+        assert_eq!(sanitise_filename("   "), None);
         // Control characters and a Windows drive colon are dropped, not kept.
-        assert_eq!(safe_basename("cur\u{7}ses.z5").as_deref(), Some("curses.z5"));
-        assert_eq!(safe_basename("C:evil.z5").as_deref(), Some("Cevil.z5"));
+        assert_eq!(sanitise_filename("cur\u{7}ses.z5").as_deref(), Some("curses.z5"));
+        // A colon is replaced, not dropped, so `C:evil.z5` cannot turn into a different name.
+        assert_eq!(sanitise_filename("C:evil.z5").as_deref(), Some("C_evil.z5"));
     }
 
     #[test]
@@ -1124,5 +1125,28 @@ mod tests {
         let ua = user_agent();
         assert!(ua.starts_with("lanthorn/"));
         assert!(ua.contains("github.com/sharkusk/lanthorn"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_does_not_write_through_a_symlink_at_the_destination() {
+        let root = crate::scratch_dir("keep-symlink");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, b"precious").unwrap();
+        std::os::unix::fs::symlink(&outside, lib.join("curses.z5")).unwrap();
+        let fetched = root.join("curses.z5");
+        std::fs::write(&fetched, b"new story bytes").unwrap();
+
+        let dest = keep_in_library(&fetched, &lib, KeepMode::Replace).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"precious", "the symlink's target is untouched");
+        let meta = std::fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_file() && !meta.file_type().is_symlink(), "a regular file now");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new story bytes");
+        let names: Vec<String> =
+            std::fs::read_dir(&lib).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["curses.z5"], "no temp left behind");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

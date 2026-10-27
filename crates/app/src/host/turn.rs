@@ -188,7 +188,7 @@ pub fn reobserve_location(
     sync_current_room(state, session);
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
-    let restore_result = TurnResult::observation(snap);
+    let restore_result = TurnResult::observation_of(session, snap, String::new());
     apply_turn(mapper, "", &restore_result, &mut state.death_watch);
     state.set_viewed_layer(None);
     state.select_room(Some(rid));
@@ -298,8 +298,11 @@ pub fn finish_command_turn(
         state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
     } else {
         // Inline mode: the game's own `>` is already the last transcript line;
-        // append the typed command so `>look` persists in scrollback.
-        state.append_to_last_transcript_line(cmd);
+        // append the typed command so `>look` persists in scrollback. It is marked
+        // as typed input (drawn in `transcript_input`, not as story text) and
+        // carries the story's own input style for the renderer to prefer (SQ-1758).
+        let style = state.input_style_against_prompt(session.last_input_style());
+        state.append_to_last_transcript_line(cmd, style);
     }
     let before_push = state.transcript.len();
     if silent {
@@ -323,8 +326,8 @@ pub fn finish_command_turn(
         first_line = before_push - 1;
     }
     apply_turn_events(state, &result);
-    flush_screen_trace(&state.config.user_dir, session, state.config.trace.screen);
-    flush_v6_trace(&state.config.user_dir, session, state.config.trace.v6);
+    flush_screen_trace(state.config.logs_root(), session, state.config.trace.screen);
+    flush_v6_trace(state.config.logs_root(), session, state.config.trace.v6);
     // [more] pager (SQ-0404, ruleset reworked in SQ-0539): arm for this command's
     // output whenever the game is now awaiting the player — LINE *or* CHAR — and
     // the v6 "never print [MORE]" veto is off. The old `!result.erase_lower`
@@ -441,6 +444,16 @@ pub fn finish_command_turn(
     // for a crossing the map has no return path for, and ends any search a move has outrun.
     crate::return_probe::arm_return_search(state, mapper, &*session, cmd, room_before, &mut turn_save);
 
+    // …and, for a crossing the player made without naming a direction (`climb tree`), ask the
+    // game which direction that was (SQ-1771). Reads the pre-turn snapshot below, so it must run
+    // before that is replaced.
+    crate::relocation_probe::arm_relocation_search(state, mapper, &*session, cmd, room_before);
+
+    // …and a line that CHAINS several commands (`north then east`) is not one crossing at all:
+    // it is replayed a piece at a time in the shadow, and what the replay saw goes on the map in
+    // place of the provisional `?` (SQ-1772). Same pre-turn snapshot, so same place in the order.
+    crate::chain_probe::arm_chain_replay(state, mapper, &*session, cmd, room_before);
+
     // SQ-1257 Phase 2: this move's own edge was minted (or not) already, by `apply_turn` above.
     // Which reseeded shadow this turn earns — a first walk, an upgrade, or a suspicion left
     // pending — is `random_exit_probe`'s own decision, and lives there in ONE place: five real-
@@ -504,9 +517,18 @@ pub fn finish_command_turn(
     // engine besides the Z-machine anyway, so a probe can never fire for one — paying for a
     // snapshot it will never use would be exactly the cost this seam's own laziness elsewhere
     // exists to avoid.
-    state.random_exit_pre_move_save = session
-        .rng_seed()
-        .map(|_| (mapper.graph.current().unwrap_or(0), turn_save.get(&*session)));
+    //
+    // SQ-1771: the relocation search starts from the same moment, for every engine -- a Scott
+    // Adventure has no seed but its snapshot is as cheap as the Z-machine's -- so the gate also
+    // opens when that feature is on.
+    let keeps_pre_move = session.rng_seed().is_some()
+        || ((state.config.return_probe || state.config.scan_exits) && state.probe.is_armed());
+    state.random_exit_pre_move_save = keeps_pre_move
+        .then(|| (mapper.graph.current().unwrap_or(0), turn_save.get(&*session)));
+
+    // SQ-1773: the room the player now stands in is scanned for its exits from that very
+    // moment, on the shadow, behind every search their own moves need.
+    crate::scan_probe::arm_exit_scan(state, mapper, &*session, room_before);
 
     // Background map maintenance: a geometry change (new room/connection) is the
     // ONLY thing that can require re-layout, so all of it runs on a worker thread —
@@ -709,6 +731,9 @@ fn post_turn_bookkeeping(
     // ── Rewind/replay capture (opt-in) ────────────────────────────
     // Skip the quit turn: the VM has terminated, so its snapshot has
     // no replayable state — recording it just adds a junk final turn.
+    // A clear a game-driven turn made since the last record (SQ-1714); taken
+    // whether or not this turn is recorded, so it never leaks past it.
+    let pending_clear = std::mem::take(&mut state.pending_clear);
     if state.config.record_turn_history && !result.quit {
         let map_changed = mapper.graph.struct_gen() != struct_gen_before;
         // The record owns its bytes — it outlives the turn and is serialized
@@ -726,6 +751,19 @@ fn post_turn_bookkeeping(
         // Bound retained turns (SQ-1185): `TurnRecord::save` is a full VM
         // snapshot, so left uncapped this grows without limit over an
         // arbitrarily long session.
+        // Remember a game-driven clear so a rewind can re-pin it (SQ-1713). The
+        // record was pushed a moment ago, so its `Arc` is still unique.
+        let mark = crate::history::TranscriptMark::of(state);
+        // The Z-machine screen rides along (SQ-1767) so a rewind can put the
+        // status line back; not for v6, whose windows are repainted elsewhere.
+        let screen = zvm_session_opt(session)
+            .filter(|z| z.machine.screen.v6.is_none())
+            .map(|z| z.machine.screen.clone());
+        if let Some(rec) = state.history.last_mut().and_then(std::sync::Arc::get_mut) {
+            rec.cleared = crate::history::clear_noted(result.erase_lower, pending_clear);
+            rec.note_transcript(mark);
+            rec.screen = screen;
+        }
         crate::history::cap_history(&mut state.history, state.config.history_turns);
     }
 
@@ -888,7 +926,7 @@ pub fn persist_vfs_after_turn(
     let bytes = session.vfs_bytes();
     let _ = crate::vfs_store::write_vfs(game_dir, &bytes);
     session.clear_vfs_dirty();
-    crate::trace::hostio(&state.config.user_dir, state.config.trace.hostio,
+    crate::trace::hostio(state.config.logs_root(), state.config.trace.hostio,
         format!("vfs_write({} bytes)", bytes.len()));
 }
 
@@ -1007,6 +1045,8 @@ pub fn apply_launch_resume(
             // What the archive is missing because it predates the screen (SQ-1401)
             // or paint-log (SQ-1403) format bump — SQ-1410.
             let mut restore_degradation: Option<crate::archive::RestoreDegradation> = None;
+            // The primary window's clear anchors from the same archive (SQ-1713).
+            let mut resumed_anchors = crate::archive::ClearAnchors::default();
             // The resumed game's map is part of its archive state — load it alongside.
             if let Ok(ac) = load_archive(arc_file) {
                 // The v6 screen: rebuilt from the archived display list under the
@@ -1022,6 +1062,7 @@ pub fn apply_launch_resume(
                 // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
                 crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                 resumed_images = ac.transcript_images;
+                resumed_anchors = ac.anchors;
                 restore_degradation = Some(crate::archive::RestoreDegradation::from_format_version(
                     ac.meta.format_version,
                     crate::engine_helpers::is_v6_session(&*session),
@@ -1033,8 +1074,12 @@ pub fn apply_launch_resume(
                 if let Some(z) = zvm_session_opt_mut(&mut *session) { crate::session::restore_screen(z, scr); }
             }
             state.transcript = lines;
-            state.clear_anchor = None;
-            state.top_anchor = None;
+            // Same archive as the stashed lines, so its anchors index them; guard
+            // the length anyway rather than mis-anchor a mismatched transcript.
+            let anchored = resumed_images.len() == state.transcript.len();
+            state.clear_anchor = resumed_anchors.clear.filter(|_| anchored);
+            state.pending_clear = false;
+            state.top_anchor = resumed_anchors.top.filter(|_| anchored);
             state.transcript_kinds = kinds;
             // The launch-resume stash carries no style runs; keep the parallel
             // vecs length-synced (unstyled, left/no-indent rows).
@@ -1067,13 +1112,14 @@ pub fn apply_launch_resume(
 
 // ── Game-driven input helpers (char-mode keypress, timed-input interrupt) ──────
 
-/// Append a gvm runtime fault (diagnostics + fault trace) to `user_dir/crash.log`.
+/// Append a gvm runtime fault (diagnostics + fault trace) to `<logs>/crash.log`.
 /// A fault ends the game via a silent `Quit`, so this makes the failure durable
 /// regardless of terminal state. IO errors are ignored (best-effort logging).
-fn log_gvm_fault(user_dir: &std::path::Path, fault: &[String], diagnostics: &[String]) {
+fn log_gvm_fault(logs: &std::path::Path, fault: &[String], diagnostics: &[String]) {
     use std::io::Write as _;
+    let _ = std::fs::create_dir_all(logs);
     let Ok(mut f) =
-        std::fs::OpenOptions::new().create(true).append(true).open(user_dir.join("crash.log"))
+        std::fs::OpenOptions::new().create(true).append(true).open(logs.join("crash.log"))
     else {
         return;
     };
@@ -1108,7 +1154,7 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
         // A gvm runtime fault ends the game via a silent Quit; if the app then
         // exits before this transcript is rendered, the error would vanish. Record
         // it durably so a "silent" crash always leaves a trace.
-        log_gvm_fault(&state.config.user_dir, lines, &result.diagnostics);
+        log_gvm_fault(state.config.logs_root(), lines, &result.diagnostics);
         // Keep the app alive: a VM fault is not a clean glk_exit. The run loop's
         // exit checks all gate on `should_exit_on_turn`, which consults this flag.
         state.vm_halted = true;
@@ -1130,36 +1176,6 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     if let Some(loc) = &result.location {
         state.current_room_name = Some(loc.name.clone());
     }
-}
-
-/// Whether `new_content` looks like the OLD lines (`old_lines`, the ones a
-/// game-driven screen clear is about to discard) redrawing themselves rather
-/// than an entirely different screen taking over. Used to decide whether a
-/// game-driven `erase_lower` should collapse the prior screen via
-/// `truncate_transcript` (a genuine same-screen reprint — Counterfeit
-/// Monkey's arrow-navigated help menu, which reprints the whole menu on every
-/// keypress with only the cursor line differing) or preserve it (a totally
-/// different screen — Anchorhead's intro/quote/game-start sequence, or a
-/// picture click's empty-content clear followed later by unrelated room
-/// text). (SQ-1654)
-///
-/// Compares non-blank, trimmed lines on both sides. If either side has none,
-/// this is never a reprint — there's nothing to compare against, so don't
-/// destroy scrollback on a hunch; this is what keeps a picture click's
-/// empty-content clear from ever being treated as reprint-worthy. Otherwise
-/// counts how many of the new non-blank lines exactly match some old
-/// non-blank line; >=50% overlap counts as a reprint. The threshold sits in
-/// the middle of a wide gap between the two real cases (~0% overlap for
-/// Anchorhead's transitions, ~90%+ for CM's cursor-only-changes menu redraw)
-/// and does not need precise tuning.
-fn is_screen_reprint(old_lines: &[String], new_content: &str) -> bool {
-    let old_nonblank: Vec<&str> = old_lines.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    let new_nonblank: Vec<&str> = new_content.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    if old_nonblank.is_empty() || new_nonblank.is_empty() {
-        return false;
-    }
-    let matches = new_nonblank.iter().filter(|l| old_nonblank.contains(l)).count();
-    (matches as f64 / new_nonblank.len() as f64) >= 0.5
 }
 
 /// Apply a `TurnResult` produced by game-driven input that is not a full player
@@ -1225,12 +1241,14 @@ pub fn apply_game_driven_result(
         // behavior back, with no scroll animation on the transition (both
         // `mark_screen_clear` already guarantees by setting `scroll_anim =
         // None` directly).
-        if let Some(anchor) = state.clear_anchor {
-            if is_screen_reprint(&state.transcript[anchor..], &new_content_text) {
-                state.truncate_transcript(anchor);
-            }
+        // The collapse decision is shared with the hint panel (SQ-1789).
+        if let Some(anchor) = crate::screen_clear::collapse_target(state.clear_anchor, &state.transcript, &new_content_text) {
+            state.truncate_transcript(anchor);
         }
         state.mark_screen_clear();
+        // No TurnRecord is made for this turn; the next recorded one carries the
+        // clear so a rewind keeps the wiped scrollback hidden (SQ-1714).
+        state.pending_clear = true;
     }
     // Whether this turn's output CONTINUED the transcript's last pre-turn row
     // instead of opening one below it — the pager needs it (below).

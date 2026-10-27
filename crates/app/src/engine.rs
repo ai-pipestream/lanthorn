@@ -20,7 +20,7 @@ use crate::session::{FilenameReq, InputKind, TurnResult};
 /// [`Introspect`] names it without depending on `grammar-model` directly.
 /// [`Adjectives`] travels with it: it says whether the story could be asked for
 /// an object's adjectives at all, which is a different claim from having none.
-pub use grammar_model::{Adjectives, ObjectWordSet, ObjectWords};
+pub use grammar_model::{Adjectives, Holds, ObjectWordSet, ObjectWords};
 
 /// What a room's own exit table declares for one direction (SQ-1257).
 ///
@@ -392,6 +392,11 @@ pub struct GraphicsWindow {
     /// centering it at native size. Set for small pixel-art canvases like Scott
     /// Adams room pictures (256×96); Glulx keeps native-size centering.
     pub upscale: bool,
+    /// The canvas is still the window's untouched initial background (SQ-1711:
+    /// opaque Glk white in design/stretch mode). With `honor_game_colours` off the
+    /// renderer paints the theme's window background instead, exactly as it does
+    /// for a text window the game gave no colour.
+    pub undrawn: bool,
 }
 
 /// One window placed at an absolute cell rect within the story pane, for the
@@ -400,6 +405,11 @@ pub struct GraphicsWindow {
 /// (`Grid`, `Buffer`, or `Graphics`).
 #[derive(Debug, Clone)]
 pub struct PositionedWindow {
+    /// The v6 window number (0..8) this entry was built from, `None` outside v6.
+    /// A window with a picture and text yields two entries sharing one number.
+    /// Hosts reading the screen ([`crate::screen_reader`]) key per-release
+    /// classification on it.
+    pub window: Option<u8>,
     pub x: u16,
     pub y: u16,
     pub w: u16,
@@ -880,6 +890,24 @@ impl std::error::Error for EngineError {}
 
 // ── The Engine trait ────────────────────────────────────────────────────────
 
+/// How the STORY had its input text styled when it asked for the line the player
+/// then typed (SQ-1758) -- the engine's RAW answer, before the host compares it
+/// with the prompt it is drawn after (`AppState::input_style_against_prompt`).
+///
+/// `Default` (no bits, no ink) is "no opinion": the theme's `transcript_input`
+/// style applies unchanged. Colour is a packed ZColour ([`crate::state::pack_zcolour`],
+/// `0` = none) and is honoured only under `honor_game_colours`; `bits` use the
+/// transcript style bits (1 = reverse, 2 = bold, 4 = italic).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputStyle {
+    pub bits: u8,
+    pub ink: u32,
+    /// Whether `bits` are only a style for input where they differ from the
+    /// prompt's own (the Z-machine, whose text style is the page's). Glulx's are
+    /// `style_Input` hints, input-specific by definition, so they always stand.
+    pub bits_vs_prompt: bool,
+}
+
 /// The app-facing handle to a running game, independent of the underlying VM.
 ///
 /// The app holds a `Box<dyn Engine>` where it once held a concrete
@@ -930,6 +958,15 @@ pub trait Engine {
     /// v1–v5 stories, Glulx and Scott all keep the default.
     fn output_continued_line(&self) -> bool {
         false
+    }
+    /// The story's RAW input style for the line most recently handed to
+    /// `submit` — captured as the submit began, because the style the story had
+    /// switched on at its read is gone by the time the turn has run (SQ-1758).
+    /// Glulx answers from its Input stylehints (bold unless a weight hint says
+    /// otherwise, per the Glk convention); the Z-machine from the text style and
+    /// colour active at the `@read`; Scott has none. DEFAULT: no opinion.
+    fn last_input_style(&self) -> InputStyle {
+        InputStyle::default()
     }
     /// When false, the game's own trailing `>` read prompt is preserved in the
     /// transcript (inline-prompt mode) instead of being stripped for the app's
@@ -1171,6 +1208,13 @@ pub trait Engine {
     /// The player's current location, for the mapper.
     fn current_location(&self) -> Option<LocationInfo>;
 
+    /// How [`current_location`](Self::current_location) was detected, when the engine
+    /// distinguishes (the Z-machine does). A seed that carries it lets `apply_turn`'s
+    /// NameOnly first-room check run on boot/resume/restore (SQ-1743). `None` = unchecked.
+    fn current_location_method(&self) -> Option<zvm::location::LocationMethod> {
+        None
+    }
+
     /// What `origin`'s own map data declares for `dir` (SQ-1257) — read from
     /// the story's compiled exit table, never from anything ever walked.
     ///
@@ -1333,6 +1377,36 @@ pub trait Engine {
         None
     }
 
+    /// The story's dictionary words as it STORES them — a Z-machine `lanter`,
+    /// a Scott Adams `lam`. The raw material of [`Engine::vocabulary_words`].
+    /// The default is the engine's [`Introspect::vocabulary`]; an engine without
+    /// introspection (Scott Adams) overrides it (SQ-1763).
+    fn dictionary_words(&self) -> Vec<String> {
+        self.introspect().map(|i| i.vocabulary()).unwrap_or_default()
+    }
+
+    /// Every word this story's parser knows — THE engine-neutral door for a
+    /// host that wants the word list (speech-recognition word boosting,
+    /// autocomplete).
+    ///
+    /// **A promise of full spellings where they can be recovered with
+    /// confidence:** an entry the dictionary cut short is spelled out when the
+    /// story's own text (and, for long keys, the shipped lexicon) names exactly
+    /// one whole word it could have been (`lanter` -> `lantern`, `lam` ->
+    /// `lamp`), and kept as stored otherwise. The one rule is
+    /// [`crate::vocab::StoryVocabulary::spell`]; nothing here spells anything.
+    ///
+    /// Reads the story's text on every call. The TUI does not call this at
+    /// boot: it spells [`Engine::dictionary_words`] through its cached
+    /// [`crate::vocab::VocabState`] so the read is paid once.
+    fn vocabulary_words(&self) -> Vec<String> {
+        let words = self.dictionary_words();
+        match self.story_vocabulary() {
+            Some(v) => v.with_story_text(self.story_text_words()).spell_all(words),
+            None => words,
+        }
+    }
+
     /// Does the story's own dictionary hold this word — asked of the ENGINE, so
     /// the story's key truncation is applied the way the story applies it?
     ///
@@ -1356,12 +1430,27 @@ pub trait Engine {
     /// [`crate::vocab::VocabState::get`].
     ///
     /// `None` — the default — for an engine with no reader for its text. The
-    /// Z-machine answers ([`crate::story_text::zmachine_words`]); a Glulx image's
-    /// strings are compressed through a decoding table and a Scott Adams
-    /// database keeps words shorter than any key worth spelling out, so both
-    /// fall back to the lexicon alone.
+    /// Z-machine answers ([`crate::story_text::zmachine_words`]) and so does a
+    /// Scott Adams database (its room, message and item texts); a Glulx image's
+    /// strings are compressed through a decoding table, so it falls back to the
+    /// lexicon alone.
     fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
         None
+    }
+
+    /// The engine-neutral score, for a host that announces score changes (feed
+    /// it to `ScoreWatch::update` in the CLI host). `None` - the default - for an
+    /// engine with no score of its own to report. A Scott Adams session answers
+    /// the treasures stored (SQ-1764).
+    fn score(&self) -> Option<i32> {
+        None
+    }
+
+    /// Does the story's own text carry only Infocom's stock InvisiClues booklet
+    /// advert where a built-in `HINT` would be (SQ-1745)? Then a `hint`
+    /// dictionary entry says nothing about built-in hints. `false` by default.
+    fn advertises_hint_booklet(&self) -> bool {
+        false
     }
 
     /// Split prose the way this story's own parser splits an input line

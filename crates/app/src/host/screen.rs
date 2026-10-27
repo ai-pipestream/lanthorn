@@ -37,14 +37,14 @@ use crate::state::AppState;
 /// rather than measured from it, and for v1–3, which have no such header fields.
 ///
 /// What is declared is [`declared_story_screen_dims`], not the raw pane
-/// measurement: the width is floored at the columns the story booted with
-/// (SQ-0679) — whatever `GameSession::boot_screen_cols` says THIS session
-/// actually booted at, 80 by default or a narrower/wider pre-boot-seeded pane
-/// (SQ-0680) — so narrowing the pane can never move a v4/v5 status routine's
-/// baked-in field columns outside the window.
+/// measurement: the width is the fixed one for a story that caches it
+/// (`GameSession::fixed_cols`, settled before the boot — SQ-1809), so a pane
+/// resize, wider or narrower, never moves a v4/v5 status routine's baked-in field
+/// columns relative to its window. A story that re-reads $21 is told the pane.
 ///
 /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
 pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, rows): (u16, u16)) -> bool {
+    state.story_told_cols.set(None);
     let Some(gs) = session.as_any().downcast_ref::<crate::session::GameSession>() else {
         return false;
     };
@@ -56,10 +56,13 @@ pub fn sync_zvm_screen_dims(session: &mut dyn Engine, state: &AppState, (cols, r
         Rect::new(0, 0, cols, rows),
         state,
         version,
-        gs.boot_screen_cols,
+        gs.fixed_cols(),
     ) else {
         return false;
     };
+    // The width the story is told, when it is not the pane's: the lower window's block
+    // shift (SQ-1810) needs it to tell hand-laid text from prose.
+    state.story_told_cols.set(gs.fixed_cols().map(|_| cols.min(255)));
     let current = (
         gs.machine.mem.read_byte(0x20) as u16,
         gs.machine.mem.read_byte(0x21) as u16,
@@ -311,24 +314,15 @@ pub fn set_story_pane(session: &mut dyn Engine, state: &AppState, pane: (u16, u1
 /// differs by engine:
 /// - a v4+, non-v6 Z-machine session searches on the RAW
 ///   [`story_screen_dims`](crate::render::screen::story_screen_dims) for a
-///   candidate pane — not the header-floored
+///   candidate pane — not the
 ///   [`declared_story_screen_dims`](crate::render::screen::declared_story_screen_dims)
 ///   that [`sync_zvm_screen_dims`] itself applies when it actually WRITES the
 ///   header — searched one cell at a time via
 ///   [`boot::bump_dim_for_floor`](crate::host::boot::bump_dim_for_floor). This
-///   is deliberate, not an oversight: `declared_story_screen_dims` floors its
-///   result at `boot_screen_cols`, and a host that also seeds
-///   `TerminalFacts::min_story_screen` at boot has already widened the
-///   pre-boot terminal (via
-///   [`min_terminal_size_for_story_floor`](crate::host::boot::min_terminal_size_for_story_floor))
-///   until the RAW pre-boot pane clears the floor — so `boot_screen_cols`
-///   itself ends up at or above `floor_cols` from the moment the session
-///   boots. Probing with `declared_story_screen_dims` at a later live resize
-///   would then floor EVERY candidate's returned cols at `boot_cols >=
-///   floor_cols`, trivially "passing" on the very first candidate regardless
-///   of its actual raw width, and this search would return `real` completely
-///   unchanged even when the pane's real rendered grid is still narrower than
-///   `floor` (a follow-up to SQ-1606, found after the feature first shipped).
+///   is deliberate, not an oversight: the question here is "what pane makes
+///   the raw rendered grid at least this wide", and for a story that caches
+///   its width (told a fixed 80, SQ-1809) the declared width is the same at
+///   every candidate, so it could never answer it (SQ-1606 follow-up).
 ///   The header-floor subtraction still belongs in `sync_zvm_screen_dims`,
 ///   which genuinely must never let a WRITTEN header shrink below
 ///   `boot_cols` — but the SEARCH here is answering a different question

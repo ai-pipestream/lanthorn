@@ -60,6 +60,17 @@ pub use turn::{
     apply_game_driven_result, finish_command_turn, finish_resumed_turn, Paging, TurnCtx,
     TurnOutcome,
 };
+// The upper window's column plan (SQ-1809): which game columns the TUI draws when the pane
+// is narrower than the grid, and the inverse a click or drawn cursor needs. A host that draws
+// the grid itself reads this instead of restating the rule.
+pub use crate::render::upper_window::{column_plan, grid_column_plan, ColumnPlan, ColumnStrategy};
+// The lower window's block shift (SQ-1810): how far to move each hard-broken line left so text a
+// width-caching story laid out for its told width by hand still fits a narrower pane. A host that
+// reflows window 0 itself calls this with the same inputs instead of restating the rule.
+pub use crate::render::hand_layout::{block_shifts, is_hand_laid, shift_line_left};
+// The hint program width floor (SQ-1813): the narrowest width the TUI's Hints tab boots a given
+// hint program at (72, or 60 for an `*izm` program), for a host passing `hints::open` its own panel size.
+pub use crate::hints_tab::{hint_program_min_cols, hint_program_name, HINTS_MIN_COLS, HINTS_MIN_COLS_IZM};
 
 use crate::engine::Engine;
 

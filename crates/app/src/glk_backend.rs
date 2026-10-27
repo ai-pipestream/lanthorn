@@ -29,6 +29,12 @@ use crate::state::StyleRun;
 /// carrying it with the `glk_mask_outside` style and nothing else.
 pub const GLK_LETTERBOX_WIN: u32 = u32::MAX;
 
+/// A graphics window's first canvas (SQ-1711): opaque white in design/stretch
+/// mode (Glk's initial background), transparent in cell mode (SQ-0332/0338).
+fn fresh_canvas(design: bool, w: u32, h: u32) -> crate::graphics::Canvas {
+    if design { crate::graphics::Canvas::new_opaque(w, h, 0xFFFFFF) } else { crate::graphics::Canvas::new(w, h) }
+}
+
 /// Surround `inner` (the design frame, `frame` cells inside a `pane` of
 /// `(cols, rows)`) with letterbox filler buffers so the tree still covers the
 /// whole pane. A frame that IS the pane (stretch mode) is returned untouched.
@@ -95,7 +101,7 @@ pub fn glk_style_bits(style: GlkStyle) -> u8 {
 /// Colour is recorded unconditionally — the `honor_game_colours` gate is applied
 /// at *render* time by `cell_style`/`draw_str_runs`, exactly like the Z-machine,
 /// so toggling it (F2) recolours already-drawn output too.
-fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs) -> (u8, u32, u32) {
+pub(crate) fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs) -> (u8, u32, u32) {
     let mut bits = glk_style_bits(style);
     match attrs.weight {
         Some(1) => bits |= 0x02,
@@ -276,6 +282,7 @@ pub(crate) struct DisplaySnapshot {
     buffers: BTreeMap<u32, BufBuf>,
     scans: BTreeMap<u32, StoryScan>,
     graphics: BTreeMap<u32, crate::graphics::Canvas>,
+    gfx_ops: BTreeMap<u32, Vec<crate::glk_contents::GfxOp>>,
     primary: Option<u32>,
     primary_cleared: bool,
     /// SQ-1663: a question can itself close the primary window it is asked
@@ -332,6 +339,10 @@ pub struct AppGlk {
     scans: BTreeMap<u32, StoryScan>,
     /// Graphics-window pixel canvases, keyed by window id.
     graphics: std::collections::BTreeMap<u32, crate::graphics::Canvas>,
+    /// The draw-op RECIPE behind each graphics canvas (SQ-1712), so a host Save
+    /// State can carry what the window shows without carrying pixels. Bounded —
+    /// see [`AppGlk::note_gfx_op`].
+    gfx_ops: BTreeMap<u32, Vec<crate::glk_contents::GfxOp>>,
     /// The `(width, height)` of one text-grid cell in pixels, for pixel↔cell
     /// layout of graphics windows.
     ///
@@ -586,6 +597,7 @@ impl AppGlk {
             primary_cleared: false,
             scans: BTreeMap::new(),
             graphics: BTreeMap::new(),
+            gfx_ops: BTreeMap::new(),
             char_px,
             screen_override: None,
             design: None,
@@ -1012,6 +1024,7 @@ impl AppGlk {
             buffers: self.buffers.clone(),
             scans: self.scans.clone(),
             graphics: self.graphics.clone(),
+            gfx_ops: self.gfx_ops.clone(),
             primary: self.primary,
             primary_cleared: self.primary_cleared,
             orphaned_primary: self.orphaned_primary.clone(),
@@ -1028,9 +1041,152 @@ impl AppGlk {
         self.buffers = snap.buffers;
         self.scans = snap.scans;
         self.graphics = snap.graphics;
+        self.gfx_ops = snap.gfx_ops;
         self.primary = snap.primary;
         self.primary_cleared = snap.primary_cleared;
         self.orphaned_primary = snap.orphaned_primary;
+    }
+
+    /// Record one graphics-window drawing op (SQ-1712). A canvas-wide erase makes
+    /// everything before it irrelevant, so it collapses the list to the last
+    /// background colour plus the erase — the replay of which is the same blank
+    /// canvas; otherwise the list is capped at [`crate::glk_contents::MAX_GFX_OPS`]
+    /// (oldest dropped).
+    fn note_gfx_op(&mut self, win: u32, op: crate::glk_contents::GfxOp) {
+        use crate::glk_contents::GfxOp;
+        let ops = self.gfx_ops.entry(win).or_default();
+        let wipes = matches!(op, GfxOp::Erase { w: u32::MAX, h: u32::MAX, .. });
+        if wipes {
+            let bg = ops.iter().rev().find(|o| matches!(o, GfxOp::Background(_))).cloned();
+            ops.clear();
+            ops.extend(bg);
+        }
+        ops.push(op);
+        if ops.len() > crate::glk_contents::MAX_GFX_OPS {
+            let drop = ops.len() - crate::glk_contents::MAX_GFX_OPS;
+            ops.drain(..drop);
+        }
+    }
+
+    /// What the NON-primary windows hold right now, as the recipe a host Save State
+    /// carries (SQ-1712; format and caps in [`crate::glk_contents`]). The primary
+    /// text buffer is the app transcript's, so it is left out.
+    pub(crate) fn capture_contents(&self) -> crate::glk_contents::Contents {
+        use crate::glk_contents::{Body, Contents, ElemDto, WindowContent};
+        let mut windows = Vec::new();
+        for (&id, buf) in &self.buffers {
+            if self.primary == Some(id) || buf.log.is_empty() {
+                continue;
+            }
+            let mut elems: Vec<ElemDto> = Vec::new();
+            let mut bytes = 0usize;
+            for e in buf.log.iter().rev() {
+                let dto = match e {
+                    BufElem::Text { bits, fg, bg, link, para, glk_style, text } => {
+                        bytes += text.len();
+                        ElemDto::Text { bits: *bits, fg: *fg, bg: *bg, link: *link, para: *para, glk_style: *glk_style, text: text.clone() }
+                    }
+                    BufElem::Image(img) => {
+                        let Some(resource) = img.resource else { continue };
+                        ElemDto::Image {
+                            resource,
+                            align: img.align,
+                            scaled: img.scaled,
+                            margin_px: img.margin_px,
+                            rule: img.rule.map(|r| (r.rule, r.width, r.height, r.maxwidth)),
+                            link: img.link,
+                        }
+                    }
+                };
+                elems.push(dto);
+                if elems.len() >= crate::glk_contents::MAX_BUFFER_ELEMS || bytes >= crate::glk_contents::MAX_BUFFER_TEXT_BYTES {
+                    break;
+                }
+            }
+            elems.reverse();
+            if !elems.is_empty() {
+                windows.push(WindowContent { id, body: Body::Buffer(elems) });
+            }
+        }
+        for (&id, g) in &self.grids {
+            if g.cells.is_empty() {
+                continue;
+            }
+            let cells = g.cells.iter().map(|(&(r, c), &(ch, bits, fg, bg, link, gs))| (r, c, ch, bits, fg, bg, link, gs)).collect();
+            windows.push(WindowContent { id, body: Body::Grid(cells) });
+        }
+        for (&id, ops) in &self.gfx_ops {
+            if !ops.is_empty() {
+                windows.push(WindowContent { id, body: Body::Graphics(ops.clone()) });
+            }
+        }
+        Contents { v: crate::glk_contents::VERSION, windows }
+    }
+
+    /// Put [`capture_contents`](Self::capture_contents) back into the windows gvm
+    /// has just reopened (SQ-1712). Windows are matched by id AND kind — an id gvm
+    /// did not restore as that kind is skipped — and the primary buffer is never
+    /// written. Runs BEFORE the Arrange is delivered, so the game's own repaint
+    /// lands on top of the reinstated screen.
+    pub(crate) fn reinstate_contents(&mut self, c: crate::glk_contents::Contents) {
+        use crate::glk_contents::{Body, ElemDto, GfxOp};
+        for w in c.windows {
+            let id = w.id;
+            match w.body {
+                Body::Buffer(elems) => {
+                    if self.primary == Some(id) || !self.buffers.contains_key(&id) {
+                        continue;
+                    }
+                    let mut log = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            ElemDto::Text { bits, fg, bg, link, para, glk_style, text } => {
+                                log.push(BufElem::Text { bits, fg, bg, link, para, glk_style, text });
+                            }
+                            ElemDto::Image { resource, align, scaled, margin_px, rule, link } => {
+                                let Some(src) = self.picts.image(resource) else { continue };
+                                log.push(BufElem::Image(crate::inline_image::InlineImage {
+                                    pixels: std::sync::Arc::new(src.to_rgba8()),
+                                    align,
+                                    scaled,
+                                    margin_px,
+                                    rule: rule.map(|(rule, width, height, maxwidth)| gvm::glk::ImageRule { rule, width, height, maxwidth }),
+                                    link,
+                                    resource: Some(resource),
+                                }));
+                            }
+                        }
+                    }
+                    if let Some(b) = self.buffers.get_mut(&id) {
+                        b.log = log;
+                        b.drained = 0;
+                    }
+                }
+                Body::Grid(cells) => {
+                    if let Some(g) = self.grids.get_mut(&id) {
+                        g.cells = cells
+                            .into_iter()
+                            .map(|(r, c, ch, bits, fg, bg, link, gs)| ((r, c), (ch, bits, fg, bg, link, gs)))
+                            .collect();
+                    }
+                }
+                Body::Graphics(ops) => {
+                    if !self.layout.iter().any(|&(wid, ty, _, _)| wid == id && ty == WinType::Graphics) {
+                        continue;
+                    }
+                    for op in ops {
+                        match op {
+                            GfxOp::Fill { color, left, top, w, h } => self.graphics_fill_rect(id, color, left, top, w, h),
+                            GfxOp::Erase { left, top, w, h } => self.graphics_erase_rect(id, left, top, w, h),
+                            GfxOp::Background(color) => self.graphics_set_background(id, color),
+                            GfxOp::Image { resnum, x, y, scale } => {
+                                self.graphics_draw_image(id, resnum, x, y, scale, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Whether the story window's output currently ends at the game's read
@@ -1717,6 +1873,7 @@ impl AppGlk {
                         canvas: c.map(|c| c.arc()).unwrap_or_else(|| std::sync::Arc::new(image::RgbaImage::new(1, 1))),
                         version: c.map(|c| c.version).unwrap_or(0),
                         upscale: false,
+                        undrawn: c.is_some_and(|c| c.pristine),
                     })
                 }
                 WinType::Pair => unreachable!("pair windows are never tree leaves"),
@@ -1856,7 +2013,7 @@ fn log_to_lines(
                             {
                                 last.end = col + 1
                             }
-                            _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg, link: *link, glk_style: *glk_style }),
+                            _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg, link: *link, glk_style: *glk_style, ink: 0 }),
                         }
                     }
                 }
@@ -1929,6 +2086,13 @@ impl GlkBackend for AppGlk {
         // was already on screen; rescue it into `orphaned_primary` so the next drain
         // still returns it, in the same order, ahead of whatever the new window prints.
         if self.primary == Some(id) {
+            // SQ-1741: closing the page the player is reading wipes it just as
+            // `glk_window_clear` does — Photopia's splash-to-Mars transition
+            // closes its story buffer and opens a fresh one rather than calling
+            // clear. Raise the same signal so the host pins the new page.
+            if self.buffers.get(&id).is_some_and(|b| !b.log.is_empty()) {
+                self.primary_cleared = true;
+            }
             if let Some(b) = self.buffers.get_mut(&id) {
                 if b.drained < b.log.len() {
                     self.orphaned_primary.extend(b.log.split_off(b.drained));
@@ -1939,6 +2103,7 @@ impl GlkBackend for AppGlk {
         self.buffers.remove(&id);
         self.scans.remove(&id);
         self.graphics.remove(&id);
+        self.gfx_ops.remove(&id);
         self.layout.retain(|&(wid, _, _, _)| wid != id);
         if self.primary == Some(id) {
             self.primary = None;
@@ -1970,6 +2135,40 @@ impl GlkBackend for AppGlk {
         // `Canvas::resize` is a cheap no-op when the size is unchanged, so
         // this costs little on the frequent colour-only `sync_window_tree`
         // re-push (no structural change → no size change).
+        // SQ-1711: in design/stretch mode a graphics window the game has not
+        // drawn into yet still gets its (opaque white) canvas now, so the
+        // initial Glk background shows. Lazy here, not at `window_open`, because
+        // the design size can be set after a game's first windows open.
+        if self.design_screen().is_some() {
+            fn leaves(t: &WinTree, out: &mut Vec<u32>) {
+                match t {
+                    WinTree::Leaf { id, wintype: WinType::Graphics, .. } => out.push(*id),
+                    WinTree::Leaf { .. } => {}
+                    WinTree::Pair { first, second, .. } => {
+                        leaves(first, out);
+                        leaves(second, out);
+                    }
+                }
+            }
+            let mut gids = Vec::new();
+            if let Some(t) = &self.layout_tree {
+                leaves(t, &mut gids);
+            }
+            for id in gids {
+                match self.graphics.get_mut(&id) {
+                    // Made before design mode took effect (or by a restore that
+                    // replayed no ops): still blank and transparent, so it becomes
+                    // the design background too.
+                    Some(c) => {
+                        c.upgrade_blank_to_opaque(0xFFFFFF);
+                    }
+                    None => {
+                        let (cw, ch) = self.canvas_size(id);
+                        self.graphics.insert(id, fresh_canvas(true, cw, ch));
+                    }
+                }
+            }
+        }
         let ids: Vec<u32> = self.graphics.keys().copied().collect();
         for id in ids {
             let (cw, ch) = self.canvas_size(id);
@@ -2023,6 +2222,7 @@ impl GlkBackend for AppGlk {
         if let Some(c) = self.graphics.get_mut(&win) {
             let (w, h) = (c.img.width(), c.img.height());
             c.erase_rect(0, 0, w, h);
+            self.note_gfx_op(win, crate::glk_contents::GfxOp::Erase { left: 0, top: 0, w: u32::MAX, h: u32::MAX });
         }
         // A cleared window puts the cursor back at line start, so a heading
         // printed at the top of the fresh window is a valid line-start heading.
@@ -2086,26 +2286,38 @@ impl GlkBackend for AppGlk {
 
     fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
         let (cw, ch) = self.canvas_size(win);
+        let design = self.design_screen().is_some();
         self.graphics
             .entry(win)
-            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .or_insert_with(|| fresh_canvas(design, cw, ch))
             .fill_rect(color, left, top, w, h);
+        self.note_gfx_op(win, crate::glk_contents::GfxOp::Fill { color, left, top, w, h });
     }
 
     fn graphics_erase_rect(&mut self, win: u32, left: i32, top: i32, w: u32, h: u32) {
         let (cw, ch) = self.canvas_size(win);
+        let design = self.design_screen().is_some();
         self.graphics
             .entry(win)
-            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .or_insert_with(|| fresh_canvas(design, cw, ch))
             .erase_rect(left, top, w, h);
+        let full = left <= 0 && top <= 0 && i64::from(w) + i64::from(left) >= i64::from(cw) && i64::from(h) + i64::from(top) >= i64::from(ch);
+        let op = if full {
+            crate::glk_contents::GfxOp::Erase { left: 0, top: 0, w: u32::MAX, h: u32::MAX }
+        } else {
+            crate::glk_contents::GfxOp::Erase { left, top, w, h }
+        };
+        self.note_gfx_op(win, op);
     }
 
     fn graphics_set_background(&mut self, win: u32, color: u32) {
         let (cw, ch) = self.canvas_size(win);
+        let design = self.design_screen().is_some();
         self.graphics
             .entry(win)
-            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .or_insert_with(|| fresh_canvas(design, cw, ch))
             .set_background(color);
+        self.note_gfx_op(win, crate::glk_contents::GfxOp::Background(color));
     }
 
     fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>, link: u32) -> bool {
@@ -2127,10 +2339,12 @@ impl GlkBackend for AppGlk {
         // Graphics-window target: existing canvas path.
         let Some(src) = self.picts.image(resnum) else { return false };
         let (cw, ch) = self.canvas_size(win);
+        let design = self.design_screen().is_some();
         self.graphics
             .entry(win)
-            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .or_insert_with(|| fresh_canvas(design, cw, ch))
             .draw_image(&src, x, y, scale);
+        self.note_gfx_op(win, crate::glk_contents::GfxOp::Image { resnum, x, y, scale });
         true
     }
 
@@ -2708,7 +2922,7 @@ mod tests {
         assert_eq!(inline.lines, vec!["abCD".to_string(), "x".to_string()]);
         // "CD" (cols 2..4) is bold (Header → 0x02), merged into one run; it
         // carries the Header Glk style class (3) for the theme colour slot.
-        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 3 }]);
+        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 3, ink: 0 }]);
         assert!(inline.runs[1].is_empty());
     }
 
@@ -2861,6 +3075,34 @@ mod tests {
         assert_eq!(glk.screen_model().grid().unwrap().cell(1, 2).link, 0, "an unlinked cell has link 0");
     }
 
+    // SQ-1711: design mode starts a graphics window opaque white; cell mode keeps
+    // the transparent default (SQ-0332/0338).
+    #[test]
+    fn fresh_canvas_is_white_in_design_mode_and_transparent_in_cell_mode() {
+        let d = fresh_canvas(true, 4, 4);
+        assert!(d.pristine && d.img.pixels().all(|p| p.0 == [255, 255, 255, 255]));
+        let c = fresh_canvas(false, 4, 4);
+        assert!(!c.pristine && c.img.pixels().all(|p| p.0[3] == 0));
+        let mut d = d;
+        d.fill_rect(0xFF0000, 0, 0, 1, 1);
+        assert!(!d.pristine, "any paint makes it a drawn canvas");
+        d.erase_rect(0, 0, 4, 4);
+        assert!(d.pristine && d.img.pixels().all(|p| p.0 == [255, 255, 255, 255]), "a whole erase returns to white");
+    }
+
+    #[test]
+    fn a_blank_transparent_canvas_upgrades_to_white_but_a_drawn_one_does_not() {
+        let mut blank = crate::graphics::Canvas::new(4, 4);
+        assert!(blank.upgrade_blank_to_opaque(0xFFFFFF));
+        assert!(blank.pristine && blank.img.pixels().all(|p| p.0 == [255, 255, 255, 255]));
+        let mut drawn = crate::graphics::Canvas::new(4, 4);
+        drawn.fill_rect(0xFF0000, 0, 0, 1, 1);
+        assert!(!drawn.upgrade_blank_to_opaque(0xFFFFFF), "painted canvas is the game's");
+        let mut set_bg = crate::graphics::Canvas::new(4, 4);
+        set_bg.set_background(0x123456);
+        assert!(!set_bg.upgrade_blank_to_opaque(0xFFFFFF), "a background the game set is kept");
+    }
+
     #[test]
     fn appglk_graphics_fill_composites_into_canvas() {
         let mut g = AppGlk::with_graphics(80, 24, (2.0, 2.0), crate::graphics::PictSource::new(None));
@@ -2871,6 +3113,70 @@ mod tests {
         let canvas = g.graphics.get(&1).unwrap();
         assert_eq!(canvas.img.dimensions(), (8, 8));
         assert_eq!(canvas.img.get_pixel(0, 0).0, [0xFF, 0, 0, 0xFF]);
+    }
+
+    // SQ-1712: the non-primary windows' contents round-trip through the recipe a
+    // host Save State carries, onto windows reopened blank under the same ids.
+    #[test]
+    fn window_contents_capture_and_reinstate_round_trip() {
+        use gvm::glk::{Rect as GRect, WinType as W};
+        let open = |g: &mut AppGlk| {
+            g.window_open(1, W::TextBuffer); // primary
+            g.window_open(2, W::TextBuffer); // the bubble
+            g.window_open(3, W::TextGrid);
+            g.window_open(4, W::Graphics);
+            g.window_layout(&[
+                (1, W::TextBuffer, GRect { left: 0, top: 0, width: 20, height: 10 }, None),
+                (2, W::TextBuffer, GRect { left: 20, top: 0, width: 20, height: 10 }, None),
+                (3, W::TextGrid, GRect { left: 0, top: 10, width: 20, height: 2 }, None),
+                (4, W::Graphics, GRect { left: 20, top: 10, width: 4, height: 4 }, None),
+            ]);
+        };
+        let mut g = AppGlk::with_graphics(80, 24, (2.0, 2.0), crate::graphics::PictSource::new(None));
+        open(&mut g);
+        g.put_text(1, GlkStyle::Normal, "primary stays in the transcript");
+        g.put_text(2, GlkStyle::Emphasized, "Exits: here");
+        g.grid_put(3, 2, 1, GlkStyle::Normal, "ab");
+        g.graphics_set_background(4, 0x0000_FF00);
+        g.graphics_fill_rect(4, 0x00FF_0000, 0, 0, 4, 4);
+        let before = g.graphics.get(&4).unwrap().img.clone();
+
+        let captured = g.capture_contents();
+        let ids: Vec<u32> = captured.windows.iter().map(|w| w.id).collect();
+        assert_eq!(ids, vec![2, 3, 4], "the primary buffer is never captured");
+
+        // The restore path closes and reopens every window, blank.
+        for id in [1, 2, 3, 4] {
+            g.window_close(id);
+        }
+        open(&mut g);
+        assert!(g.buffers[&2].log.is_empty() && g.grids[&3].cells.is_empty(), "premise: reopened blank");
+        g.reinstate_contents(captured);
+
+        let text: String = g.buffers[&2].log.iter().map(|e| match e { BufElem::Text { text, glk_style, .. } => format!("{text}/{glk_style}"), _ => String::new() }).collect();
+        assert_eq!(text, "Exits: here/1");
+        assert!(g.buffers[&1].log.is_empty(), "the primary was not written");
+        assert_eq!(g.grids[&3].cells.get(&(1, 3)).map(|c| c.0), Some('b'));
+        assert_eq!(g.graphics.get(&4).unwrap().img.as_raw(), before.as_raw(), "the canvas is replayed from its ops");
+    }
+
+    // SQ-1712: a canvas-wide erase makes the earlier ops irrelevant, and the list
+    // is bounded.
+    #[test]
+    fn graphics_op_log_collapses_on_a_full_erase_and_is_capped() {
+        use crate::glk_contents::GfxOp;
+        let mut g = AppGlk::with_graphics(80, 24, (2.0, 2.0), crate::graphics::PictSource::new(None));
+        g.window_open(1, gvm::glk::WinType::Graphics);
+        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 4, height: 4 }, None)]);
+        g.graphics_set_background(1, 0x1234);
+        g.graphics_fill_rect(1, 0xFF, 0, 0, 2, 2);
+        g.graphics_erase_rect(1, 0, 0, 8, 8);
+        assert_eq!(g.gfx_ops[&1].len(), 2, "background + the full erase: {:?}", g.gfx_ops[&1]);
+        assert!(matches!(g.gfx_ops[&1][0], GfxOp::Background(0x1234)));
+        for i in 0..(crate::glk_contents::MAX_GFX_OPS as u32 + 50) {
+            g.graphics_fill_rect(1, i, 0, 0, 1, 1);
+        }
+        assert_eq!(g.gfx_ops[&1].len(), crate::glk_contents::MAX_GFX_OPS);
     }
 
     // SQ-1565: a fixed-pixel graphics split (Kerkerkruip's 2-3px coloured

@@ -175,7 +175,7 @@ pub fn restore_error_msg(e: crate::engine::EngineError) -> String {
             "this save was written by the \"{found}\" engine, but lanthorn is running the \"{expected}\" engine"
         ),
         EngineError::BadSave(msg) if msg.contains("SaveMismatch") => {
-            "save is for a different story".to_string()
+            "save is for a different game".to_string()
         }
         EngineError::BadSave(msg) => format!("restore failed: {msg}"),
     }
@@ -222,7 +222,6 @@ pub fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Re
     if crate::persist_files::is_game_save(path) {
         let bytes = crate::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
         session.restore_game_save(&bytes).map_err(restore_error_msg)?;
-        note_bare_quetzal_width(session);
         return Ok(RestoreOutcome::DescriptorCompleted(None));
     }
     let tag = engine_tag(&*session);
@@ -249,38 +248,6 @@ pub fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Re
     }
 }
 
-/// Floor the declared-width guard for a restore that brought game memory in
-/// WITHOUT any screen state: a bare Quetzal (`.qzl`/`.sav`), from another
-/// interpreter or an older lanthorn (SQ-0681).
-///
-/// [`crate::session::restore_screen`] can raise the floor to the restored game's
-/// own frame of reference because a `.lanthorn` archives the screen the game was
-/// laid out on. A bare Quetzal, by design, archives none: ZMSD/Quetzal treat the
-/// header's screen dimensions as the interpreter's, to be re-stamped on restore,
-/// so the width whose columns the restored status routine baked in is genuinely
-/// unknowable here.
-///
-/// The conservative choice is [`zvm::screen::DEFAULT_SCREEN_COLS`] (80), not the
-/// current session's floor. 80 is the Z-machine's conventional screen width, the
-/// width zvm falls back to, and the width every lanthorn session booted at before
-/// SQ-0680 seeded the real pane — so it is what a foreign or older `.qzl` was
-/// overwhelmingly laid out for. Getting it wrong in this direction costs at most
-/// a bar clipped at the right of a narrower pane (what any interpreter shows for
-/// an 80-column game in a 60-column window); not flooring at all re-manifests the
-/// SQ-0679 garble — digits printed over the room name — on every turn after the
-/// restore. It only ever grows the floor, so a session already wider than 80 is
-/// untouched, and it is a no-op for the versions the floor exempts (v1–3, v6).
-///
-/// Not applied to an in-game `@save` `.lanthorn`, which travels the same
-/// descriptor-completion path but DOES carry its screen: there
-/// [`apply_archive_state`] hands `restore_screen` the real width, and guessing 80
-/// first would pin a genuinely 60-column save to 80.
-pub fn note_bare_quetzal_width(session: &mut dyn Engine) {
-    if let Some(z) = zvm_session_opt_mut(session) {
-        z.note_restored_screen_cols(zvm::screen::DEFAULT_SCREEN_COLS as u16);
-    }
-}
-
 /// Whether `session` is a Z-machine Version 6 story. `false` for Glulx/Scott
 /// and for a bare `dyn Engine` that doesn't downcast to a Z-machine session.
 /// Used only to decide whether a restored archive's missing paint log
@@ -290,15 +257,28 @@ pub fn is_v6_session(session: &dyn Engine) -> bool {
     zvm_session_opt(session).is_some_and(|z| z.machine.mem.version() == 6)
 }
 
-/// Whether `session` is a Z-machine story with NO grammar table at all —
-/// `zvm::grammar::Grammar::load` answers `Absent` for a menu-driven Version 6
-/// game (Journey) or a Dialog story, neither of which has any verb-driven
-/// navigation to build a map out of. `false` for Glulx/Scott and for a bare
-/// `dyn Engine` that doesn't downcast to a Z-machine session — this exists only
-/// to gate the automapper (SQ-1579), and every other engine's own detection
-/// heuristics are unrelated to the v6 status-band false-positive this suppresses.
-pub fn zmachine_story_has_no_grammar(session: &dyn Engine) -> bool {
-    zvm_session_opt(session).is_some_and(|z| zvm::grammar::Grammar::load(&z.machine.mem).is_err())
+/// Whether `session` is a menu-driven Z-machine Version 6 story: V6 AND no
+/// grammar table at all (`zvm::grammar::Grammar::load` answers
+/// [`Absent`](zvm::grammar::GrammarError::Absent)), as Journey does. Such a story has
+/// no verb-driven navigation to build a map out of, and its status band can paint
+/// room-shaped text a detector mistakes for a location. `false` for Glulx/Scott
+/// and for a bare `dyn Engine` that doesn't downcast to a Z-machine session. This
+/// exists only to gate the automapper (SQ-1579).
+///
+/// The V6 condition is load-bearing (SQ-1742): a Dialog story is not V6 and
+/// writes no Inform grammar table (so is `Absent` too), yet is an ordinary parser
+/// game whose rooms the name detectors read fine; gating on `Absent` alone
+/// switched its map off.
+///
+/// Only `Absent` counts. Any other error means the grammar reader did not
+/// recognise a table that IS there (a story from a compiler whose layout it has
+/// not met), which says nothing against the story being a map-worthy parser game;
+/// gating on `is_err()` switched the map off for every ZILF-built story.
+pub fn zmachine_story_is_menu_driven_v6(session: &dyn Engine) -> bool {
+    zvm_session_opt(session).is_some_and(|z| {
+        z.machine.mem.version() == 6
+            && matches!(zvm::grammar::Grammar::load(&z.machine.mem), Err(zvm::grammar::GrammarError::Absent))
+    })
 }
 
 /// Push a restore-time notice into the transcript when the just-restored
@@ -367,8 +347,12 @@ pub fn apply_archive_state(
     }
     *mapper = ac.mapper;
     state.transcript = ac.transcript;
-    state.clear_anchor = None;
-    state.top_anchor = None;
+    // The anchors are part of the archived transcript (SQ-1713): resetting them
+    // would put back the scrollback the game had cleared (Narcolepsy's pre-wake
+    // dream text).
+    state.clear_anchor = ac.anchors.clear;
+    state.pending_clear = false;
+    state.top_anchor = ac.anchors.top;
     state.transcript_kinds = ac.transcript_kinds;
     state.transcript_runs = ac.transcript_runs;
     state.transcript_para = ac.transcript_para;
@@ -461,28 +445,15 @@ pub(crate) mod tests {
         buf
     }
 
-    /// SQ-0681. A bare Quetzal carries game memory but no screen, so the width
-    /// its status layout was baked at is unknowable — `note_bare_quetzal_width`
-    /// floors the declared width at the conventional 80 rather than leaving a
-    /// narrow session's own boot width to make every baked field column illegal.
-    ///
-    /// The contrast in the second half is the reason the guess is scoped to this
-    /// one branch: a `.lanthorn` restore must NOT take the guess, because an
-    /// archive knows the real width (`restore_screen`) and pinning a genuinely
-    /// 60-column session to 80 would undo SQ-0680's pre-boot seed.
+    /// SQ-0681, reduced by SQ-1809. A bare Quetzal carries game memory but no
+    /// screen, so the width its status layout was baked at is unknowable. It used
+    /// to be GUESSED as 80 and floored; now a story that caches the width is told
+    /// 80 from its boot anyway, and one that follows the pane has nothing baked. So
+    /// a screenless restore must leave the told width exactly as the boot settled
+    /// it — it neither fixes a pane-following session nor moves a fixed one.
     #[test]
-    fn a_bare_qzl_restore_floors_the_declared_width_at_the_default_sq0681() {
-        use crate::engine::Engine;
+    fn a_bare_qzl_restore_leaves_the_told_width_alone_sq0681() {
         use crate::session::{GameSession, PendingIo};
-
-        // A narrow session: booted with the real 60-column pane seeded (SQ-0680).
-        let narrow = || {
-            GameSession::new_with_trace(
-                read_char_then_save_v4_story(), true, false, None, false, Vec::new(), None, None,
-                Some((24, 60)),
-            )
-            .expect("new")
-        };
 
         // Bare .qzl bytes, captured while the @save descriptor is still pending.
         let mut donor = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
@@ -491,32 +462,18 @@ pub(crate) mod tests {
         let qzl_path = std::env::temp_dir().join(format!("bm-sq0681-{}.qzl", std::process::id()));
         std::fs::write(&qzl_path, &qzl_bytes).unwrap();
 
-        let mut sess = narrow();
-        assert_eq!(sess.boot_screen_cols, 60, "the session booted at its real narrow pane");
+        // A narrow session: booted with the real 60-column pane seeded (SQ-0680).
+        let mut sess = GameSession::new_with_trace(
+            read_char_then_save_v4_story(), true, false, None, false, Vec::new(), None, None,
+            Some((24, 60)),
+        )
+        .expect("new");
+        assert_eq!(sess.fixed_cols(), None, "the no-machine door follows the pane");
         let outcome = super::restore_from_file(&qzl_path, &mut sess).expect("restore .qzl game save");
         assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted(None)));
-        assert_eq!(
-            sess.boot_screen_cols,
-            zvm::screen::DEFAULT_SCREEN_COLS as u16,
-            "a screenless restore floors the declared width at the conventional 80"
-        );
+        assert_eq!(sess.fixed_cols(), None, "a screenless restore does not fix a pane-following story");
+        assert_eq!(sess.machine.mem.read_byte(0x21), 60, "and it is still told its own pane");
         let _ = std::fs::remove_file(&qzl_path);
-
-        // Contrast: a Save State .lanthorn. Its width comes from the archived
-        // screen (here: none archived), never from the bare-Quetzal guess.
-        let save = Engine::save_state(&narrow());
-        let lanthorn_path = std::env::temp_dir().join(format!("bm-sq0681-{}.lanthorn", std::process::id()));
-        crate::archive::save_archive(&lanthorn_path, &mapper::mapper::Mapper::default(), &save, None,
-            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .lanthorn");
-
-        let mut sess2 = narrow();
-        let outcome2 = super::restore_from_file(&lanthorn_path, &mut sess2).expect("restore .lanthorn");
-        assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
-        assert_eq!(
-            sess2.boot_screen_cols, 60,
-            "an archive restore never takes the bare-Quetzal guess — SQ-0680's narrow seed stands"
-        );
-        let _ = std::fs::remove_file(&lanthorn_path);
     }
 
     /// SQ-0787. Every restore site funnels through [`super::apply_v6_pictures`], and

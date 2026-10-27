@@ -108,6 +108,10 @@ pub struct PerGameConfig {
     /// global `colour_source` decides; that is also what "Default" means in the
     /// dialog's own row, which is why there is no fourth enum variant for it.
     pub colour_source: Option<crate::config::ColourSource>,
+    /// What width this v4+ Z-machine story is told (SQ-1809): `auto` (probe it),
+    /// `fixed` (80) or `pane`. `None` = no override, so the global `status_width`
+    /// decides.
+    pub status_width: Option<crate::config::StatusWidth>,
     /// This story's own one-click quick-action row (SQ-1552), overriding the
     /// global `[command_panel] quick`. `None` = no override, so the global list
     /// decides (and, if that is empty too, the built-in row —
@@ -151,6 +155,7 @@ impl PerGameConfig {
         "scott_prehistoric_lamp",
         "scott_picture_resolution",
         "colour_source",
+        "status_width",
         "quick",
     ];
 
@@ -198,6 +203,7 @@ impl PerGameConfig {
                 .as_deref()
                 .and_then(crate::graphics::ScottPictureResolution::from_key),
             colour_source: s("colour_source").as_deref().and_then(crate::config::ColourSource::from_key),
+            status_width: s("status_width").as_deref().and_then(crate::config::StatusWidth::from_key),
             quick: list("quick"),
         }
     }
@@ -232,6 +238,7 @@ impl PerGameConfig {
             put_bool(doc, "scott_prehistoric_lamp", self.scott_prehistoric_lamp);
             put_str(doc, "scott_picture_resolution", self.scott_picture_resolution.map(|v| v.key()));
             put_str(doc, "colour_source", self.colour_source.map(|v| v.key()));
+            put_str(doc, "status_width", self.status_width.map(|v| v.key()));
             match &self.quick {
                 Some(v) => {
                     let arr: toml_edit::Array = v.iter().map(String::as_str).collect();
@@ -371,6 +378,12 @@ pub fn read_per_game_glk_design(game_dir: &Path) -> Option<bool> {
 /// so the global `glk_design_fit` decides.
 pub fn read_per_game_glk_design_fit(game_dir: &Path) -> Option<crate::glk_cfg::GlkFitMode> {
     PerGameConfig::read(game_dir).glk_design_fit
+}
+
+/// Read the per-game `status_width` override (SQ-1809). `None` = no override,
+/// so the global `status_width` decides.
+pub fn read_per_game_status_width(game_dir: &Path) -> Option<crate::config::StatusWidth> {
+    PerGameConfig::read(game_dir).status_width
 }
 
 /// Read the per-game `show_map` override, if the user set one. `None` = no
@@ -653,6 +666,13 @@ pub fn write_per_game_glk_design_fit(game_dir: &Path, value: Option<crate::glk_c
     edit(game_dir, |c| c.glk_design_fit = value)
 }
 
+/// Persist (or clear) the per-game `status_width` override (SQ-1809),
+/// preserving every sibling key. `None` clears it back to inheriting the global
+/// mode.
+pub fn write_per_game_status_width(game_dir: &Path, value: Option<crate::config::StatusWidth>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.status_width = value)
+}
+
 /// Persist (or clear) the per-game `v6_render` override (SQ-1123), preserving
 /// every sibling key. `None` clears it back to inheriting the global mode.
 pub fn write_per_game_v6_render(game_dir: &Path, value: Option<String>) -> std::io::Result<()> {
@@ -775,6 +795,7 @@ mod tests {
             scott_prehistoric_lamp: Some(true),
             scott_picture_resolution: Some(crate::graphics::ScottPictureResolution::Original),
             colour_source: Some(crate::config::ColourSource::Terminal),
+            status_width: Some(crate::config::StatusWidth::Fixed),
             quick: Some(vec!["n".to_string(), "s".to_string()]),
         };
         every.write(&dir).unwrap();

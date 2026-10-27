@@ -29,7 +29,7 @@ use crate::documents::DocEntry;
 use crate::data_roots::DataRoots;
 use crate::ifdb_documents::{
     format_size, is_previewable, matches_title, DocEvent, DocJob, DocumentOption, DocumentWorker, DownloadItem,
-    saved_state, LinkInfo, LinkKind, RowKey, SavedState, ZipEntry, ZipListing,
+    saved_state, DocAction, LinkInfo, LinkKind, RowKey, SavedState, ZipEntry, ZipListing,
 };
 use crate::ifdb_search::{IfdbGate, SearchSource};
 use crate::ifdb_search_modal::{clip_with_ellipsis, put_str, row_glyph, window_start, ROW_MARGIN};
@@ -111,6 +111,9 @@ pub struct DocumentsChooser {
     queue: VecDeque<DocJob>,
     inflight: bool,
     saved: bool,
+    /// URLs the player asked to open in a browser (SQ-1784), for the host to
+    /// hand to [`crate::opener`] via [`take_open`](Self::take_open).
+    open: Vec<String>,
 }
 
 impl DocumentsChooser {
@@ -133,7 +136,13 @@ impl DocumentsChooser {
             queue: VecDeque::from([DocJob::Resolve { tuid: tuid.to_string() }]),
             inflight: false,
             saved: false,
+            open: Vec::new(),
         }
+    }
+
+    /// The URLs to open in the player's browser since the last call.
+    pub fn take_open(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.open)
     }
 
     /// The next job to run, if none is outstanding.
@@ -207,7 +216,8 @@ impl DocumentsChooser {
     }
 
     fn link_previewable(l: &LinkState) -> bool {
-        l.opt.kind == LinkKind::Text
+        matches!(l.opt.kind, LinkKind::Text | LinkKind::WebPage)
+            && l.opt.obsolete.is_none()
             && !matches!(
                 std::path::Path::new(&l.opt.filename).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
                 Some("doc" | "rtf")
@@ -242,7 +252,7 @@ impl DocumentsChooser {
             KeyCode::Enter => match self.focus {
                 Focus::Close => return KeyOutcome::Close,
                 Focus::Download | Focus::List => {
-                    self.start_download();
+                    self.activate();
                     return KeyOutcome::Stay;
                 }
             },
@@ -260,6 +270,8 @@ impl DocumentsChooser {
             KeyCode::Right | KeyCode::Char('e') => self.expand(),
             KeyCode::Left => self.collapse(anim),
             KeyCode::Char('p') => self.request_preview(),
+            KeyCode::Char('o') => self.open_selected(),
+            KeyCode::Char('s') => self.save_selected(),
             _ => {}
         }
         self.want_probe();
@@ -287,7 +299,7 @@ impl DocumentsChooser {
             return KeyOutcome::Close;
         }
         match rects.buttons.iter().find(|(_, r)| r.contains(pos)).map(|(id, _)| *id) {
-            Some(ButtonId::Ok) => self.start_download(),
+            Some(ButtonId::Ok) => self.activate(),
             Some(ButtonId::Cancel) => return KeyOutcome::Close,
             _ => {}
         }
@@ -303,8 +315,46 @@ impl DocumentsChooser {
         }
     }
 
+    /// Enter: save the marked rows; with none marked, do the highlighted row's
+    /// default ([`DocumentOption::default_action`]): a document saves, a web page
+    /// or a dead game opens in the browser.
+    fn activate(&mut self) {
+        if self.checked.is_empty() {
+            if let Some((i, None)) = self.selected_key() {
+                if self.links[i].opt.default_action() == DocAction::Open {
+                    self.open_selected();
+                    return;
+                }
+            }
+        }
+        self.start_download(None);
+    }
+
+    /// `o`: open the highlighted row's link (a zip entry's zip) in the browser.
+    fn open_selected(&mut self) {
+        let Some(key) = self.selected_key() else { return };
+        let url = self.links[key.0].opt.url.clone();
+        if crate::opener::is_web_mode() {
+            // No browser to launch on a server: show the address instead.
+            self.status = Some((url, false));
+        } else {
+            self.status = Some(("Opening in your browser…".to_string(), false));
+            self.open.push(url);
+        }
+    }
+
+    /// `s`: save the highlighted row whatever its default; a dead game cannot be.
+    fn save_selected(&mut self) {
+        let Some(key) = self.selected_key() else { return };
+        self.start_download(Some(key));
+    }
+
     fn toggle_mark(&mut self) {
         if let Some(key) = self.selected_key() {
+            if key.1.is_none() && self.links[key.0].opt.obsolete.is_some() {
+                self.status = Some((format!("{} — o opens it", self.links[key.0].opt.kind_label()), false));
+                return;
+            }
             if self.saved(key) == SavedState::Saved {
                 self.status = Some(("Already in your documents".to_string(), false));
                 return;
@@ -367,15 +417,23 @@ impl DocumentsChooser {
         }
     }
 
-    fn start_download(&mut self) {
+    /// Queue a download of `only` if given, else of the marked rows, else of the
+    /// highlighted one. Dead online games are never saved.
+    fn start_download(&mut self, only: Option<RowKey>) {
         if self.phase != Phase::Ready {
             return;
         }
-        let keys: Vec<RowKey> = if self.checked.is_empty() {
+        let keys: Vec<RowKey> = if let Some(k) = only {
+            vec![k]
+        } else if self.checked.is_empty() {
             self.selected_key().into_iter().collect()
         } else {
             self.checked.iter().copied().collect()
         };
+        if let Some(dead) = keys.iter().find_map(|k| self.links.get(k.0).filter(|l| l.opt.obsolete.is_some())) {
+            self.status = Some((format!("Cannot be saved: {} — o opens it", dead.opt.kind_label()), false));
+            return;
+        }
         let items: Vec<DownloadItem> = keys
             .iter()
             .filter_map(|&key| {
@@ -466,7 +524,10 @@ impl DocumentsChooser {
                 let total = self.rows().len();
                 self.scroll.len(total);
             }
-            DocEvent::Previewed { key, result } => {
+            DocEvent::Previewed { key, result, sniff } => {
+                if let (None, Some(sniff), Some(l)) = (key.1, sniff, self.links.get_mut(key.0)) {
+                    l.opt.apply_sniff(*sniff);
+                }
                 self.previews.insert(
                     *key,
                     match result {
@@ -531,8 +592,8 @@ impl DocumentsChooser {
                     _ => "  ",
                 };
                 let mut tail = match l.size {
-                    Some(s) => format!("{} · {}", l.opt.kind.label(), format_size(s)),
-                    None => l.opt.kind.label().to_string(),
+                    Some(s) => format!("{} · {}", l.opt.kind_label(), format_size(s)),
+                    None => l.opt.kind_label().to_string(),
                 };
                 let saved = self.saved(key);
                 if let Some(note) = saved_note(saved) {
@@ -545,6 +606,13 @@ impl DocumentsChooser {
                     marker,
                     name: l.opt.filename.clone(),
                     tail,
+                    tail_kind: if l.opt.obsolete.is_some() {
+                        TailKind::Obsolete
+                    } else if l.opt.kind == LinkKind::WebPage {
+                        TailKind::WebPage
+                    } else {
+                        TailKind::Plain
+                    },
                     spoiler: l.opt.spoiler,
                     title_match: matches_title(&l.opt.filename, &self.title),
                 }
@@ -563,6 +631,7 @@ impl DocumentsChooser {
                     indent: 4,
                     marker: "",
                     tail,
+                    tail_kind: TailKind::Plain,
                     spoiler: e.is_some_and(|e| e.spoiler),
                     title_match: matches_title(&name, &self.title),
                     name,
@@ -590,6 +659,13 @@ impl DocumentsChooser {
                     about = format!("Spoiler — {about}");
                 }
                 lines.push(about);
+                if l.opt.obsolete.is_some() {
+                    lines.push(format!("{} · Enter or o opens it in your browser", l.opt.kind_label()));
+                } else if l.opt.kind == LinkKind::WebPage {
+                    lines.push("A web page · Enter or o opens it in your browser · s saves a copy".to_string());
+                } else {
+                    lines.push("Enter saves it · o opens it in your browser".to_string());
+                }
                 if l.opt.kind == LinkKind::Archive && l.expanded {
                     match &l.zip {
                         ZipState::Loading => lines.push("Reading the zip's contents…".to_string()),
@@ -623,6 +699,14 @@ fn saved_note(s: SavedState) -> Option<&'static str> {
     }
 }
 
+/// How a row's tail is styled: a web page and a dead game each have a selector.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TailKind {
+    Plain,
+    WebPage,
+    Obsolete,
+}
+
 struct RowView {
     checked: bool,
     saved: SavedState,
@@ -630,6 +714,7 @@ struct RowView {
     marker: &'static str,
     name: String,
     tail: String,
+    tail_kind: TailKind,
     spoiler: bool,
     title_match: bool,
 }
@@ -682,6 +767,8 @@ pub fn draw_documents(ch: &DocumentsChooser, area: Rect, cs: &ColorScheme, buf: 
     let spoiler_style = cs.theme.get("documents_spoiler").style;
     let match_style = cs.theme.get("documents_title_match").style;
     let preview_style = cs.theme.get("documents_preview").style;
+    let web_style = cs.theme.get("documents_web_page").style;
+    let obsolete_style = cs.theme.get("documents_obsolete").style;
     let attrib = cs.theme.get("ifdb_attribution").style;
     let alert = cs.theme.get("alert").style;
     let check_on = row_glyph(cs, "documents_checked", "✓");
@@ -690,7 +777,7 @@ pub fn draw_documents(ch: &DocumentsChooser, area: Rect, cs: &ColorScheme, buf: 
     let check_present = row_glyph(cs, "ifdb_download_present", "✓");
 
     let hint = if ch.focus == Focus::List {
-        "↑/↓ move · Space mark · → open zip · p preview · Enter download · Esc close"
+        "↑/↓ move · Space mark · → open zip · p preview · o open in browser · s save · Enter go · Esc close"
     } else {
         "Tab/Shift-Tab move focus · Enter activate · Esc close"
     };
@@ -735,7 +822,11 @@ pub fn draw_documents(ch: &DocumentsChooser, area: Rect, cs: &ColorScheme, buf: 
         } else if v.saved != SavedState::NotSaved {
             present_style
         } else {
-            meta
+            match v.tail_kind {
+                TailKind::Plain => meta,
+                TailKind::WebPage => web_style,
+                TailKind::Obsolete => obsolete_style,
+            }
         };
         put_str(buf, tail_x, y, tail_w + 1, &format!(" {}", v.tail), tail_style);
         // Left: mark, indent, zip marker, name.
@@ -847,12 +938,23 @@ impl DocumentsSession {
     pub fn on_key(&mut self, code: KeyCode, anim: &AnimationConfig) -> KeyOutcome {
         let out = self.chooser.on_key(code, anim);
         self.flush();
+        self.open_requested();
         out
+    }
+
+    /// Hand the browser the links the player asked to open. Never launched under
+    /// test, where the chooser's own [`DocumentsChooser::take_open`] is read.
+    fn open_requested(&mut self) {
+        #[cfg(not(test))]
+        for url in self.chooser.take_open() {
+            crate::opener::open(&url);
+        }
     }
 
     pub fn on_click_at(&mut self, pos: Position) -> KeyOutcome {
         let out = self.chooser.on_click_at(pos);
         self.flush();
+        self.open_requested();
         out
     }
 
@@ -955,14 +1057,70 @@ mod tests {
             .join("\n")
     }
 
+    // ── web pages and dead games (SQ-1784) ────────────────────────────────────
+
+    fn hhgg_chooser() -> DocumentsChooser {
+        let mut ch = DocumentsChooser::new("ouv80gvsl32xlion", "The Hitchhiker's Guide to the Galaxy");
+        ch.on_event(&DocEvent::Resolved(Ok(parse_document_options(crate::ifdb_documents::tests::HHGG.as_bytes()))));
+        ch.next_job();
+        ch
+    }
+
+    #[test]
+    fn rows_say_what_they_are_and_what_enter_does() {
+        let mut ch = hhgg_chooser();
+        let shown = screen(&ch, 100, 40);
+        assert!(shown.contains("needs Flash — no longer plays"), "{shown}");
+        assert!(shown.contains("needs Java — no longer plays"), "{shown}");
+        assert!(shown.contains("web page"), "{shown}");
+        assert!(shown.contains("o open in browser"), "{shown}");
+        assert!(shown.contains("Enter or o opens it in your browser"), "dead game pane:\n{shown}");
+        ch.on_key(Down, &anim());
+        assert!(screen(&ch, 100, 40).contains("s saves a copy"), "a web page also offers Save");
+        for _ in 0..3 {
+            ch.on_key(Down, &anim());
+        }
+        assert_eq!(names(&ch)[4], "hhgg.pdf");
+        assert!(screen(&ch, 100, 40).contains("Enter saves it · o opens it in your browser"));
+    }
+
+    #[test]
+    fn enter_follows_the_default_and_the_other_choice_is_one_key_away() {
+        let mut ch = hhgg_chooser();
+        // A dead game: Enter opens, `s` refuses, Space refuses to mark it.
+        ch.on_key(Enter, &anim());
+        assert_eq!(ch.take_open(), ["https://www.bbc.co.uk/radio4/hitchhikers/game.shtml"]);
+        ch.on_key(Char('s'), &anim());
+        assert!(ch.status.as_ref().is_some_and(|(m, _)| m.contains("Cannot be saved")), "{:?}", ch.status);
+        ch.on_key(Char(' '), &anim());
+        assert!(ch.checked.is_empty());
+        assert!(ch.take_open().is_empty());
+        // A web page: Enter opens, `s` saves a copy.
+        ch.on_key(Down, &anim());
+        ch.on_key(Enter, &anim());
+        assert_eq!(ch.take_open().len(), 1);
+        assert!(!matches!(ch.phase, Phase::Downloading { .. }));
+        ch.on_key(Char('s'), &anim());
+        assert!(matches!(ch.phase, Phase::Downloading { total: 1, .. }), "s saves the highlighted page");
+        // A document: Enter saves, `o` opens it instead.
+        let mut ch = hhgg_chooser();
+        for _ in 0..4 {
+            ch.on_key(Down, &anim());
+        }
+        ch.on_key(Char('o'), &anim());
+        assert_eq!(ch.take_open(), ["https://ifarchive.org/if-archive/infocom/shipped-documentation/hhgg.pdf"]);
+        ch.on_key(Enter, &anim());
+        assert!(matches!(ch.phase, Phase::Downloading { total: 1, .. }), "Enter on a document saves");
+    }
+
     #[test]
     fn it_opens_on_the_games_documents_and_probes_only_the_row_under_the_cursor() {
         let h = host(true);
         let (mut s, home, _) = open(&h, "chooser-open");
         settle(&mut s);
         let n = names(&s.chooser);
-        assert_eq!(n.len(), 12);
-        assert_eq!(n[0], "Zork_Trilogy.zip");
+        assert_eq!(n.len(), 14, "twelve before html joined the allowlist, plus the two html links");
+        assert_eq!(n[1], "Zork_Trilogy.zip");
         assert!(s.chooser.links[0].probed && s.chooser.links.iter().skip(1).all(|l| !l.probed), "only row 0 was probed");
         assert!(h.requested().is_empty(), "no zip was read: nothing was asked to be expanded");
         let _ = std::fs::remove_dir_all(home);
@@ -973,20 +1131,20 @@ mod tests {
         let h = host(true);
         let (mut s, home, roots) = open(&h, "chooser-zip");
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down]);
-        assert_eq!(names(&s.chooser)[4], "Sols1.zip");
+        press(&mut s, &[Down, Down, Down, Down, Down]);
+        assert_eq!(names(&s.chooser)[5], "Sols1.zip");
         assert!(h.requested().is_empty(), "moving onto a zip does not open it");
-        assert!(s.chooser.links[4].size.is_some(), "but its size was probed");
+        assert!(s.chooser.links[5].size.is_some(), "but its size was probed");
 
         press(&mut s, &[Right]);
         assert_eq!(h.requested().len(), 1, "opening it read the tail, once");
         let n = names(&s.chooser);
-        assert_eq!(&n[5..9], ["game0.txt", "game1.txt", "game2.txt", "ZorkI.txt"]);
+        assert_eq!(&n[6..10], ["game0.txt", "game1.txt", "game2.txt", "ZorkI.txt"]);
         let shown = screen(&s.chooser, 100, 40);
         assert!(shown.contains("ZorkI.txt ★"), "the entry named for the game is highlighted:\n{shown}");
 
         press(&mut s, &[Down, Down, Down, Down, Char(' ')]);
-        assert_eq!(s.chooser.selected_key(), Some((4, Some(3))));
+        assert_eq!(s.chooser.selected_key(), Some((5, Some(3))));
         assert!(screen(&s.chooser, 100, 40).contains("[✓]"));
         press(&mut s, &[Enter]);
         let (status, failure) = s.chooser.status.clone().expect("a result line");
@@ -1003,8 +1161,8 @@ mod tests {
         let h = host(true);
         let (mut s, home, roots) = open(&h, "chooser-enter");
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down, Down, Down, Down, Down, Down]);
-        assert_eq!(names(&s.chooser)[9], "zork1.txt");
+        press(&mut s, &[Down, Down, Down, Down, Down, Down, Down, Down, Down, Down]);
+        assert_eq!(names(&s.chooser)[10], "zork1.txt");
         press(&mut s, &[Enter]);
         assert_eq!(files_in(&roots.documents().join("Zork I [abc123]")), ["zork1.txt"]);
         press(&mut s, &[Enter]);
@@ -1021,8 +1179,8 @@ mod tests {
         let h = host(false);
         let (mut s, home, _) = open(&h, "chooser-noranges");
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down, Right]);
-        assert_eq!(s.chooser.links[4].zip, ZipState::Unknown);
+        press(&mut s, &[Down, Down, Down, Down, Down, Right]);
+        assert_eq!(s.chooser.links[5].zip, ZipState::Unknown);
         assert!(h.requested().is_empty() && *h.whole.lock().unwrap() == 0, "nothing was fetched to find out");
         assert!(screen(&s.chooser, 100, 40).contains("Contents unknown"));
         let _ = std::fs::remove_dir_all(home);
@@ -1033,7 +1191,7 @@ mod tests {
         let h = host(true);
         let (mut s, home, _) = open(&h, "chooser-preview");
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down, Down, Down, Down, Down, Down, Char('p')]);
+        press(&mut s, &[Down, Down, Down, Down, Down, Down, Down, Down, Down, Down, Char('p')]);
         assert!(screen(&s.chooser, 100, 40).contains("GUE history"));
         press(&mut s, &[Up, Up, Up, Up, Up, Up, Up, Up, Up, Char('p')]);
         assert_eq!(s.chooser.status.as_ref().map(|s| s.0.as_str()), Some("Nothing to preview for this one"), "a zip row");
@@ -1045,7 +1203,7 @@ mod tests {
         let h = host(true);
         let (mut s, home, _) = open(&h, "chooser-preview-entry");
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down, Right, Down, Down, Down, Down, Char('p')]);
+        press(&mut s, &[Down, Down, Down, Down, Down, Right, Down, Down, Down, Down, Char('p')]);
         assert!(screen(&s.chooser, 100, 40).contains("walkthrough text"));
         let _ = std::fs::remove_dir_all(home);
     }
@@ -1091,14 +1249,14 @@ mod tests {
         assert!(matches!(ch.next_job(), Some(DocJob::Probe { link: 1, .. })));
     }
 
-    /// Save `zork1.txt` (link 9) and the zip entry `Sols/ZorkI.txt` (row 4/3)
+    /// Save `zork1.txt` (link 10) and the zip entry `Sols/ZorkI.txt` (row 5/3)
     /// through the chooser, leaving the cursor on `zork1.txt`.
     fn open_with_saved(h: &Arc<Host>, tag: &str) -> (DocumentsSession, PathBuf, DataRoots) {
         let (mut s, home, roots) = open(h, tag);
         settle(&mut s);
-        press(&mut s, &[Down, Down, Down, Down, Right, Down, Down, Down, Down, Char(' ')]);
+        press(&mut s, &[Down, Down, Down, Down, Down, Right, Down, Down, Down, Down, Char(' ')]);
         press(&mut s, &[Down, Down, Down, Down, Down, Char(' ')]);
-        assert_eq!(s.chooser.saved((9, None)), SavedState::NotSaved, "nothing is saved yet");
+        assert_eq!(s.chooser.saved((10, None)), SavedState::NotSaved, "nothing is saved yet");
         assert!(!screen(&s.chooser, 100, 40).contains("In your documents"));
         press(&mut s, &[Enter]);
         assert_eq!(files_in(&roots.documents().join("Zork I [abc123]")), ["ZorkI.txt", "zork1.txt"]);
@@ -1111,21 +1269,21 @@ mod tests {
         let (mut s, home, _) = open_with_saved(&h, "chooser-saved");
         let ch = &mut s.chooser;
         // The marks were refreshed when the batch finished, with no further key.
-        assert_eq!(ch.saved((4, Some(3))), SavedState::Saved);
-        assert_eq!(ch.saved((9, None)), SavedState::Saved);
-        assert_eq!(ch.saved((4, None)), SavedState::NotSaved, "the zip itself was not saved, one entry was");
+        assert_eq!(ch.saved((5, Some(3))), SavedState::Saved);
+        assert_eq!(ch.saved((10, None)), SavedState::Saved);
+        assert_eq!(ch.saved((5, None)), SavedState::NotSaved, "the zip itself was not saved, one entry was");
         let shown = screen(ch, 100, 40);
         assert_eq!(shown.matches("In your documents").count(), 2, "{shown}");
         assert!(ch.checked.is_empty(), "a saved row is not left ticked");
 
         // Space on the saved row ticks nothing.
-        assert_eq!(ch.selected_key(), Some((9, None)));
+        assert_eq!(ch.selected_key(), Some((10, None)));
         ch.on_key(Char(' '), &anim());
         assert!(ch.checked.is_empty(), "a saved row cannot be ticked");
 
         // Even forced into the set, it is left out of the download.
-        ch.checked.insert((9, None));
-        ch.start_download();
+        ch.checked.insert((10, None));
+        ch.start_download(None);
         assert!(ch.queue.iter().all(|j| !matches!(j, DocJob::Download { .. })), "{:?}", ch.queue);
         assert_eq!(ch.phase, Phase::Ready);
 
@@ -1145,13 +1303,13 @@ mod tests {
         // The next batch to finish rescans the folder.
         s.chooser.on_event(&DocEvent::Finished { dir: None, saved: vec![], already: vec![], failed: vec![] });
         settle(&mut s);
-        assert_eq!(s.chooser.saved((9, None)), SavedState::Changed);
+        assert_eq!(s.chooser.saved((10, None)), SavedState::Changed);
         let shown = screen(&s.chooser, 100, 40);
         assert!(shown.contains("In your documents \u{2014} different size"), "{shown}");
         press(&mut s, &[Char(' ')]);
-        assert!(s.chooser.checked.contains(&(9, None)), "a changed row can be ticked");
+        assert!(s.chooser.checked.contains(&(10, None)), "a changed row can be ticked");
         // The entry beside it is untouched and still saved.
-        assert_eq!(s.chooser.saved((4, Some(3))), SavedState::Saved);
+        assert_eq!(s.chooser.saved((5, Some(3))), SavedState::Saved);
         let _ = std::fs::remove_dir_all(home);
     }
 
@@ -1259,7 +1417,7 @@ mod tests {
         let mut s = session_for_story(Some(&roots), &story, None, IfdbGate::default(), source()).expect("linked: a session");
         settle(&mut s);
         assert_eq!(s.chooser.tuid, "tuid123");
-        assert_eq!(s.chooser.links.len(), 12);
+        assert_eq!(s.chooser.links.len(), 14);
         let _ = std::fs::remove_dir_all(home);
     }
 }

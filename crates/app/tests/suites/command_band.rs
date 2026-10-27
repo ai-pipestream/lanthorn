@@ -376,7 +376,7 @@ fn v6_keeps_the_pixel_path_while_the_band_is_open() {
         let mut state = AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
         // A real kitty cell size: the pixel path only exists with a picker.
-        state.game_picker = Some(app::render::graphics::kitty_picker(14, 28));
+        state.set_game_picker(Some(app::render::graphics::kitty_picker(14, 28)));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         state.config.honor_game_colours = honor;
         let area = Rect::new(0, 0, 100, 40);

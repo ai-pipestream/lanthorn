@@ -37,6 +37,74 @@ pub struct TurnRecord {
     /// e.g. "Turn 6: east · Kitchen" via [`TurnSummary`] without reaching
     /// into `TurnRecord` or the mapper directly.
     pub location_name: Option<String>,
+    /// Whether the game cleared the primary window during this turn, or in a
+    /// game-driven turn (key/timer/mouse) since the previous record (SQ-1714)
+    /// (SQ-1713),
+    /// so a rewind can re-pin the cleared screen instead of reviving scrollback
+    /// the game had wiped. Set by the per-turn capture site after
+    /// [`record_turn`]; `false` for every other caller.
+    pub cleared: bool,
+    /// The live transcript's length when this record was made (SQ-1715), with
+    /// [`transcript_epoch`](Self::transcript_epoch) and the two fields below: what
+    /// lets a rewind CUT BACK the real transcript (styles, paragraph layout, the
+    /// output of game-driven turns that record nothing) instead of rebuilding a
+    /// plain one from `command` + `transcript`. `None` for a record made without
+    /// them, or loaded from an archive (which filters the transcript, so the
+    /// length would not index the live one) -- those rewind by rebuilding.
+    pub transcript_len: Option<usize>,
+    /// [`AppState::transcript_epoch`](crate::state::AppState::transcript_epoch)
+    /// at record time; the cut-back is valid only while it still matches.
+    pub transcript_epoch: Option<u64>,
+    /// Chars in the last transcript line at record time. The next typed command's
+    /// echo grows that line (`>` becomes `>look`) after the record is made, so the
+    /// cut-back trims it back to what the player saw at this prompt.
+    pub transcript_tail_chars: Option<usize>,
+    /// The clear anchors at record time (indices into the first `transcript_len`
+    /// lines), since the live ones only remember the LAST clear.
+    pub transcript_anchors: Option<crate::archive::ClearAnchors>,
+    /// The Z-machine screen model AFTER this turn (SQ-1767), the same
+    /// `ScreenState` a `.lanthorn` save carries and `session::restore_screen`
+    /// installs. Quetzal keeps no screen, and a v4+ story parked at its read never
+    /// repaints its status line, so a rewind that restored only memory left the
+    /// upper window blank until the next command. In memory only: the archive
+    /// writes its own fields, so a record loaded from one has `None` and rewinds
+    /// as before. `None` too for Glulx, Scott Adams, and Version 6 (whose windows
+    /// carry prose buffers and are repainted from the display list instead).
+    pub screen: Option<zvm::screen::ScreenState>,
+}
+
+/// The live transcript's shape at one moment (SQ-1715): the facts a
+/// [`TurnRecord`] stamps so a rewind can cut the transcript back. Taken before the
+/// record is borrowed mutably, then applied with [`TurnRecord::note_transcript`].
+#[derive(Debug, Clone, Copy)]
+pub struct TranscriptMark {
+    len: usize,
+    epoch: u64,
+    tail_chars: usize,
+    anchors: crate::archive::ClearAnchors,
+}
+
+impl TranscriptMark {
+    pub fn of(state: &crate::state::AppState) -> Self {
+        TranscriptMark {
+            len: state.transcript.len(),
+            epoch: state.transcript_epoch,
+            tail_chars: state.transcript.last().map_or(0, |l| l.chars().count()),
+            anchors: crate::archive::ClearAnchors::of(state),
+        }
+    }
+}
+
+impl TurnRecord {
+    /// Stamp the live transcript's shape onto this record. Called by the per-turn
+    /// capture site right after [`record_turn`], once the turn's output and every
+    /// app-side line are in.
+    pub fn note_transcript(&mut self, mark: TranscriptMark) {
+        self.transcript_len = Some(mark.len);
+        self.transcript_epoch = Some(mark.epoch);
+        self.transcript_tail_chars = Some(mark.tail_chars);
+        self.transcript_anchors = Some(mark.anchors);
+    }
 }
 
 /// Append a record for a completed turn. The caller computes `map_changed`
@@ -73,6 +141,11 @@ pub fn record_turn(
         transcript: transcript.to_string(),
         location,
         location_name,
+        cleared: false,
+        transcript_len: None,
+        transcript_epoch: None,
+        transcript_tail_chars: None,
+        transcript_anchors: None, screen: None,
     }));
 }
 
@@ -186,6 +259,33 @@ pub fn rebuild_transcript(
         }
     }
     (lines, kinds)
+}
+
+/// Whether the record being made notes a clear (SQ-1714): the turn's own, or one
+/// a game-driven turn (no record of its own) made since the previous record. Both
+/// mean the same thing to a rewind -- everything before the pin is wiped -- so
+/// several collapse into the one flag, the last winning as `clear_anchor` does.
+pub fn clear_noted(own_erase: bool, pending_from_game_driven: bool) -> bool {
+    own_erase || pending_from_game_driven
+}
+
+/// Where the game's last screen clear within records `[0..=idx]` sits in the
+/// transcript [`rebuild_transcript`] produces for the same range (SQ-1713): the
+/// line index just after that record's echoed command, `None` when no turn
+/// cleared. Everything before it is scrollback the game wiped.
+pub fn rebuild_clear_anchor(history: &[Arc<TurnRecord>], idx: usize) -> Option<usize> {
+    let mut len = 0usize;
+    let mut anchor = None;
+    for rec in history.iter().take(idx + 1) {
+        if !rec.command.is_empty() {
+            len += 1;
+        }
+        if rec.cleared {
+            anchor = Some(len);
+        }
+        len += rec.transcript.split('\n').count();
+    }
+    anchor
 }
 
 #[cfg(all(test, feature = "t-persist"))]
@@ -360,6 +460,43 @@ mod tests {
         assert!(hist[1].map_snapshot.is_none(), "only the new oldest record gets the carried-forward baseline");
     }
 
+    /// SQ-1713: a rewind re-pins the game's last clear at the same place the live
+    /// transcript had it -- just after that turn's echoed command.
+    #[test]
+    fn rebuild_clear_anchor_points_after_the_clearing_turns_echo() {
+        let m = mapper_with(1);
+        let mut hist = Vec::new();
+        record_turn(&mut hist, 1, "wake up", vec![1], &m, true, "a\nb");
+        record_turn(&mut hist, 2, "", vec![2], &m, false, "c\nd");
+        record_turn(&mut hist, 3, "look", vec![3], &m, false, "e");
+        assert_eq!(rebuild_clear_anchor(&hist, 2), None, "no turn cleared");
+        Arc::get_mut(&mut hist[1]).unwrap().cleared = true;
+        // lines: "> wake up", a, b, [c, d] ... -> the clear sits at 3 (no echo for "").
+        assert_eq!(rebuild_clear_anchor(&hist, 2), Some(3));
+        assert_eq!(rebuild_clear_anchor(&hist, 0), None, "rewinding before the clear drops it");
+    }
+
+    /// SQ-1714: a clear made by a game-driven turn (no record of its own) is picked
+    /// up by the next record, whichever of several came first, and pins just after
+    /// that record's echo.
+    #[test]
+    fn a_pending_game_driven_clear_is_noted_by_the_next_record() {
+        assert!(!clear_noted(false, false));
+        assert!(clear_noted(false, true), "a pending key clear is picked up");
+        assert!(clear_noted(true, false), "the turn's own clear still counts");
+        assert!(clear_noted(true, true), "both collapse into the one flag");
+        let m = mapper_with(1);
+        let mut hist = Vec::new();
+        record_turn(&mut hist, 1, "wake up", vec![1], &m, true, "dream\nmore");
+        // a key clears, then (game-driven, unrecorded) prints; the next record carries it
+        record_turn(&mut hist, 2, "look", vec![2], &m, false, "room\nexits");
+        Arc::get_mut(&mut hist[1]).unwrap().cleared = clear_noted(false, true);
+        record_turn(&mut hist, 3, "go", vec![3], &m, false, "kitchen");
+        // lines: "> wake up", dream, more, "> look", room, exits, "> go", kitchen
+        assert_eq!(rebuild_clear_anchor(&hist, 2), Some(4), "pinned just after `> look`");
+        assert_eq!(rebuild_clear_anchor(&hist, 0), None, "rewinding before it drops the clear");
+    }
+
     /// When the drained prefix carries no snapshot at all, `cap_history` is a
     /// no-op on the new oldest record's `map_snapshot` — nothing to carry
     /// forward is not an error.
@@ -375,6 +512,11 @@ mod tests {
                     transcript: String::new(),
                     location: None,
                     location_name: None,
+                    cleared: false,
+                    transcript_len: None,
+                    transcript_epoch: None,
+                    transcript_tail_chars: None,
+                    transcript_anchors: None, screen: None,
                 })
             })
             .collect();

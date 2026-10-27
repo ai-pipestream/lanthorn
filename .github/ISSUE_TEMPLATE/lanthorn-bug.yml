@@ -1,0 +1,48 @@
+name: Bug in Lanthorn (the TUI)
+description: Something in lanthorn isn't behaving - a display glitch, a game that misbehaves, a crash.
+labels: [lanthorn]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to tell us. A few details up front make a problem much easier to chase down.
+        Questions and "how do I..." belong in [Discussions](https://github.com/sharkusk/lanthorn/discussions).
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary from /report-bug
+      description: |
+        Type `/report-bug` in lanthorn, ideally while the game showing the problem is open, and paste the summary it copied here. If your terminal didn't take the clipboard copy (tmux can block it), copy the summary from the screen instead.
+        The summary ends with an `attach:` line naming `report-bug.txt`. Drag that file into the attachments box below - it holds the full report, including the commands you typed this session.
+        If lanthorn won't start at all, paste the output of `lanthorn --version`, your operating system and your terminal instead, plus `crash.log` if there is one.
+        Please don't attach commercial game files - the file name and release in the report are enough.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you typed, or the turn it happened on.
+    validations:
+      required: false
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Screenshots and files
+      description: |
+        Drag and drop `report-bug.txt` (the file named on the `attach:` line), `crash.log` (if there is one) and any screenshots straight into this box.
+    validations:
+      required: false

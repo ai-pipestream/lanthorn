@@ -262,14 +262,6 @@ pub fn answer_ingame_restore(
                     Ok(ac) => apply_archive_state(ac, session, mapper, state),
                     Err(e) => state.push_notice(&format!("[Save State sidecars unreadable: {}]", e)),
                 }
-            } else {
-                // A bare .qzl carries no screen, so the restored
-                // game's layout width has to be assumed
-                // (`note_bare_quetzal_width`, SQ-0681). Raised on
-                // the attempt: `resume_restore` reports a refused
-                // save only as the game's own "Failed.", and the
-                // guard only ever widens the declared screen.
-                crate::engine_helpers::note_bare_quetzal_width(session);
             }
             state.push_notice(&format!("[Game restored from {}]", name));
             session.resume_restore(Some(&bytes))
@@ -297,6 +289,9 @@ pub struct Loaded {
     pub quit: bool,
     /// A pending in-game `@restore` was answered, so a game turn ran.
     pub answered_game: bool,
+    /// That game turn's own outcome (its `paging.first_line` is where the game's
+    /// reply begins, after the restored history); default when no turn ran.
+    pub outcome: TurnOutcome,
 }
 
 /// Load a save the player picked from this story's saves (`path`, shown as
@@ -323,7 +318,7 @@ pub fn load_save(
     let ingame_restore_pending = state.ingame_io == Some(crate::session::PendingIo::Restore);
     if ingame_restore_pending && trigger.is_portable() {
         let out = answer_ingame_restore(session, mapper, state, Some((path, name)), game_dir, ifid, map_view);
-        return Loaded { quit: out.quit, answered_game: true };
+        return Loaded { quit: out.quit, answered_game: true, outcome: out };
     }
     match restore_file(session, mapper, state, path, map_view) {
         Ok(Restored::GameSave { with_session }) => {
@@ -347,7 +342,7 @@ pub fn load_save(
             state.push_notice(&format!("[Load failed: {}]", e));
             if ingame_restore_pending {
                 let out = answer_ingame_restore(session, mapper, state, None, game_dir, ifid, map_view);
-                return Loaded { quit: out.quit, answered_game: true };
+                return Loaded { quit: out.quit, answered_game: true, outcome: out };
             }
         }
     }
@@ -413,6 +408,14 @@ pub fn resume_from_turn(
         state.push_notice(&format!("[Resume failed: {}]", restore_error_msg(e)));
         return Rewound { ok: false, redraw: true };
     }
+    // The restored memory brings no screen (SQ-1767): put back the one this turn
+    // ended on, as loading a save does, or a v4+ status line stays blank until the
+    // next command (the game is parked at its read and never repaints it).
+    if let Some(scr) = state.history[idx].screen.clone() {
+        if let Some(z) = crate::engine_helpers::zvm_session_opt_mut(session) {
+            crate::session::restore_screen(z, scr);
+        }
+    }
     if let Some(json) = &plan.map_json {
         if let Ok(m) = mapper::persist::from_json(json) {
             *mapper = m;
@@ -420,16 +423,22 @@ pub fn resume_from_turn(
     }
     // Linear: discard later turns.
     state.history.truncate(idx + 1);
-    let (lines, kinds) = crate::history::rebuild_transcript(&state.history, idx);
-    state.transcript = lines;
-    state.clear_anchor = None;
-    state.top_anchor = None;
-    state.transcript_kinds = kinds;
-    // History replay carries no style runs; keep the parallel vecs length-synced
-    // (unstyled, left rows).
-    state.transcript_runs = vec![Vec::new(); state.transcript.len()];
-    state.transcript_para = vec![crate::state::ParaFmt::default(); state.transcript.len()];
-    state.reset_transcript_sidecars();
+    if !cut_back_transcript(state, idx) {
+        let (lines, kinds) = crate::history::rebuild_transcript(&state.history, idx);
+        state.transcript = lines;
+        // History replay carries the game's clears as a flag per turn, so the rewound
+        // transcript keeps the same scrollback hidden (SQ-1713).
+        let anchor = crate::history::rebuild_clear_anchor(&state.history, idx);
+        state.clear_anchor = anchor;
+        state.top_anchor = anchor;
+        state.pending_clear = false;
+        state.transcript_kinds = kinds;
+        // The rebuild carries no style runs; keep the parallel vecs length-synced
+        // (unstyled, left rows).
+        state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+        state.transcript_para = vec![crate::state::ParaFmt::default(); state.transcript.len()];
+        state.reset_transcript_sidecars();
+    }
     // Rebuilt from the replayed transcript (SQ-1135): a rewind to turn 4 offers
     // the words turn 4 had printed.
     crate::input::refresh_seen_words(state, &*session);
@@ -437,4 +446,35 @@ pub fn resume_from_turn(
     reobserve_location(state, mapper, &*session, map_view);
     state.push_notice(&format!("[Resumed from turn {}]", plan.turn));
     Rewound { ok: true, redraw: true }
+}
+
+/// Cut the LIVE transcript back to what record `idx` left behind (SQ-1715), so a
+/// rewind keeps the styled lines the player saw -- including the output of
+/// game-driven turns (a key, a timer) that record nothing and that a rebuild from
+/// the records cannot know. Valid only while the record's epoch is still the
+/// live one, i.e. nothing has shortened the transcript or moved an earlier line
+/// since; otherwise (and for a record without a mark, e.g. loaded from an
+/// archive) returns `false` having touched nothing, and the caller rebuilds.
+fn cut_back_transcript(state: &mut AppState, idx: usize) -> bool {
+    let rec = state.history[idx].clone();
+    let (Some(len), Some(epoch), Some(tail), Some(anchors)) =
+        (rec.transcript_len, rec.transcript_epoch, rec.transcript_tail_chars, rec.transcript_anchors)
+    else {
+        return false;
+    };
+    if epoch != state.transcript_epoch || len > state.transcript.len() {
+        return false;
+    }
+    state.truncate_transcript(len);
+    // The line the player was prompted on has since been grown (the echoed
+    // command, a folded game echo); trim it back to the prompt it was.
+    state.shrink_last_transcript_line(tail);
+    // Everything up to `len` is exactly as it was at the record, so the records
+    // up to `idx` stay comparable: truncating bumped the epoch, put it back.
+    state.transcript_epoch = epoch;
+    state.clear_anchor = anchors.clear;
+    state.top_anchor = anchors.top;
+    state.pending_clear = false;
+    state.reset_transcript_derived();
+    true
 }

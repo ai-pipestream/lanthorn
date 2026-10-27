@@ -138,6 +138,23 @@ impl Memory {
         self.bytes[addr as usize] = val;
     }
 
+    /// Overwrite this image's RAM (`[RAMSTART, ENDMEM)`) with `other`'s, byte for
+    /// byte, growing or shrinking this map to `other`'s size first.
+    ///
+    /// Returns `false` and changes nothing when the two images do not share a
+    /// RAMSTART (they are then not the same story). ROM is never touched, so
+    /// this is what brings a throwaway copy of a story up to the live game's
+    /// CURRENT state for the price of one slice copy (SQ-1774).
+    pub(crate) fn copy_ram_from(&mut self, other: &Memory) -> bool {
+        let ram = self.header.ramstart as usize;
+        if other.header.ramstart as usize != ram || other.bytes.len() < ram {
+            return false;
+        }
+        self.bytes.resize(other.bytes.len(), 0);
+        self.bytes[ram..].copy_from_slice(&other.bytes[ram..]);
+        true
+    }
+
     /// Reset RAM to the initial image: restore `[RAMSTART, EXTSTART)` from
     /// `orig`, zero `[EXTSTART, ENDMEM)`, and shrink back to the original
     /// ENDMEM floor — except for any byte within `protect`

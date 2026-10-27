@@ -47,7 +47,17 @@ pub enum HintAvailability {
 /// Cheap: resolution reads the index and the filesystem (directory listing,
 /// maybe a zip's entry table) but never boots a VM.
 pub fn available(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> HintAvailability {
-    match hints::resolve_hint_source(story_path, story, index) {
+    available_with_tuid(story_path, story, None, index)
+}
+
+/// [`available`] for a story that may carry an IFDB tuid.
+pub fn available_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+) -> HintAvailability {
+    match hints::resolve_hint_source_with_tuid(story_path, story, tuid, index) {
         HintResolution::File(_) | HintResolution::ZipEntry { .. } => HintAvailability::Available,
         HintResolution::Choose(c) => HintAvailability::Choose(c),
         HintResolution::AskUser | HintResolution::None => HintAvailability::None,
@@ -116,6 +126,16 @@ pub fn no_hint_message(documents: Option<&Path>) -> String {
 /// [`hints::story_supports_hint`], which decides `HintSession::builtin_hint`
 /// (the "this game has its own hints — type HINT" suggestion).
 ///
+/// `screen` is the `(rows, cols)` the companion should boot at (its host's real panel size);
+/// `None` boots the Z-machine's default 80x24. A hint program reads its width at boot --
+/// centring its title, wrapping its hint screens -- so a size given later is not the same as
+/// one given here (SQ-1753). The TUI's Hints tab floors the width it gives
+/// at [`crate::host::hint_program_min_cols`] (72; 60 for an `*izm` program, SQ-1812) before calling
+/// this; a host that wants the same clean `*inv` layouts on a narrow panel does likewise
+/// (`width.max(hint_program_min_cols(name.as_deref()))`, with `name` from
+/// [`crate::host::hint_program_name`]) and draws through
+/// [`crate::host::column_plan`]. This function itself applies no floor.
+///
 /// - `Ok(None)`: resolution found nothing to open automatically
 ///   ([`HintResolution::AskUser`]/[`HintResolution::None`]) or a choice is
 ///   pending ([`HintAvailability::Choose`]) — [`no_hint_message`] is the TUI's
@@ -130,9 +150,23 @@ pub fn open(
     index: &HintIndex,
     dict_words: &[String],
     cfg: &Config,
+    screen: Option<(u16, u16)>,
+) -> Result<Option<HintSession>, HintOpenError> {
+    open_with_tuid(story_path, story, None, index, dict_words, cfg, screen)
+}
+
+/// [`open`] for a story that may carry an IFDB tuid.
+pub fn open_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+    dict_words: &[String],
+    cfg: &Config,
+    screen: Option<(u16, u16)>,
 ) -> Result<Option<HintSession>, HintOpenError> {
     let builtin_hint = hints::story_supports_hint(dict_words.iter().cloned());
-    let resolution = hints::resolve_hint_source(story_path, story, index);
+    let resolution = hints::resolve_hint_source_with_tuid(story_path, story, tuid, index);
 
     let (bytes, label) = match resolution {
         HintResolution::File(p) => {
@@ -151,8 +185,18 @@ pub fn open(
         HintResolution::Choose(_) | HintResolution::AskUser | HintResolution::None => return Ok(None),
     };
 
-    let mut vm = GameSession::new(bytes, cfg.honor_game_colours, false, cfg.interpreter_number)
-        .map_err(|e| HintOpenError::BootFailed(format!("{e:?}")))?;
+    let mut vm = GameSession::new_with_trace(
+        bytes,
+        cfg.honor_game_colours,
+        false,
+        cfg.interpreter_number,
+        false,
+        Vec::new(),
+        None,
+        None,
+        screen,
+    )
+    .map_err(|e| HintOpenError::BootFailed(format!("{e:?}")))?;
     vm.machine.undo_cap = cfg.undo_levels;
     let opening = hint_opening(&mut vm, cfg.hint_skip_screen_warning);
     let transcript: Vec<String> = opening.split('\n').map(|l| l.to_owned()).collect();
@@ -161,7 +205,7 @@ pub fn open(
         source: HintSource::Zcode(vm),
         transcript,
         scroll: 0,
-        clear_anchor: None,
+        clear_anchor: None, top_anchor: None,
         scroll_anim: None,
         input: String::new(),
         label,
@@ -193,7 +237,8 @@ pub fn already_running(running_label: Option<&str>, picked: &Path) -> bool {
 /// `picked` file (the answer to an earlier [`HintStart::Choose`]) is remembered
 /// first, unless it is the program already running (`running_label`, a no-op);
 /// then a tie becomes the chooser, nothing found becomes [`no_hint_message`], and
-/// anything else is [`open`]ed. `story` carries the documents folder.
+/// anything else is [`open`]ed. `story` carries the documents folder; `screen` is
+/// [`open`]'s boot size.
 pub fn start(
     story_path: &Path,
     story: HintStory<'_>,
@@ -201,6 +246,21 @@ pub fn start(
     running_label: Option<&str>,
     dict_words: &[String],
     cfg: &Config,
+    screen: Option<(u16, u16)>,
+) -> HintStart {
+    start_with_tuid(story_path, story, None, picked, running_label, dict_words, cfg, screen)
+}
+
+/// [`start`] for a story that may carry an IFDB tuid.
+pub fn start_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    picked: Option<&Path>,
+    running_label: Option<&str>,
+    dict_words: &[String],
+    cfg: &Config,
+    screen: Option<(u16, u16)>,
 ) -> HintStart {
     if let Some(p) = picked {
         if already_running(running_label, p) {
@@ -211,10 +271,10 @@ pub fn start(
         }
     }
     let index = hints::load_hint_index(&cfg.user_dir);
-    if let HintAvailability::Choose(candidates) = available(story_path, story, &index) {
+    if let HintAvailability::Choose(candidates) = available_with_tuid(story_path, story, tuid, &index) {
         return HintStart::Choose(candidates);
     }
-    match open(story_path, story, &index, dict_words, cfg) {
+    match open_with_tuid(story_path, story, tuid, &index, dict_words, cfg, screen) {
         Ok(Some(session)) => HintStart::Started(Box::new(session)),
         Ok(None) => HintStart::NoHint(no_hint_message(story.documents)),
         Err(e) => HintStart::Failed(e),
@@ -231,12 +291,13 @@ pub const ALREADY_DOWNLOADING: &str = "Already downloading hints…";
 fn launch_download(
     downloader: &mut HintDownloader,
     ifid: &str,
+    tuid: Option<&str>,
     story_path: &Path,
     disk_entry: Option<&str>,
     title: &str,
     documents: Option<&Path>,
 ) -> bool {
-    let Some(dl) = hints::hint_download_for(ifid) else {
+    let Some(dl) = hints::hint_download_for_with_tuid(ifid, tuid) else {
         return false;
     };
     let dest = HintDest::for_story(story_path, &dl.filename, documents.map(Path::to_path_buf));
@@ -264,6 +325,7 @@ pub fn start_story_download(
     if !launch_download(
         downloader,
         &entry.meta.ifid,
+        entry.meta.ifdb_tuid.as_deref(),
         &entry.path,
         entry.meta.disk_entry.as_deref(),
         &entry.title,
@@ -288,14 +350,29 @@ pub fn start_game_download(
     documents: Option<&Path>,
     session_running: bool,
 ) -> String {
+    start_game_download_with_tuid(downloader, ifid, None, title, story_path, disk_entry, documents, session_running)
+}
+
+/// [`start_game_download`] for a game that may carry an IFDB tuid.
+#[allow(clippy::too_many_arguments)]
+pub fn start_game_download_with_tuid(
+    downloader: &mut HintDownloader,
+    ifid: &str,
+    tuid: Option<&str>,
+    title: &str,
+    story_path: &Path,
+    disk_entry: Option<&str>,
+    documents: Option<&Path>,
+    session_running: bool,
+) -> String {
     if downloader.busy() {
         ALREADY_DOWNLOADING.to_string()
     } else if session_running {
-        "This story already has a hint file".to_string()
-    } else if launch_download(downloader, ifid, story_path, disk_entry, title, documents) {
+        "This game already has a hint file".to_string()
+    } else if launch_download(downloader, ifid, tuid, story_path, disk_entry, title, documents) {
         "Downloading hints…".to_string()
     } else {
-        "No InvisiClues found for this story".to_string()
+        "No InvisiClues found for this game".to_string()
     }
 }
 
@@ -315,10 +392,20 @@ pub enum GameHintStatus {
 /// [`GameHintStatus`] for a running game — [`available`] first (one resolution
 /// rule), then whether the catalogue has a download for the story's IFID.
 pub fn game_hint_status(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> GameHintStatus {
-    match available(story_path, story, index) {
+    game_hint_status_with_tuid(story_path, story, None, index)
+}
+
+/// [`game_hint_status`] for a game that may carry an IFDB tuid.
+pub fn game_hint_status_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+) -> GameHintStatus {
+    match available_with_tuid(story_path, story, tuid, index) {
         HintAvailability::Available => GameHintStatus::Available,
         HintAvailability::Choose(c) => GameHintStatus::Choose(c),
-        HintAvailability::None if hints::hint_download_for(story.ifid).is_some() => GameHintStatus::Downloadable,
+        HintAvailability::None if hints::hint_download_for_with_tuid(story.ifid, tuid).is_some() => GameHintStatus::Downloadable,
         HintAvailability::None => GameHintStatus::None,
     }
 }

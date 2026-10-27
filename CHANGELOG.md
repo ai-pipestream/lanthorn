@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.9.0`) versions every crate and every
+version in `Cargo.toml` (currently `0.9.9`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -26,6 +26,387 @@ RELEASED build; prose for a feature that is in `main` but not yet released
 goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
+
+## v0.9.9 — 2026-10-25
+
+### Highlights
+
+- **Older Infocom games keep a steady 80-column status line at any window size**, and the new `status_width` setting lets you override it per game.
+- **Narrow windows and phones held upright keep status bars, title cards and menus whole and readable.** Shogun's title card, score bar and start-up menu, Arthur's and Journey's status bars and menus, and Zork Zero's status line no longer lose or overwrite text.
+- **Opening quotations laid out for an 80-column screen, such as AMFV's, keep their shape on a narrow window.**
+- **Hint files fit a narrower side panel.**
+
+### Fixed
+
+- **A form or status game on a narrow window no longer leaves its last column blank.** When the cursor sat one past the right margin of a grid wider than the window, the view followed it one column too far and the rightmost screen column stayed empty; the view now always fills the window.
+- **Shogun's title card and Zork Zero's status line keep every line on a narrow window.** Between about 40 and 76 columns, lines the game printed one below the other could land on the same row and overwrite each other ("Copyright (c) 1988 by Infocom" and "All rights reserved.", or "Banquet Hall" and the Moves row); each line now keeps a row of its own, and wide windows are drawn exactly as before.
+- **Shogun's two-line status bar stays two lines on a narrow or tall window, with its score.** On a phone held upright the second line (the room name and "Moves:") disappeared and the score's "0" was dropped; the bar now gets a row for each of its lines, the story starts beneath it, and the "0" sits a blank after "Score:" and "Moves:".
+- **Shogun's title card and score bar stay between the side ornaments on a narrow window.** The credit lines and the in-game "Erasmus: ... Score:" bar no longer run over the ornaments at the window's edges or wipe them with their background: they stay inside the space between the ornaments and are cut off at the right if they do not fit, on phones held upright and on widths up to about 100 columns (the Amiga edition's bar included, down to very narrow windows), where the bar used to jump between covering the ornaments and not at neighbouring widths.
+- **Shogun's start-up menu shows all three choices whole on a narrow window.** "START the game", "RESTORE a saved game" and "QUIT the game" no longer get cut off at the right edge ("START the ...") while empty space sits to their left: the three choices slide left together just far enough for the longest to fit, so their left edges stay lined up, clicking it still selects it, and windows wide enough to hold it are drawn exactly as before.
+- **Arthur's and other graphical games' status bars keep their right-hand text on narrow windows.** "St Anne's Day, Compline" no longer gets cut off to "...Compli", "...Com" or "...Day," while the middle of the bar sits empty: when the text would not fit, the empty columns in the bar are squeezed out (the same way the older Infocom status lines already were) and every row of a menu such as Journey's shifts together, so its columns stay lined up.
+- **Text that an older Infocom game centred or indented for an 80-column screen now keeps its shape on a narrow one.** AMFV's opening quotation no longer breaks up with its attribution stranded on a row of its own: a block of indented lines that would stick out past the right edge slides left as one piece (as far as its least-indented line allows), and goes back to the game's own layout when the window widens again. Only lines indented four or more spaces count, so ordinary paragraphs with a small first-line indent keep it.
+
+### Changed
+
+- **Older Infocom games keep a full 80-column status line at any window size.** lanthorn now
+  checks, before starting a game, whether it lays its status line out once (Zork, Trinity,
+  Bureaucracy and their kin) or redraws it for the width it is told (modern Inform games), and
+  gives the first kind a steady 80 columns that no resize or restored save can upset. A new
+  `status_width` setting (`"auto"`, `"fixed"` or `"pane"`, also per game) overrides the check.
+- **Hint files lay out in a narrower side panel.** The Hints tab used to give every hint file at
+  least 72 columns; the smaller `*izm` hint files now get as little as 60, and the InvisiClues
+  `*inv` files keep 72.
+- **For embedding hosts: the narrow-screen rules are library functions, so a host draws what the
+  terminal app draws.** `column_plan` says which status-area columns to keep when the game is
+  wider than the pane (and maps a screen column back to the game's), `block_shifts` slides
+  hand-laid text left to fit, and `hint_program_min_cols` gives a hint file's minimum width.
+
+## v0.9.8 — 2026-10-23
+
+### Added
+
+- **For embedding hosts: the library builds without terminal graphics.** Depend on lanthorn
+  with `default-features = false, features = ["mod-music"]` and the terminal image protocols
+  (and `ratatui-image` with them) are left out, which is what makes Android and iOS builds
+  possible. The terminal app is unchanged.
+
+### Fixed
+
+- Documents can now be downloaded and saved on Android storage that does not support file locks, instead of failing with "Function not implemented".
+- Restoring an older save no longer leaves a blank row under the status bar.
+- **For embedding hosts: a game's own RESTORE answered through the file prompt now reports where the game's reply begins**, after the restored history, instead of an empty outcome.
+- Restoring a save on a narrower screen no longer leaves a stray second row under the status bar (Hitchhiker's Guide and other games with a fixed-width status line); saves that already carry the stray row are cleaned up when loaded.
+
+## v0.9.7 — 2026-10-19
+
+### Highlights
+
+- **`/report-bug` puts together a bug report for you**, and `/report-bug open` starts a
+  GitHub issue already filled in with it.
+- **The command panel has a send button**, so a command you built with the mouse can be sent
+  with the mouse too.
+- **Scott Adams games you own more than one copy of are looked up on IFDB once**, and
+  fetching one copy links the rest.
+- **For embedding hosts: in-scope objects say whether they hold things in or on, and
+  whether they are open**, so a host can offer "put X in Y" or "put X on Y" without guessing.
+
+### Added
+
+- **`/report-bug` gathers what a bug report needs.** It shows a short summary — version,
+  system, terminal, graphics, the game and its map — copies it for pasting into an issue, and
+  saves a fuller report, including your commands this session, to your logs folder to attach.
+- **`/report-bug` can open a GitHub issue already filled in.** Run `/report-bug open` and
+  your browser opens a new issue with the report's summary in place (over SSH or in the
+  browser build it prints the address to copy instead).
+- **The command panel has a send button.** With the command panel open and a command on your
+  prompt, a small return-key mark appears just after it (at the right end of the bar, if you
+  use the command bar); click it to send the line, exactly as if you had pressed Enter (slash
+  commands work too). It uses a Nerd Font icon if you said yes to the font check, and a plain
+  `↵` otherwise. Restyle it with the `input_submit` selector in `style.toml`.
+- **For embedding hosts: each in-scope object now says whether it is a container or a
+  supporter, and whether it is open.** `ObjectWords::holds` lets a host choose between "put X
+  in Y" and "put X on Y" without guessing. Inform 6 and Inform 7 games (Z-code and Glulx)
+  answer from the game's own data; Infocom games report only whether a thing is open; Scott
+  Adams games and games that do not say answer "unknown".
+
+### Fixed
+
+- **Dialogs show over a game's pictures.** On screens that are all artwork, such as
+  Kerkerkruip's opening menu, the Ctrl-P hotkey dialog opened but was never drawn, so you could
+  not see it (and there is no `/` prompt there to fall back on). Dialogs now appear over the
+  picture when there is no room beside it.
+- **Web links on Windows no longer break on `&`.** Opening a link that contains an `&` (some
+  document links, for example) used to cut it short.
+- **Scott Adams games you have more than one copy of are looked up on IFDB once.** A
+  library refresh used to ask IFDB about every Scott copy separately, and fetching one copy
+  never linked the others; copies of the same adventure now share one lookup and one link.
+- **`cargo audit` passes for projects that embed lanthorn.** lanthorn now uses zip 9, which
+  clears security advisories RUSTSEC-2026-0367, -0368 and -0369. lanthorn never unpacked
+  archives the way those advisories describe, so players were not exposed.
+
+## v0.9.6 — 2026-10-14
+
+### Highlights
+
+- **The command panel's compass shows what the map knows** — explored ways, exits waiting
+  to be walked, and directions that were blocked when you tried them each look different.
+- **Fetching your library from IFDB asks once per game, not once per file**, and links your
+  other copies of a game without another request.
+- **The documents list tells real documents from web pages and dead Flash or Java games.**
+- **Word completion puts the likely word first** — `lo` offers `look`, not `lobby` — and
+  Tab now reaches every match.
+- **Lanthorn says "game", not "story", everywhere you read it.**
+
+### Added
+
+- **Word completion offers every match and puts the likely word first.** `lo` now offers
+  `look` before `lobby`, and Tab walks the whole list instead of stopping at six. The first
+  word of a command favours common verbs and directions, then words you have typed before;
+  later words still favour what is in front of you.
+- **The command panel's compass shows what the map knows.** Each way out of the room you are
+  standing in is dressed by the map: ways you have explored look as before, exits waiting to be
+  walked stand out in the map's exit colour, and directions that were blocked when you tried them
+  are dimmed (they stay clickable). The up, down, in and out glyphs follow suit. Restyle them with
+  the `command_panel.quick:explored`, `:exit`, `:blocked` and `:untried` selectors.
+- **The documents list tells files from websites and dead games.** Links on a game's IFDB page
+  that are really web pages (a wiki, a code repository) now open in your browser instead of
+  being saved as a document, and links to online games that need Flash or Java stay in the list
+  labelled *needs Flash — no longer plays*. Real documents still save on Enter; press `o` to
+  open any row in the browser, or `s` to save a web page. Style the new tags with the
+  `documents_web_page` and `documents_obsolete` selectors.
+- **Fetching a library asks IFDB once per game, not once per file.** When you have several
+  releases or copies of the same game, the first answer already names the others, so they are
+  linked without another request; games that are already identified are left alone, and a full
+  refresh asks once per game. The progress line says how many were linked without asking.
+  Fetching just one game (`f`) now does the same for its other copies in the list: if the answer
+  names them, they are linked on the spot, still without another request.
+
+### Changed
+
+- **Lanthorn says "game", not "story", everywhere you read it.** The browser, dialogs, help,
+  settings comments, command descriptions, error messages and the docs now use the word players
+  and IFDB use. For hosts embedding the library: the Guiding Light assist-line prefix
+  (`LEAD_DICTIONARY`) is now `this game knows — ` rather than `this story knows — `.
+- **Highlights are cyan again by default.** Links, selections, the current room and the like
+  went blue in an earlier release, which was hard to read on some terminal colour schemes.
+  If you prefer blue, set `accent = { fg = "palette:4" }` under `[roles]`.
+
+### Fixed
+
+- **The game list and the prompts before a game now follow your `style.toml`.** The library
+  browser, the download keep-or-not prompt and the first-run font check used to draw in the
+  built-in colours whatever your style file said; they now use your roles, elements and
+  terminal colours exactly as the game does.
+- **The map is honest about blocked exits.** The room card now says a direction was
+  *blocked when tried*, rather than implying it is blocked for good. If a blocked way later opens
+  (a door unlocked, a bridge lowered), the map shows it as an exit again, even if you never left
+  the room.
+- **The Solid Gold edition of *The Hitchhiker's Guide to the Galaxy* now knows who you are.**
+  The inventory panel used to lose track of you in that edition, so the gown you start the
+  game wearing was not shown as carried; it now is, as in the original release.
+- **A hint program's screen clear now clears the hint panel.** Text a hint program printed
+  before it first cleared the screen (the introduction and sample question of a typed-in
+  InvisiClues booklet, for example) used to stay above every clue for the rest of the session.
+  The panel now starts afresh at each clear, exactly as the game window does, with earlier text
+  a scroll away.
+
+## v0.9.5 — 2026-10-12
+
+### Highlights
+
+- **The map shows a room's real exits before you walk them.** The first time you
+  stand in a room, the ways out are marked (`»`), even ones the description never
+  mentions, without revealing what lies beyond.
+- **Rooms reached by `climb tree` or `jump in river` now land in the right place
+  on the map**, and `north then east` maps each step you actually walked.
+- **Scott Adams games now complete your words as you type**, like Z-machine and
+  Glulx stories.
+- **Disk and CD images open much faster**, especially from a network drive.
+
+### Added
+
+- **The map now places rooms reached by `climb tree`, `jump in river` and the like.** When a command that names no direction moves you, the game is quietly asked which direction leads there, and the room snaps into place on the map as Up, East and so on. Moves that no direction reproduces stay unplaced. Rooms you go into or out of (`enter window`, `out`) now line up with the rest of the map when a compass direction also leads there.
+- **The map now shows which exits are real before you walk them.** The first time you stand in a room, the game is quietly asked which directions work, and the map marks those exits (`»` in the matrix and room card) instead of treating every direction you haven't typed as a maybe. It finds exits the room description never mentions, asks again on a later visit about the ways that were refused (a door may have opened), and never shows or names the room on the far side until you walk there. Turn it off with `scan_exits = false`.
+- **Scott Adams games now complete your words as you type.** The game's own verbs and nouns are offered by autocomplete, as they already were for Z-machine and Glulx stories. (Adventure databases store only the first few letters of each word, so where the game's own text names the whole word, `lam` is offered as `lamp`.)
+
+### Fixed
+
+- **Restoring a save in a narrower window no longer breaks Zork I's score and
+  moves.** After a few turns the status line used to wrap onto a second row or
+  scramble the room name; lanthorn now checks whether the game re-lays its status
+  line out for the new width and only keeps the saved width when it does not.
+- **An empty `~/.lanthorn` folder no longer hides your settings.** A leftover `~/.lanthorn` with nothing real in it used to make lanthorn ignore the settings and saves in its standard folders, so everything looked reset. It is now ignored unless it holds a config, saves or other players. When both locations hold your files, lanthorn asks which to use before it starts and offers to rename the other (nothing is deleted); in a script or container it uses the standard folders and says so on stderr.
+- **Typing several moves on one line now maps each step.** `north then east` used to draw one passage north that does not exist; the map now follows the rooms you actually walked through, and a step the game refuses records nothing.
+- **Rewinding to an earlier turn now shows that turn's status line straight away.** On Z-machine games with a status bar, going back used to leave the bar blank until you typed your next command.
+- **Games on disk images open faster, and CD images much faster — especially from a network drive.** Starting a game used to read the whole image file several times over, once per step of the launch; now it is read once and shared. A CD image goes further and is read only where the game needs it: starting a game off the 354 MB *Classic Text Adventure Masterpieces of Infocom* disc used to read the full 354 MB several times over, and now reads about 27 MB in all.
+- **Details fetched from IFDB for a `.zblorb` game now show up on that game.** They used to be saved under the file's name instead of the game's, so the library row never found them.
+- **Items whose names change as you play now show their full names in the inventory.** Lost Pig's food bricks used to appear as just "whole" and "half" in the inventory panel and the carried-things column; they now read "brick" and "half brick", exactly as the game itself lists them, and update the moment you break one. The same goes for Glulx games, such as King of Shreds and Patches, whose item names the game works out as you play.
+- **A game you have in two formats now shows its IFDB details on both straight after a fetch.** When the same game sits in your library twice (say as a `.z3` and as an Amiga disk image), only the first copy picked up the fetched title and author until you reopened the picker.
+
+## v0.9.4 — 2026-10-10
+
+### Highlights
+
+- **The commands you type now stand out from the story text** in the default
+  inline-prompt mode, drawn in their own colour and honouring a game's own
+  input styling.
+- **IFDB search notices games you already have**, even in a library subfolder,
+  and shows the true average rating.
+- **Maps are right from the first room.** Inform 7 Glulx games know the opening
+  room's contents before your first move, Dialog games map again, and a character
+  name on a status line is no longer mistaken for a room.
+- **Rewind keeps the transcript intact**, including text printed after a
+  "press any key" pause.
+
+### Changed
+
+- **The commands you type now stand out from the story text.** In the default
+  inline-prompt mode your command used to blend into the game's own prose; it is
+  now drawn in its own colour (the `transcript_input` style, the same one the
+  command bar uses), while the `>` prompt stays story-coloured. If a game styles
+  its own input line, lanthorn honours that too: a Glulx game's input colour,
+  weight and slant, and a Z-machine game's bold, italic or colour switched on for
+  your command specifically (colours only while game colours are on). A game that
+  merely colours all its text, like Photopia, is not treated as styling your
+  input. On a page the game has coloured, your command keeps the game's
+  background and switches to the game's own ink if your theme's colour would be
+  hard to read there.
+- **IFDB search now notices games you already have in a subfolder.** If the game
+  you pick is already somewhere in your library, even tucked away in a folder like
+  `infocom/` or `glulx/`, the download chooser says so at the top with where it
+  lives, and marks each file you already have in a subfolder (`✓ in glulx/`),
+  instead of letting you fetch a duplicate.
+- **IFDB search results show the true average rating**, to one decimal like the
+  story list, rather than a rounded half-star value.
+- **Hint programs that read the screen width now lay themselves out to the
+  hints panel**, instead of assuming an 80x24 screen.
+
+### Fixed
+
+- **A document on a host that compresses its downloads now shows its real size
+  and previews.** The documents chooser used to show the compressed size (a
+  295 KB page read as 44 KB), and previewing it failed with a bogus "Too large to
+  download (over 100 MB)". Sizes are now the file's true size, shown blank when a
+  host will not say, and a too-large message names the limit that was actually
+  hit.
+- **Photopia clears its page properly.** When a Glulx game wipes the screen by
+  closing its story window, the old scene no longer stays in view above the new
+  text on a tall pane.
+- **Dialog games get maps again.** The Impossible Bottle and similar Dialog
+  stories had lost their automap; only menu-driven Version 6 games such as
+  Journey are left unmapped.
+- **The first room is mapped and saved correctly.** A save made before your
+  first move now records your location, and resuming, restoring or restarting no
+  longer maps a status line that is not a room. Beyond Zork's character
+  sheet, which shows your character's name (Frank Booth by default) on the status
+  line, is no longer mistaken for a room, on the map or in the status and save
+  summaries.
+- **Inform 7 Glulx games know their opening room.** Room contents and item
+  sightings are available before your first move, games whose rooms have no exits
+  (like Toby's Nose) are recognised, and a room's objects are listed by the word
+  the room text used (carpet, sofa, door) without the scent, kind and person
+  scaffolding Inform keeps internally. "He" and "him" style placeholders are no
+  longer listed as room contents.
+- **Word reveal no longer lights up direction words and pronouns** such as
+  "up", "out", "north" or "he" on Inform games.
+- **Scott Adams map labels are shorter.** Rooms described by a sentence such as
+  "I'm on the shore of a lake" are labelled on the map as "shore of a lake".
+- **Hints panel:** a "type HINT" suggestion no longer appears over a running hint
+  companion, or for a game whose HINT command only advertises Infocom's printed
+  InvisiClues booklet (Beyond Zork).
+- **Rewind keeps your transcript.** Rewinding used to rebuild the transcript from
+  your commands and lose text printed after a "press any key" pause and any
+  styling; it now cuts the real transcript back to the earlier turn.
+
+## v0.9.3 — 2026-10-07
+
+### Highlights
+
+- **lanthorn now keeps its files in your platform's standard folders**, not a
+  dot-folder in your home directory, and `lanthorn --migrate-user-dir` moves an
+  existing `~/.lanthorn` over. If you already have `~/.lanthorn`, it keeps
+  working exactly as before.
+- **A game's IFDB details and cover are fetched once and shared by every copy of
+  it**, so duplicates and other players' libraries show the same record and cover.
+- **Game documents are safer.** Only manuals, notes and pictures lanthorn can
+  show are downloaded; programs and scripts never are.
+- **A runaway game or a damaged file no longer hangs lanthorn.** A Z-machine
+  story stuck in a loop, or a corrupt disk image, sound or picture, now fails
+  cleanly.
+
+### Added
+
+- **A default for Glulx window borders.** Set `borderless_windows = true` (or
+  `false`) in `config.toml` to choose whether Glulx games draw borders between
+  their windows. A game's own `garglk.ini` or `.cfg` still wins over it, and a
+  per-game setting (`/set-game-borders`) beats everything.
+- **`lanthorn --migrate-user-dir` moves an old `~/.lanthorn` into your platform's
+  standard folders.** It lists every file and where it will go, asks before
+  moving, and stops without changing anything if the new folders already hold
+  something with the same name. `--yes` skips the question.
+
+### Changed
+
+- **Game documents are safer, and show their real names.** lanthorn now
+  downloads and lists only manuals and notes it can show itself: PDFs, images,
+  text, web pages and zips of those, plus plain-text files with other extensions
+  (a `.sol` solution file, say), which open in lanthorn's own reader. Programs
+  and scripts (`.bat`, `.sh`, `.exe` and friends) are never downloaded, and only
+  PDFs, images and web pages are ever handed to your system viewer. Names keep
+  their extension, so a file shows as `Walkthrough.sol`, not `Walkthrough`.
+
+- **A game's IFDB details and cover are fetched once and shared by every copy of
+  it.** Two copies of the same game, or the same game under another player, now
+  show one record and one cover; refreshing either updates both, and the cover
+  keeps the format IFDB served it in. Existing records and covers are moved into
+  the shared store when lanthorn starts, with nothing downloaded again, including
+  those of games no longer in your library.
+
+- **New installs keep their files in your platform's standard folders.** Config
+  and styles, saves, documents and the cache now live in the XDG folders
+  (`~/.config/lanthorn`, `~/.local/share/lanthorn`, `~/.cache/lanthorn`) on macOS
+  and Linux, and in `%APPDATA%\lanthorn` and `%LOCALAPPDATA%\lanthorn` on
+  Windows, instead of a dot-folder in your home directory. Log files (`crash.log`
+  and the `/dump-*` logs) get their own folder: `~/.local/state/lanthorn` on macOS
+  and Linux, `%LOCALAPPDATA%\lanthorn\logs` on Windows. `--migrate-user-dir`
+  moves an old `*.log` there too. If you already have `~/.lanthorn` it
+  keeps being used exactly as before, and `--user-dir` still puts everything in
+  one folder. On Windows, lanthorn no longer depends on a `HOME` variable being
+  set to find your files.
+
+### Fixed
+
+- **A runaway Z-machine game no longer freezes lanthorn.** A story stuck in a
+  loop that never asks for input is stopped after about ten seconds with an
+  error message, as Glulx games already were, instead of freezing lanthorn.
+- **One bad story file no longer stops the library index.** A file that crashed
+  the indexer used to cut the story list short; it now costs only that file.
+- **Damaged disk images, sounds and pictures no longer hang lanthorn or use up
+  all your memory.** Malformed disk images, audio files with absurd settings and
+  oversized or corrupt pictures are rejected, and picture caches are capped.
+
+## v0.9.2 — 2026-10-06
+
+### Fixed
+
+- **IFDB search and Popular list only games you can download.** Results that
+  have no download link (commercial games, web-only titles) no longer crowd out
+  the ones lanthorn can fetch and play.
+- **Scott Adams games inside a zip show their real titles.** A zip holding
+  several Scott Adams adventures listed them as `secret.dat` and `BOND.DAT`;
+  they now read "Top Secret Adventure" and "James Bond Adventure", the same as
+  the loose files, in the story list and in the game's own title pane.
+- **InvisiClues for Infocom games whose exact release isn't recognised.** A story
+  linked to its Infocom game's IFDB page (a Zork I built from the public source,
+  say) is now offered that game's InvisiClues, and a local hint file for it is
+  recognised, even when its release isn't one lanthorn knows by name.
+- **Games built with the community ZIL compiler (ZILF) now get an automap.** Their
+  rooms were being detected but never drawn, because the story's command table
+  wasn't recognised; it is now, so they map like any other parser game.
+
+## v0.9.1 — 2026-10-04
+
+### Changed
+
+- **Saves made by 0.9.1 need 0.9.1.** The save archive has a newer version:
+  0.9.1 opens saves made by 0.9.0, but 0.9.0 cannot open saves made by 0.9.1.
+  Keep a copy of your saves before going back to an older build.
+- **`honor_game_colours = false` now themes every window.** Secondary text
+  windows and empty graphics windows follow your theme colours too; a colour
+  the game set on a window no longer wins in that mode.
+
+### Fixed
+
+- **Narcolepsy's thought bubble** is white all the way round, with smooth edges
+  clipped to the pixel, in its designed frame. Graphics windows the game has not
+  drawn into now start white, as the Glk standard says, and the bubble's margins
+  are no longer trimmed or left dark on terminals that show images.
+- **Restore State, rewind and auto-resume bring back what secondary Glulx
+  windows showed.** Narcolepsy's bubble no longer goes blank until the next
+  turn after a restore.
+- **Text the game had cleared stays cleared after a restore or rewind.** It no
+  longer reappears on screen (it is still in scrollback), including clears the
+  game made while waiting on a keypress.
 
 ## v0.9.0 — 2026-10-03
 

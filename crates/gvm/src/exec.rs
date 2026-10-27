@@ -3456,6 +3456,14 @@ impl Machine {
         self.glk.style_colour(wintype, style)
     }
 
+    /// The non-colour stylehints (Weight, Oblique) a `style` renders with for a
+    /// `wintype` window, from the game's `glk_stylehint_set` table — the
+    /// attribute counterpart of [`Self::style_colour`] (SQ-1758: a host drawing
+    /// the player's typed line needs the game's `style_Input` weight).
+    pub fn style_attrs(&self, wintype: WinType, style: GlkStyle) -> glk::StyleAttrs {
+        self.glk.style_attrs(wintype, style)
+    }
+
     /// The Glk file VFS as a standalone sidecar blob, for the host to persist
     /// to disk between sessions (mirrors the Z-machine's aux store). (SQ-0278)
     pub fn vfs_bytes(&self) -> Vec<u8> {
@@ -4388,6 +4396,57 @@ impl Machine {
             self.step_once()?;
         }
         Ok(())
+    }
+
+    /// Call the function at `func` on a machine nobody will keep and run it to
+    /// its return, with every character it prints captured, giving up after
+    /// `max_steps` instructions (SQ-1774).
+    ///
+    /// For a THROWAWAY machine only (see `objects::NameRunner`). Printing is
+    /// diverted into the capture buffer for the whole call ([`Machine::emit_capture`]),
+    /// which bypasses the I/O system entirely: nothing reaches a Glk stream or the
+    /// backend, and a filter-mode (`@setiosys 1`) story prints the same text.
+    /// Returns `Some((return value, captured text))`, or `None` when the function
+    /// ran out of steps, faulted, halted the machine, or suspended for input, a
+    /// save/restore or a file prompt. On every exit the stack pointers are put
+    /// back where they were found and the machine is usable for the next call.
+    pub fn run_function_capped(&mut self, func: u32, args: &[u32], max_steps: u64) -> Option<(u32, String)> {
+        let (sp, fp, pc) = (self.sp, self.fp, self.pc);
+        self.halted = false;
+        self.faulted = false;
+        self.emit_capture = Some(String::new());
+        self.capture_depth = 0;
+        let result = self.drive_function_capped(func, args, max_steps);
+        let text = self.emit_capture.take().unwrap_or_default();
+        self.sp = sp;
+        self.fp = fp;
+        self.pc = pc;
+        let _ = self.reload_frame_meta();
+        self.halted = false;
+        self.faulted = false;
+        self.pending_input = None;
+        self.pending_event = None;
+        self.pending_saveload = None;
+        self.pending_fileref = None;
+        result.map(|v| (v, text))
+    }
+
+    fn drive_function_capped(&mut self, func: u32, args: &[u32], max_steps: u64) -> Option<u32> {
+        let resume_fp = self.fp;
+        self.call_function(func, args, Dest::Push).ok()?;
+        let mut steps = 0u64;
+        while self.fp != resume_fp {
+            let suspended = self.pending_input.is_some()
+                || self.pending_event.is_some()
+                || self.pending_saveload.is_some()
+                || self.pending_fileref.is_some();
+            if self.fp < resume_fp || self.halted || suspended || steps >= max_steps {
+                return None;
+            }
+            self.step_once().ok()?;
+            steps += 1;
+        }
+        self.pop32().ok()
     }
 
     /// Decode a Glulx string OBJECT at `addr` into a String for the Glk
@@ -6740,6 +6799,12 @@ impl Machine {
     /// Flush the display backend (e.g. at the end of a run).
     pub fn flush(&mut self) {
         self.backend.flush();
+    }
+
+    /// Shared access to the display backend, for a host that must READ its
+    /// window contents while serializing (`&self`) a snapshot.
+    pub fn backend(&self) -> &dyn GlkBackend {
+        &*self.backend
     }
 
     /// Mutable access to the display backend (e.g. to downcast in tests/host).

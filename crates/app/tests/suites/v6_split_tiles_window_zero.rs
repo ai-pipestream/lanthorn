@@ -119,8 +119,7 @@ fn mysterious01_prose_renders_below_the_artwork() {
         for honor in [true, false] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker =
-                (!force_cell).then(ratatui_image::picker::Picker::halfblocks);
+            state.set_game_picker((!force_cell).then(ratatui_image::picker::Picker::halfblocks));
             state.config.v6_render = app::config::V6RenderMode::Hybrid;
             state.config.honor_game_colours = honor;
             for i in 0..20 {
@@ -250,8 +249,7 @@ fn advents_status_bar_survives_its_own_windows_erase() {
         for honor in [true, false] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker =
-                (!force_cell).then(ratatui_image::picker::Picker::halfblocks);
+            state.set_game_picker((!force_cell).then(ratatui_image::picker::Picker::halfblocks));
             state.config.v6_render = app::config::V6RenderMode::Hybrid;
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, 80, 25);

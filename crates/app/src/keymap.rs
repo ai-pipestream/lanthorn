@@ -567,7 +567,7 @@ impl KeyMap {
                         warnings.push(if in_browser {
                             format!("keymap: '{command}' is a game command and cannot be bound in [keymap.browser]; skipped")
                         } else {
-                            format!("keymap: '{command}' is a story-browser command — bind it in [keymap.browser]; skipped")
+                            format!("keymap: '{command}' is a game-browser command — bind it in [keymap.browser]; skipped")
                         });
                         continue;
                     }

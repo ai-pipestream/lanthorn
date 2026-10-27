@@ -126,7 +126,7 @@ fn hybrid_draws_the_table_instead_of_two_button_labels() {
                 // re-using one across sizes measures the previous size's upload.
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
-                state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
                 state.config.v6_render = mode;
                 state.config.honor_game_colours = honor;
                 *state.v6_paint.borrow_mut() = session.paint_surface();

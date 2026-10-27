@@ -154,12 +154,17 @@ mod tests {
                 zvm::screen::Palette::Standard,
                 None,
             );
+            // SQ-1809: Beyond Zork caches the width, so under the default `Auto` it
+            // is told 80 whatever the pane (pinned by `status_width_verdict`); the
+            // pane reaching `$21` is what `status_width = "pane"` asks for.
             let seeded = app::session::GameSession::new_for_machine(
-                bytes.clone(), true, false, false, Default::default(), Some((24, 60)), None, &boot,
+                bytes.clone(), true, false, false, Default::default(), Some((24, 60)), None,
+                &boot.clone().with_status_width(app::config::StatusWidth::Pane),
             )
             .expect("Beyond Zork boots");
             let bare = app::session::GameSession::new_for_machine(
-                bytes, true, false, false, Default::default(), None, None, &boot,
+                bytes, true, false, false, Default::default(), None, None,
+                &boot.with_status_width(app::config::StatusWidth::Pane),
             )
             .expect("Beyond Zork boots");
             assert_eq!(seeded.machine.mem.read_byte(0x21), 60, "the pane's own width reaches $21");
@@ -194,6 +199,22 @@ mod tests {
             1,
             "and the TUI's restart must hand it the live terminal's size"
         );
+    }
+
+    /// **A guard, not a behaviour** (SQ-1809): a boot site that resolves a
+    /// `MachineBoot` and does not state `status_width` silently gets the probe
+    /// even where the player forced a mode (or a pinned `virtual_screen_cols` is
+    /// in force), and a restart that forgets it re-probes instead of reusing the
+    /// session's verdict. The wrong spelling cannot be made unreachable — a
+    /// `MachineBoot` is valid without it — so both production sites are watched.
+    /// Needles are assembled so this test's own text is not a match.
+    #[test]
+    fn both_production_boot_sites_state_the_status_width() {
+        let needle = format!(".with_status_width{}", "(");
+        for (name, src) in [("host/boot.rs", include_str!("host/boot.rs")), ("host/reset.rs", include_str!("host/reset.rs"))] {
+            let uses = src.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(needle.as_str())).count();
+            assert_eq!(uses, 1, "{name} must hand its MachineBoot a status_width exactly once");
+        }
     }
 
     /// `reset_game`'s Z-machine arm used the bare `GameSession::new`, which

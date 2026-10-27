@@ -136,7 +136,7 @@ fn the_painted_cards_reach_the_composite_in_both_modes() {
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.honor_game_colours = honor;
         *state.v6_paint.borrow_mut() = Some(paint.clone());
 

@@ -200,7 +200,7 @@ fn every_container_the_gate_turned_away_was_already_unrunnable() {
             .expect_err("it was just refused")
             .to_string();
         assert!(
-            said.contains("not a story file") && said.contains("ZMSD"),
+            said.contains("not a game file") && said.contains("ZMSD"),
             "{name}: the refusal must say what the bytes are: {said}"
         );
         // …and nothing that used to RUN may have stopped running.
@@ -275,7 +275,7 @@ fn an_unmountable_container_is_refused_by_name() {
     let err = app::hints::extract_story(image).expect_err("nothing can run this");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     let said = err.to_string();
-    for want in ["not a story file", "4096 bytes", "06 57 49 44 47 45 54 00", "WIDGET", "ZMSD"] {
+    for want in ["not a game file", "4096 bytes", "06 57 49 44 47 45 54 00", "WIDGET", "ZMSD"] {
         assert!(said.contains(want), "the diagnostic must contain {want:?}: {said}");
     }
 }

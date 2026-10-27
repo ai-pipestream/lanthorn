@@ -192,7 +192,7 @@ fn a_hyperlinked_anchorhead_picture_resolves_to_a_click() {
 
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.focus = Focus::Game;
     state.push_transcript_kind("Outside the Real Estate Office", TranscriptKind::Story);
     const LINK: u32 = 4242; // an arbitrary nonzero link value, as any real game picks one
@@ -271,8 +271,7 @@ fn thumbnail_snapshot() -> Option<app::archive::ArchiveContents> {
 fn state_from(ar: &app::archive::ArchiveContents, cell: (u16, u16)) -> AppState {
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(cell.0, cell.1)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(cell.0, cell.1))));
     state.focus = Focus::Game;
     for (i, line) in ar.transcript.iter().enumerate() {
         match ar.transcript_images.get(i) {

@@ -65,7 +65,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
             buf,
             content.x,
             content.y,
-            "This story saves persistent side-data.",
+            "This game saves persistent side-data.",
             body_style,
             content,
         );

@@ -131,9 +131,21 @@ pub struct MachineBoot {
     /// disk the player supplied (SQ-1037). Empty for every launch that reaches
     /// neither, which is every machine but the Macintosh and Arthur's Amiga floppy.
     pub faces: crate::native_font::FaceSet,
+    /// What width a Version 4+ Z-machine story is told (SQ-1809): probe it
+    /// (`Auto`, the default of every constructor here), or the answer already
+    /// settled. A boot site that has a verdict to reuse (`@restart`) or an
+    /// override to honour (`status_width`, a pinned `virtual_screen_cols`) states
+    /// it with [`Self::with_status_width`]; everything else gets the probe.
+    pub status_width: crate::config::StatusWidth,
 }
 
 impl MachineBoot {
+    /// This boot with `status_width` settled (SQ-1809).
+    pub fn with_status_width(mut self, status_width: crate::config::StatusWidth) -> MachineBoot {
+        self.status_width = status_width;
+        self
+    }
+
     /// Resolve the machine's facts from an already-mounted archive.
     ///
     /// `named_art_std_window` is [`crate::graphics::PictureOverride::std_window`],
@@ -188,6 +200,7 @@ impl MachineBoot {
                 art_scale.unwrap_or((1, 1)),
             ),
             faces,
+            status_width: crate::config::StatusWidth::Auto,
         }
     }
 
@@ -291,6 +304,7 @@ impl MachineBoot {
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
             wrap_regime: InterpreterProfile::IbmPc.v6_wrap_regime(),
             faces: crate::native_font::FaceSet::none(),
+            status_width: crate::config::StatusWidth::Auto,
         }
     }
 }

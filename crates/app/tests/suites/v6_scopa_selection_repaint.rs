@@ -93,7 +93,7 @@ fn has_label(s: &GameSession, text: &str) -> bool {
 fn frame_state(s: &GameSession) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     *state.v6_paint.borrow_mut() = s.paint_surface();
     state
 }

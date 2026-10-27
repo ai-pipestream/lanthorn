@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest something lanthorn could do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: wish
+    attributes:
+      label: What would you like to do?
+      description: Tell us what you're trying to accomplish, not just the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: prompted_by
+    attributes:
+      label: Which game or situation prompted this?
+    validations:
+      required: false
+  - type: textarea
+    id: other
+    attributes:
+      label: Anything else?
+    validations:
+      required: false

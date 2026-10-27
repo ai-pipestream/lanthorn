@@ -8,13 +8,13 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Game | `save-state [name]` | save an emulator Save State, optionally to a named slot |
 | Game | `restore-state [name]` | restore an emulator Save State — bare opens the saves dialog to pick one; a name restores that slot directly |
 | Game | `reset-game [map] [data]` | restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh |
-| Game | `set-transcript on|off` | start or stop the story's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead) |
+| Game | `set-transcript on|off` | start or stop the game's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead) |
 | Game | `quit` | exit lanthorn |
-| Game | `quit-to-library` | exit the current story and return to the story library |
+| Game | `quit-to-library` | exit the current game and return to the game library |
 | Game | `download-documents` | choose manuals, feelies and maps listed on IFDB for this game and save them to its documents folder |
-| Game | `open-hints` | show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the story) |
+| Game | `open-hints` | show the Journal's Hints tab, starting the hint session if needed (the keyboard stays in the game) |
 | Game | `open-history` | open the rewind/replay history |
-| Game | `toggle-command-panel` | open or close the command panel; remembered per story |
+| Game | `toggle-command-panel` | open or close the command panel; remembered per game |
 | Game | `cycle-panel` | cycle command panel → none; persisted per-game |
 | Game | `toggle-timed-input` | toggle honoring the game's timed-input timers |
 | Game | `toggle-sound` | toggle audio playback (bleeps + sampled sounds) |
@@ -41,7 +41,7 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Map | `toggle-portal-labels` | toggle portal labels |
 | View | `toggle-map` | show or hide the Journal (the map's panel); persisted per-game |
 | View | `toggle-focus` | switch focus between panes |
-| View | `journal-tab <map|room|inventory|hints|documents>` | show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per story |
+| View | `journal-tab <map|room|inventory|hints|documents>` | show a tab of the Journal (the right-hand panel), revealing it if hidden; remembered per game |
 | View | `journal-next-tab` | show the Journal's next tab, wrapping |
 | View | `journal-prev-tab` | show the Journal's previous tab, wrapping |
 | View | `filter-items [query]` | filter the Journal's Inventory tab (both Carrying and Elsewhere) to items matching query; no query clears the filter |
@@ -65,7 +65,7 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Style | `set-v6-pixel-lock [on|off|auto]` | lock v6 art to a whole number of device pixels per art pixel — bare toggles, auto inherits the global setting; persisted per-game |
 | Style | `set-guidance [on|off|auto]` | Lanthorn's Guiding Light: help while you play, marked in the margin — bare toggles, auto inherits the global setting; persisted per-game |
 | Style | `set-return-probe [on|off|auto]` | after a move, look for the way back in a silent copy of the game and put it on the map — bare toggles, auto inherits the global setting; persisted per-game |
-| Style | `reveal-words` | light the nouns and named things on screen this story knows, for a few seconds — under the Guiding Light's switch |
+| Style | `reveal-words` | light the nouns and named things on screen this game knows, for a few seconds — under the Guiding Light's switch |
 | Style | `run-font-check` | ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml) |
 | Style | `set-game-borders on|off|auto` | show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game |
 | Export | `export-svg [file]` | export the map as SVG; default path when omitted |
@@ -76,9 +76,10 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Animation | `anim-step forward|back` | step the animation one frame |
 | Animation | `anim-play` | toggle animation play/pause |
 | Animation | `anim-exit` | exit the animation view |
-| Help | `dump-windows` | dump the last game frame's window layout, here and to ~/.lanthorn/dump-windows.log |
-| Help | `dump-cells` | write the last frame's cells — glyphs, colours and attributes — to ~/.lanthorn/dump-cells.log |
-| Help | `dump-terminal` | dump this terminal's detected protocol, cell size, capabilities and traffic — here and to ~/.lanthorn/dump-terminal.log |
+| Help | `dump-windows` | dump the last game frame's window layout, here and to dump-windows.log in your logs folder |
+| Help | `dump-cells` | write the last frame's cells — glyphs, colours and attributes — to dump-cells.log in your logs folder |
+| Help | `dump-terminal` | dump this terminal's detected protocol, cell size, capabilities and traffic — here and to dump-terminal.log in your logs folder |
+| Help | `report-bug [open]` | gather what a bug report needs: show a summary, copy it, and save the full report to your logs folder; `open` also opens an issue prefilled with the summary |
 | Help | `debug` | toggle the Z-machine debug inspector pane |
 | Help | `trace [sections|all|none]` | toggle debug-trace sections (screen, map, hostio, v6) written to trace.log; no arg shows current state |
 | Help | `dump-notifications` | print the notification history to the transcript, in case a toast was missed |
@@ -86,23 +87,23 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | Library | `move-selection <dx> <dy>` | move the browser's selection by dx columns and dy rows (columns exist only in the cover gallery) |
 | Library | `page-selection <n>` | move the browser's selection by n pages |
 | Library | `half-page-selection <n>` | move the browser's selection by half a page (vim Ctrl-U/Ctrl-D) |
-| Library | `select-edge first|last` | jump the browser's selection to the first or last story |
-| Library | `play-story` | launch the selected story |
-| Library | `open-launch-options` | open the launch-options dialog for the selected story |
-| Library | `open-story-menu` | open the per-story menu beside the selected story |
-| Library | `show-browser-keys` | show the story browser's key reference |
-| Library | `toggle-info-panel` | open or close the browser's story info panel |
-| Library | `toggle-gallery` | switch the browser between the story list and the cover gallery |
-| Library | `fetch-story` | re-fetch the selected story's IFDB metadata, ignoring the cache |
-| Library | `refresh-library` | fetch IFDB metadata for every story that is missing or stale |
-| Library | `set-ifdb-url` | point the selected story at an IFDB page by hand |
-| Library | `create-documents-folder` | create this story's documents folder (manuals, maps) beside its IFDB id |
-| Library | `open-url` | download a story from a URL into this library and open it |
-| Library | `search-ifdb` | search IFDB by title or author and download a story into this directory |
-| Library | `download-hints` | download a matching InvisiClues hint file for this story (the selected one in the browser) |
+| Library | `select-edge first|last` | jump the browser's selection to the first or last game |
+| Library | `play-story` | launch the selected game |
+| Library | `open-launch-options` | open the launch-options dialog for the selected game |
+| Library | `open-story-menu` | open the per-game menu beside the selected game |
+| Library | `show-browser-keys` | show the game browser's key reference |
+| Library | `toggle-info-panel` | open or close the browser's game info panel |
+| Library | `toggle-gallery` | switch the browser between the game list and the cover gallery |
+| Library | `fetch-story` | re-fetch the selected game's IFDB metadata, ignoring the cache |
+| Library | `refresh-library` | fetch IFDB metadata for every game that is missing or stale |
+| Library | `set-ifdb-url` | point the selected game at an IFDB page by hand |
+| Library | `create-documents-folder` | create this game's documents folder (manuals, maps) beside its IFDB id |
+| Library | `open-url` | download a game from a URL into this library and open it |
+| Library | `search-ifdb` | search IFDB by title or author and download a game into this directory |
+| Library | `download-hints` | download a matching InvisiClues hint file for this game (the selected one in the browser) |
 | Library | `sort-library` | cycle the browser's sort column, keeping the direction |
 | Library | `reverse-sort` | reverse the browser's sort direction, keeping the column |
 | Library | `find-story` | type to filter the whole library by title, author, filename or folder |
 | Library | `parent-folder` | leave the current library folder for the one above it |
-| Library | `quit-browser` | leave the story browser |
+| Library | `quit-browser` | leave the game browser |
 | Library | `cancel-browser` | cancel a running fetch, or leave the browser when nothing is in flight |

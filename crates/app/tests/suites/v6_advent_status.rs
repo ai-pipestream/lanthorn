@@ -119,7 +119,7 @@ fn advent_hybrid_bar_is_solid(honor: bool) {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, 80, 25);
@@ -178,14 +178,14 @@ fn advent_frameless_bar_is_solid() {
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     // Force the CELL path: SQ-0895 removed frameless, which was the
     // deliberate route in. Dropping the picker is the substitute whose
     // ONLY effect is the one frameless contributed here — draw no game
     // image. (A modal overlay also lands on the cell path, but it
     // additionally suppresses the inlined input line, which shifts row
     // counts.)
-    state.game_picker = None;
+    state.set_game_picker(None);
     let area = Rect::new(0, 0, 80, 25);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -307,7 +307,7 @@ fn advent_help_panel_is_opaque(honor: bool) {
         let model = session.screen();
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
         state.config.v6_render = app::config::V6RenderMode::Hybrid;
         state.config.honor_game_colours = honor;
         // Story text in the transcript, so anything showing THROUGH the panel is
@@ -416,7 +416,7 @@ fn the_boot_popup_does_not_blank_the_rows_behind_it() {
     let model = session.screen();
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     for line in banner.lines() {
         state.push_transcript(line);
@@ -486,7 +486,7 @@ fn the_status_bar_is_one_row_at_any_pane_scale() {
         for (w, h) in [(80u16, 25u16), (97, 52), (120, 60)] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(cell.into()));
+            state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(cell.into())));
             state.config.v6_render = app::config::V6RenderMode::Hybrid;
             let area = Rect::new(0, 0, w, h);
             let mut buf = Buffer::empty(area);

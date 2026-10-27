@@ -139,8 +139,7 @@ fn shogun_in_play(name: &str, profile: InterpreterProfile, honor: bool) -> Optio
 fn render_hybrid(model: &app::engine::ScreenModel, honor: bool, cols: u16, rows: u16) -> (Rect, Buffer) {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);
@@ -317,7 +316,7 @@ fn the_raster_composite_keeps_both_rows_right_justified() {
             // And the raster path renders that band without dropping it.
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
             state.config.v6_render = app::config::V6RenderMode::Raster;
             state.config.honor_game_colours = honor;
             let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));

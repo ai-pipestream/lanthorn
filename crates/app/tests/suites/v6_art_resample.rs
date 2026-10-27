@@ -132,7 +132,7 @@ fn render(
     state.colors = app::colors::ColorScheme::terminal_default();
     let mut picker = app::render::graphics::kitty_picker(CELL.0, CELL.1);
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = mode;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);

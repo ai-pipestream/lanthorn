@@ -398,8 +398,8 @@ impl StoryEntry {
         roots.player_dir(&self.story_key())
     }
 
-    /// Where the story's SHARED metadata (`info.json`, `cover.png`, IFDB link
-    /// state) lives. The same folder as [`StoryEntry::game_dir`] for the default
+    /// Where the story's SHARED metadata (`info.json` with its IFDB link state;
+    /// the record and cover themselves are in `<catalogue>/ifdb/`, SQ-1723) lives. The same folder as [`StoryEntry::game_dir`] for the default
     /// player; the shared catalogue's for a named one (SQ-1676).
     pub fn catalogue_dir(&self, roots: &DataRoots) -> PathBuf {
         roots.catalogue_dir(&self.story_key())
@@ -413,8 +413,8 @@ impl StoryEntry {
     /// image is its **game directory** instead: five rows off `INFOCOM6` share
     /// one path, so keying by path would paint the first row's jacket onto all
     /// five, and a disk image is never a blorb — there is no frontispiece in
-    /// there to lose. The fetched `cover.png` sits in that same directory, so
-    /// the key doubles as the source.
+    /// there to lose. The fetched cover is found from that same directory (its
+    /// link names the shared entry), so the key doubles as the source.
     pub fn cover_key(&self, roots: &DataRoots) -> PathBuf {
         match self.meta.disk_entry {
             Some(_) => self.catalogue_dir(roots),
@@ -1359,7 +1359,7 @@ pub fn metadata_title(
     bytes: &[u8],
 ) -> Option<String> {
     let game_dir = roots.catalogue_dir(&crate::storage::story_key_at(path));
-    metadata_title_in(path, &game_dir, ifid, is_scott, bytes)
+    metadata_title_in(path, &game_dir, ifid, is_scott, bytes, None)
 }
 
 /// [`metadata_title`] for a caller that already knows which per-game directory
@@ -1376,10 +1376,13 @@ pub fn metadata_title_in(
     ifid: &str,
     is_scott: bool,
     bytes: &[u8],
+    member_stem: Option<&str>,
 ) -> Option<String> {
     let ifmd = container_ifmd(path);
     let fetched = crate::story_info::load(game_dir, ifid).and_then(|i| i.fetched);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    // A zip member names itself, not its archive (SQ-1720).
+    let stem = member_stem
+        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or_default());
     resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott, bytes))
 }
 
@@ -1446,6 +1449,17 @@ fn resolve(
     }
 }
 
+/// Run one file's resolver, treating a panic inside a parser as "this file
+/// yields no rows" (SQ-1735). The indexer runs on a thread whose death the
+/// receiver cannot tell from a finished walk, so one hostile file would
+/// otherwise silently truncate the whole library.
+fn guarded_entries(
+    path: &Path,
+    resolve: impl FnOnce(&Path) -> Vec<StoryEntry>,
+) -> Vec<StoryEntry> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve(path))).unwrap_or_default()
+}
+
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
 /// resolving a display title for each. Files that don't load or don't parse as
 /// a supported story are silently skipped (v6 is supported since SQ-0186).
@@ -1475,7 +1489,7 @@ pub fn scan_stories(dir: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
         if !has_story_ext(path) {
             continue;
         }
-        out.extend(resolve_entries(path, roots));
+        out.extend(guarded_entries(path, |p| resolve_entries(p, roots)));
     }
     dedupe_within_a_volume(&mut out);
     dedupe_within_sets(&mut out, &sets);
@@ -2001,7 +2015,7 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
         // nor its title can say which clues file is its own.
         let cand: Vec<&str> = sidecar_idxs.iter().map(|&s| names[s].as_str()).collect();
         let target = hints::HintTarget { stem: &stem, title: &title, ifid: &ifid };
-        let chosen = match hints::match_hint_sidecar(target, &cand) {
+        let chosen = match hints::match_hint_sidecar_with_tuid(target, out[g].meta.ifdb_tuid.as_deref(), &cand) {
             hints::HintPick::One(k) => Some(sidecar_idxs[k]),
             _ => None,
         };
@@ -2083,7 +2097,7 @@ pub fn resolve_entries(path: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
             // taking it from here spares a second mount and, on a crunched
             // Commodore disk, a second 6502 depack (SQ-1691).
             if found.listed == 0 {
-                let (story, image) = stories.into_iter().next().expect("one story");
+                let (story, image) = stories.into_iter().next().expect("one game");
                 let Ok(loaded) = crate::hints::extract_story(story.bytes) else { return Vec::new() };
                 return entry_from_loaded(path, None, loaded, Some(image), roots).into_iter().collect();
             }
@@ -2119,6 +2133,13 @@ pub fn resolve_entries(path: &Path, roots: &DataRoots) -> Vec<StoryEntry> {
         }
     }
     resolve_entry(path, roots).into_iter().collect()
+}
+
+/// The bare stem of a zip member's name: basename, extension stripped (SQ-1720).
+/// The bundled tables are keyed on it, as they are on a loose file's stem.
+pub fn zip_member_stem(name: &str) -> &str {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    Path::new(base).file_stem().and_then(|s| s.to_str()).unwrap_or(base)
 }
 
 /// The body both doors share: build one row out of a story that is already
@@ -2230,7 +2251,13 @@ fn entry_from_loaded(
     // identifies those by content checksum before falling back to the ordinary
     // Scott lookup below — which also fixes the same game opened DIRECTLY as a
     // bare `.prg` (`BATON.prg`), with no disk entry to name it at all (SQ-1469).
-    let stem = disk_entry.unwrap_or_else(|| {
+    //
+    // A zip member is not a disk entry (SQ-1720): its name carries an extension
+    // and maybe a directory (`sub/secret.dat`), and every table keys on the bare
+    // stem, so a member's stem is its basename minus the extension. A disk
+    // image's entry name is already the disk's own spelling and is left alone.
+    let zip_member_stem = disk_entry.filter(|_| disk_image.is_none()).map(zip_member_stem);
+    let stem = zip_member_stem.or(disk_entry).unwrap_or_else(|| {
         path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(&filename)
@@ -2672,7 +2699,7 @@ pub fn hint_status(entry: &StoryEntry, roots: &DataRoots, index: &hints::HintInd
     }
     if let Some(dir) = entry_documents_dir(entry, roots) {
         let story = hints::HintStory::new(&entry.meta.ifid, &entry.title).with_documents(Some(&dir));
-        match hints::resolve_in_story_documents(&entry.path, story, index) {
+        match hints::resolve_in_story_documents_with_tuid(&entry.path, story, entry.meta.ifdb_tuid.as_deref(), index) {
             Some(hints::HintResolution::File(p)) => return HintStatus::File(p),
             Some(hints::HintResolution::Choose(mut files)) if !files.is_empty() => {
                 return HintStatus::File(files.swap_remove(0));
@@ -2680,7 +2707,7 @@ pub fn hint_status(entry: &StoryEntry, roots: &DataRoots, index: &hints::HintInd
             _ => {}
         }
     }
-    if hints::hint_download_for(&entry.meta.ifid).is_some() {
+    if hints::hint_download_for_with_tuid(&entry.meta.ifid, entry.meta.ifdb_tuid.as_deref()).is_some() {
         HintStatus::Downloadable
     } else {
         HintStatus::None
@@ -4992,6 +5019,24 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["burg.z5", "curses.z5", "top.z5"], "every story once, none from `.hidden`");
         assert!(all.iter().all(|e| !e.is_folder()), "the index carries stories, not folder rows");
+    }
+
+    /// SQ-1735: a parser panic on one file must cost that file, not the rest
+    /// of the scan.
+    #[test]
+    fn a_panicking_file_costs_only_itself() {
+        let files = ["a.z5", "boom.z5", "c.z5"];
+        let mut out: Vec<StoryEntry> = Vec::new();
+        for f in files {
+            out.extend(guarded_entries(Path::new(f), |p| {
+                if p.ends_with("boom.z5") {
+                    panic!("hostile file");
+                }
+                vec![story(f, f, None, None)]
+            }));
+        }
+        let names: Vec<&str> = out.iter().map(|e| e.filename.as_str()).collect();
+        assert_eq!(names, ["a.z5", "c.z5"]);
     }
 
     #[test]

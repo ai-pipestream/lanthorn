@@ -184,14 +184,26 @@ const TITLE_KEYS: &[(&str, &str)] = &[
     ("zorktheundiscoveredunderground", "ztuu"),
 ];
 
+/// The canonical title of the game a story is: the IFID's, when `known_titles.tsv`
+/// knows it, else the one its IFDB tuid names in `infocom_tuids.tsv`.
+///
+/// The ONE resolver every identity lookup here goes through. The IFID wins
+/// outright (it names the exact build); the tuid is consulted only when the IFID
+/// is unknown — a build compiled from the ZIL source, or a beta missing from the
+/// registry. A tuid is asserted identity (the story is linked to that IFDB page),
+/// not a name match; neither a filename nor a displayed title ever reaches here.
+fn identity_title(ifid: &str, tuid: Option<&str>) -> Option<&'static str> {
+    crate::session::known_title(ifid).or_else(|| tuid.and_then(cli_host::titles::title_for_tuid))
+}
+
 /// The catalog key for a story's **identity** — nothing here reads a filename.
 ///
-/// The IFID names the exact build (release + serial), `known_titles.tsv` names
+/// The IFID (or, failing that, the IFDB tuid — see [`identity_title`]) names the exact build (release + serial), `known_titles.tsv` names
 /// the game that build is, and [`TITLE_KEYS`] names the catalog key for that
 /// game. `None` when the IFID is unknown or the title spells its own key (the
 /// common case, which substring matching already handles).
-fn identity_hint_key(ifid: &str) -> Option<&'static str> {
-    let norm = normalize_ident(crate::session::known_title(ifid)?);
+fn identity_hint_key(ifid: &str, tuid: Option<&str>) -> Option<&'static str> {
+    let norm = normalize_ident(identity_title(ifid, tuid)?);
     TITLE_KEYS.iter().find(|(t, _)| *t == norm).map(|(_, k)| *k)
 }
 
@@ -200,8 +212,8 @@ fn identity_hint_key(ifid: &str) -> Option<&'static str> {
 /// Empty when the IFID names no game we know. Unlike the caller's displayed
 /// title this cannot have come from a container's filename, so it is the first
 /// thing key matching consults (SQ-0767).
-fn identity_ident(ifid: &str) -> String {
-    crate::session::known_title(ifid).map(normalize_ident).unwrap_or_default()
+fn identity_ident(ifid: &str, tuid: Option<&str>) -> String {
+    identity_title(ifid, tuid).map(normalize_ident).unwrap_or_default()
 }
 
 /// Lowercase a string keeping only ASCII alphanumerics — so `"Beyond Zork"`,
@@ -281,14 +293,20 @@ pub fn hint_matches_story(hint_file_name: &str, story_stem_or_title: &str) -> bo
 /// Empire.adf` is that floppy's InvisiClues, and no comparison of the two
 /// filenames can say so.
 pub fn hint_matches_identity(hint_file_name: &str, ifid: &str) -> bool {
+    hint_matches_identity_with_tuid(hint_file_name, ifid, None)
+}
+
+/// [`hint_matches_identity`] for a story that may carry an IFDB tuid: the tuid
+/// names the game only when the IFID is unknown (see [`identity_title`]).
+pub fn hint_matches_identity_with_tuid(hint_file_name: &str, ifid: &str, tuid: Option<&str>) -> bool {
     let Some(key) = hint_game_key(hint_file_name) else { return false };
     let k = normalize_ident(&key);
     if k.len() < 3 {
         return false;
     }
-    match identity_hint_key(ifid) {
+    match identity_hint_key(ifid, tuid) {
         Some(ik) => normalize_ident(ik) == k,
-        None => identity_ident(ifid).contains(&k),
+        None => identity_ident(ifid, tuid).contains(&k),
     }
 }
 
@@ -335,8 +353,16 @@ fn izm_url(stem: &str) -> String {
 /// fallback for games SLAG doesn't cover. Returns `None` when no catalog entry
 /// matches. A key must be ≥3 chars to match (guards against spurious hits).
 pub fn hint_download_for(ifid: &str) -> Option<HintDownload> {
-    let identity_key = identity_hint_key(ifid);
-    let canonical = identity_ident(ifid);
+    hint_download_for_with_tuid(ifid, None)
+}
+
+/// [`hint_download_for`] for a story that may carry an IFDB tuid. The IFID wins
+/// whenever `known_titles.tsv` knows it; the tuid names the Infocom game only
+/// when the IFID is unknown (see [`identity_title`]). A tuid outside
+/// `infocom_tuids.tsv` changes nothing.
+pub fn hint_download_for_with_tuid(ifid: &str, tuid: Option<&str>) -> Option<HintDownload> {
+    let identity_key = identity_hint_key(ifid, tuid);
+    let canonical = identity_ident(ifid, tuid);
     let matches = |key: &str| {
         let k = normalize_ident(key);
         if k.len() < 3 {
@@ -491,8 +517,20 @@ pub enum HintPick {
 /// matches are [`HintPick::Ambiguous`]; the looser stem/title tiers take the
 /// first match in the order `names` is given (callers pass a stable order).
 pub fn match_hint_sidecar<S: AsRef<str>>(target: HintTarget<'_>, names: &[S]) -> HintPick {
+    match_hint_sidecar_with_tuid(target, None, names)
+}
+
+/// [`match_hint_sidecar`] for a story that may carry an IFDB tuid, which names the
+/// game for the identity tier only when the IFID is unknown ([`identity_title`]).
+pub fn match_hint_sidecar_with_tuid<S: AsRef<str>>(
+    target: HintTarget<'_>,
+    tuid: Option<&str>,
+    names: &[S],
+) -> HintPick {
     let ident: Vec<usize> = (0..names.len())
-        .filter(|&i| !target.ifid.is_empty() && hint_matches_identity(names[i].as_ref(), target.ifid))
+        .filter(|&i| {
+            !target.ifid.is_empty() && hint_matches_identity_with_tuid(names[i].as_ref(), target.ifid, tuid)
+        })
         .collect();
     match ident.len() {
         1 => return HintPick::One(ident[0]),
@@ -517,12 +555,12 @@ pub fn match_hint_sidecar<S: AsRef<str>>(target: HintTarget<'_>, names: &[S]) ->
 /// Rank hint candidate names with [`match_hint_sidecar`] and return the chosen
 /// one; else a lone (generic) candidate; else `None` (ambiguous or empty).
 /// Callers distinguish empty from ambiguous by checking the input.
-fn pick_hint_candidate(target: HintTarget<'_>, mut names: Vec<String>) -> Option<String> {
+fn pick_hint_candidate(target: HintTarget<'_>, tuid: Option<&str>, mut names: Vec<String>) -> Option<String> {
     if names.is_empty() {
         return None;
     }
     names.sort();
-    match match_hint_sidecar(target, &names) {
+    match match_hint_sidecar_with_tuid(target, tuid, &names) {
         HintPick::One(i) => return Some(names.swap_remove(i)),
         HintPick::Ambiguous => return None,
         HintPick::NoMatch => {}
@@ -650,10 +688,21 @@ pub enum HintResolution {
 ///    `read_zip_entry`.
 /// 5. Else: `AskUser`.
 pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> HintResolution {
+    resolve_hint_source_with_tuid(story_path, story, None, index)
+}
+
+/// [`resolve_hint_source`] for a story that may carry an IFDB tuid (see
+/// [`identity_title`]); `HintStory` has no field for it, so it travels beside.
+pub fn resolve_hint_source_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+) -> HintResolution {
     let HintStory { ifid, title, documents: _ } = story;
 
     // Step 0 (SQ-1690): the game's documents folder.
-    if let Some(found) = resolve_in_story_documents(story_path, story, index) {
+    if let Some(found) = resolve_in_story_documents_with_tuid(story_path, story, tuid, index) {
         return found;
     }
 
@@ -675,7 +724,7 @@ pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &Hint
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if let Ok(Some(entry)) = find_hint_entry_in_zip(story_path, HintTarget { stem: &stem, title, ifid }) {
+        if let Ok(Some(entry)) = find_hint_entry_in_zip(story_path, HintTarget { stem: &stem, title, ifid }, tuid) {
             return HintResolution::ZipEntry { zip_path: story_path.to_path_buf(), entry };
         }
     }
@@ -721,8 +770,8 @@ pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &Hint
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
                     .collect();
                 let target = HintTarget { stem: &story_stem, title, ifid };
-                let tied = identity_ties(target, &names);
-                if let Some(chosen) = pick_hint_candidate(target, names) {
+                let tied = identity_ties(target, tuid, &names);
+                if let Some(chosen) = pick_hint_candidate(target, tuid, names) {
                     for path in &hint_files {
                         if path.file_name().and_then(|n| n.to_str()) == Some(chosen.as_str()) {
                             return HintResolution::File(path.clone());
@@ -747,7 +796,7 @@ pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &Hint
             // Step 4: look inside sibling ZIPs for a hint entry, story-aware.
             zips.sort();
             for zip_path in zips {
-                if let Ok(Some(entry_name)) = find_hint_entry_in_zip(&zip_path, HintTarget { stem: &story_stem, title, ifid }) {
+                if let Ok(Some(entry_name)) = find_hint_entry_in_zip(&zip_path, HintTarget { stem: &story_stem, title, ifid }, tuid) {
                     return HintResolution::ZipEntry { zip_path, entry: entry_name };
                 }
             }
@@ -758,11 +807,11 @@ pub fn resolve_hint_source(story_path: &Path, story: HintStory<'_>, index: &Hint
 }
 
 /// The names in `names` that [`hint_matches_identity`] ties to `target.ifid`.
-fn identity_ties(target: HintTarget<'_>, names: &[String]) -> Vec<String> {
+fn identity_ties(target: HintTarget<'_>, tuid: Option<&str>, names: &[String]) -> Vec<String> {
     if target.ifid.is_empty() {
         return Vec::new();
     }
-    names.iter().filter(|n| hint_matches_identity(n, target.ifid)).cloned().collect()
+    names.iter().filter(|n| hint_matches_identity_with_tuid(n, target.ifid, tuid)).cloned().collect()
 }
 
 /// Step 0 of [`resolve_hint_source`] for a whole story: the hint program(s) in its
@@ -771,15 +820,30 @@ fn identity_ties(target: HintTarget<'_>, names: &[String]) -> Vec<String> {
 /// no name/IFID guessing applies. Public so the story browser's hint status asks
 /// the very same question the Hints tab does.
 pub fn resolve_in_story_documents(story_path: &Path, story: HintStory<'_>, index: &HintIndex) -> Option<HintResolution> {
+    resolve_in_story_documents_with_tuid(story_path, story, None, index)
+}
+
+/// [`resolve_in_story_documents`] for a story that may carry an IFDB tuid.
+pub fn resolve_in_story_documents_with_tuid(
+    story_path: &Path,
+    story: HintStory<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+) -> Option<HintResolution> {
     let dir = story.documents?;
     let stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
-    resolve_in_documents(dir, HintTarget { stem: &stem, title: story.title, ifid: story.ifid }, index)
+    resolve_in_documents(dir, HintTarget { stem: &stem, title: story.title, ifid: story.ifid }, tuid, index)
 }
 
 /// Step 0 of [`resolve_hint_source`]: the hint programs in the game's documents
 /// folder, or `None` when the folder holds none (the caller falls back to the
 /// old rules). Only the folder's own top-level files count.
-fn resolve_in_documents(dir: &Path, target: HintTarget<'_>, index: &HintIndex) -> Option<HintResolution> {
+fn resolve_in_documents(
+    dir: &Path,
+    target: HintTarget<'_>,
+    tuid: Option<&str>,
+    index: &HintIndex,
+) -> Option<HintResolution> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -798,7 +862,7 @@ fn resolve_in_documents(dir: &Path, target: HintTarget<'_>, index: &HintIndex) -
         }
     }
     let names: Vec<String> = files.iter().filter_map(|p| p.file_name()?.to_str().map(String::from)).collect();
-    Some(match match_hint_sidecar(target, &names) {
+    Some(match match_hint_sidecar_with_tuid(target, tuid, &names) {
         HintPick::One(i) => HintResolution::File(files.swap_remove(i)),
         HintPick::Ambiguous | HintPick::NoMatch => HintResolution::Choose(files),
     })
@@ -810,7 +874,7 @@ fn resolve_in_documents(dir: &Path, target: HintTarget<'_>, index: &HintIndex) -
 /// Applies the same tiers as [`pick_hint_candidate`]: a story-stem match wins;
 /// a lone generic entry is used; multiple generics with no story match are
 /// ambiguous and yield `None`.
-fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>) -> io::Result<Option<String>> {
+fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>, tuid: Option<&str>) -> io::Result<Option<String>> {
     let file = std::fs::File::open(zip_path)?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -819,7 +883,7 @@ fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>) -> io::Result
         let entry = zip
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
         // Only the bare filename portion needs to match the pattern.
         let basename = name.rsplit('/').next().unwrap_or(&name);
         if is_hint_sidecar(basename) {
@@ -829,7 +893,7 @@ fn find_hint_entry_in_zip(zip_path: &Path, target: HintTarget<'_>) -> io::Result
     // Rank by the bare filename, but return the full entry path.
     let basename_of = |n: &str| n.rsplit('/').next().unwrap_or(n).to_string();
     let basenames: Vec<String> = matches.iter().map(|n| basename_of(n)).collect();
-    match pick_hint_candidate(target, basenames) {
+    match pick_hint_candidate(target, tuid, basenames) {
         Some(chosen) => Ok(matches.into_iter().find(|n| basename_of(n) == chosen)),
         None => Ok(None),
     }
@@ -939,11 +1003,8 @@ pub struct DiskStories {
 /// [`mounted_stories`], keeping the difference between "not a disk" and "a disk
 /// with nothing playable on it" (see [`DiskScan`]).
 pub fn scan_mounted_stories(path: &Path) -> DiskScan {
-    let Ok(raw) = std::fs::read(path) else { return DiskScan::NotADisk };
-    if blorb::medium::DiskImage::detect(&raw).is_none() {
-        return DiskScan::NotADisk;
-    }
-    let Ok(disk) = mount_disk(path, raw) else { return DiskScan::NotADisk };
+    let Some(file) = blorb::image::open_disk(path) else { return DiskScan::NotADisk };
+    let Ok(disk) = mount_disk(path, &file) else { return DiskScan::NotADisk };
     let format = disk.format();
     let mut stories: Vec<_> = disk
         .stories()
@@ -1016,7 +1077,15 @@ struct ScottScan {
 /// the candidates, so the 6502 emulation runs once per candidate: it used to run
 /// here and again in a separate diagnosis walk (SQ-1691).
 fn scott_disk_scan(disk: &blorb::medium::MountedDisk) -> ScottScan {
-    let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+    // A CD read by sector holds no Scott Adams program: those ship on floppies
+    // and cassettes, and the scan below reads EVERY file on the disk to find
+    // one — 300 MB of the Masterpieces CD for an answer that is always empty
+    // (SQ-1761). The Commodore, Atari and Apple II media it exists for all
+    // mount in memory.
+    if disk.is_file_backed() {
+        return ScottScan { stories: Vec::new(), crunched: None };
+    }
+    let already: Vec<String> = disk.story_names();
     let mut candidates: Vec<(String, Vec<u8>)> = disk.contents();
     if disk.format() == blorb::medium::DiskImage::AtariDos2 {
         if let Some(image) = disk.read_named(blorb::atr::IMAGE_ENTRY) {
@@ -1194,8 +1263,8 @@ fn saga_us_platform_slug(platform: scott::SagaPlatform) -> &'static str {
     }
 }
 
-/// Open the disk image `path`, whose bytes are `raw`, with the other volumes of
-/// its multi-disk release available to it (SQ-0864).
+/// Open the disk image `path`, already opened as `file`, with the other volumes
+/// of its multi-disk release available to it (SQ-0864).
 ///
 /// **The one place `app` mounts a disk**, and the reason it is one place: a
 /// story can live on no single floppy. The Apple II 5.25-inch presses of
@@ -1216,9 +1285,113 @@ fn saga_us_platform_slug(platform: scott::SagaPlatform) -> &'static str {
 /// because there is nothing left to drift.
 fn mount_disk(
     path: &Path,
-    raw: Vec<u8>,
+    file: &blorb::image::DiskFile,
 ) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
-    cli_host::disk_set::mount_at(path, raw)
+    cli_host::disk_set::mount_file_at(path, file)
+}
+
+/// [`read_story_file`]'s disk-image arm: the story `want` names (or the format's
+/// tiebreak) off `file`, which the caller has already opened and so already paid
+/// to read (SQ-1762).
+fn read_story_off_disk(
+    path: &Path,
+    want: Option<&str>,
+    file: &blorb::image::DiskFile,
+) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
+    // An original release floppy, whichever machine pressed it (SQ-0719,
+    // SQ-0837, SQ-0840). One mount path answers for every format: take the file
+    // whose CONTENT is a story, because a release disk's names are a tiebreak
+    // and never a guarantee — AmigaDOS has no extensions at all, and every Atari
+    // ST story is called `STORY.DAT`.
+    let disk = mount_disk(path, file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    // A named story is the browser's row (SQ-0859): the picker listed every
+    // story on the image and this is the one the player chose, so it is
+    // looked up by that same name and NOT quietly replaced by the tiebreak
+    // if it has gone — an image edited between the scan and the launch must
+    // say so rather than open a different game.
+    if let Some(want) = want {
+        // A named story is either one `disk.stories()` already answers for
+        // (Z-code/Glulx/Blorb), or a Scott Adams program file `stories()`
+        // never lists — a Commodore *Mysterious Adventures* row (SQ-1414).
+        //
+        // `story_named` rather than a scan of `stories()`: on a CD it reads the
+        // one story and not the shelf (SQ-1761).
+        let found = disk
+            .story_named(want)
+            .or_else(|| {
+                scott_disk_stories(&disk)
+                    .into_iter()
+                    .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))
+            });
+        return match found {
+            // `image_for`, not `format`: on a hybrid disc the story's own
+            // half of the platter decides, so a DOS build sitting on a
+            // Macintosh filesystem reports DOS and advertises the IBM PC's
+            // interpreter number rather than the Macintosh's (SQ-0876).
+            // Every other medium answers its one format, as before.
+            Some(story) => {
+                let image = disk.image_for(&story.name);
+                Ok((story.bytes, Some(image)))
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no game named '{want}' on the disk image {}", path.display()),
+            )),
+        };
+    }
+    if let Some(story) = disk.story() {
+        let image = disk.image_for(&story.name);
+        return Ok((story.bytes, Some(image)));
+    }
+    // `MountedDisk::story`'s tiebreak is Z-code/Glulx/Blorb-only by
+    // design (`scott_disk_stories`'s own doc), so it answers `None` for
+    // a disk whose one story is a Scott Adams database — every Atari
+    // 8-bit or Apple II US S.A.G.A. side (SQ-1470). A bare `lanthorn
+    // <disk.atr>` launch names no entry (`startup.rs`: "the format's own
+    // tiebreak"), and has to reach that one candidate the same way
+    // `scott-cli` does without `--story`. Ambiguous (zero, or more than
+    // one) falls through to the refusal below, exactly as before.
+    let ScottScan { stories: mut scott, crunched } = scott_disk_scan(&disk);
+    if scott.len() == 1 {
+        let story = scott.remove(0);
+        let image = disk.image_for(&story.name);
+        return Ok((story.bytes, Some(image)));
+    }
+    // SQ-1488: an honest, specific refusal for a disk whose one program
+    // is crunched and could not be turned into a playable game — rather
+    // than the generic "no story file" message below, which used to be
+    // the only thing a disk like the Hulk collection's could ever say
+    // (every file scanned, none of them a Scott table in the clear).
+    if scott.is_empty() {
+        if let Some(crunched) = crunched {
+            let name = crunched.name();
+            let reason = match crunched {
+                CrunchedProgram::NotUnpacked(_) => "lanthorn could not unpack it",
+                CrunchedProgram::Unrecognised(_) => {
+                    "lanthorn unpacked it, but it is not a Scott Adams game lanthorn recognises"
+                }
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the disk image {} holds a crunched program ('{name}') — {reason}",
+                    path.display(),
+                ),
+            ));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "no game file on the disk image {} ({} files{}; is this the boot disk?)",
+            path.display(),
+            disk.file_count(),
+            // Only some formats keep a volume name; the message says so
+            // when there is one and reads naturally when there is not.
+            disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default(),
+        ),
+    ))
 }
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
@@ -1236,112 +1409,20 @@ fn mount_disk(
 /// what a bare path has always opened, and what every single-story disk and
 /// single-story archive means whatever is passed.
 fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
-    let raw = std::fs::read(path)?;
-    // An original release floppy, whichever machine pressed it (SQ-0719,
-    // SQ-0837, SQ-0840). One mount path answers for every format: take the file
-    // whose CONTENT is a story, because a release disk's names are a tiebreak
-    // and never a guarantee — AmigaDOS has no extensions at all, and every Atari
-    // ST story is called `STORY.DAT`.
-    //
-    // `detect` first because `mount` consumes the bytes, and a plain story file
-    // has to fall through to the paths below with them intact.
-    if blorb::medium::DiskImage::detect(&raw).is_some() {
-        let disk = mount_disk(path, raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        // A named story is the browser's row (SQ-0859): the picker listed every
-        // story on the image and this is the one the player chose, so it is
-        // looked up by that same name and NOT quietly replaced by the tiebreak
-        // if it has gone — an image edited between the scan and the launch must
-        // say so rather than open a different game.
-        if let Some(want) = want {
-            // A named story is either one `disk.stories()` already answers for
-            // (Z-code/Glulx/Blorb), or a Scott Adams program file `stories()`
-            // never lists — a Commodore *Mysterious Adventures* row (SQ-1414).
-            let found = disk
-                .stories()
-                .into_iter()
-                .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))
-                .or_else(|| {
-                    scott_disk_stories(&disk)
-                        .into_iter()
-                        .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))
-                });
-            return match found {
-                // `image_for`, not `format`: on a hybrid disc the story's own
-                // half of the platter decides, so a DOS build sitting on a
-                // Macintosh filesystem reports DOS and advertises the IBM PC's
-                // interpreter number rather than the Macintosh's (SQ-0876).
-                // Every other medium answers its one format, as before.
-                Some(story) => {
-                    let image = disk.image_for(&story.name);
-                    Ok((story.bytes, Some(image)))
-                }
-                None => Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no story named '{want}' on the disk image {}", path.display()),
-                )),
-            };
-        }
-        if let Some(story) = disk.story() {
-            let image = disk.image_for(&story.name);
-            return Ok((story.bytes, Some(image)));
-        }
-        // `MountedDisk::story`'s tiebreak is Z-code/Glulx/Blorb-only by
-        // design (`scott_disk_stories`'s own doc), so it answers `None` for
-        // a disk whose one story is a Scott Adams database — every Atari
-        // 8-bit or Apple II US S.A.G.A. side (SQ-1470). A bare `lanthorn
-        // <disk.atr>` launch names no entry (`startup.rs`: "the format's own
-        // tiebreak"), and has to reach that one candidate the same way
-        // `scott-cli` does without `--story`. Ambiguous (zero, or more than
-        // one) falls through to the refusal below, exactly as before.
-        let ScottScan { stories: mut scott, crunched } = scott_disk_scan(&disk);
-        if scott.len() == 1 {
-            let story = scott.remove(0);
-            let image = disk.image_for(&story.name);
-            return Ok((story.bytes, Some(image)));
-        }
-        // SQ-1488: an honest, specific refusal for a disk whose one program
-        // is crunched and could not be turned into a playable game — rather
-        // than the generic "no story file" message below, which used to be
-        // the only thing a disk like the Hulk collection's could ever say
-        // (every file scanned, none of them a Scott table in the clear).
-        if scott.is_empty() {
-            if let Some(crunched) = crunched {
-                let name = crunched.name();
-                let reason = match crunched {
-                    CrunchedProgram::NotUnpacked(_) => "lanthorn could not unpack it",
-                    CrunchedProgram::Unrecognised(_) => {
-                        "lanthorn unpacked it, but it is not a Scott Adams game lanthorn recognises"
-                    }
-                };
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "the disk image {} holds a crunched program ('{name}') — {reason}",
-                        path.display(),
-                    ),
-                ));
-            }
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "no story file on the disk image {} ({} files{}; is this the boot disk?)",
-                path.display(),
-                disk.file_count(),
-                // Only some formats keep a volume name; the message says so
-                // when there is one and reads naturally when there is not.
-                disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default(),
-            ),
-        ));
-    }
+    // The file is read ONCE (SQ-1762): a disk image comes back mounted-ready and
+    // is shared with every other step of the launch; anything else comes back as
+    // the bytes read to find that out.
+    let raw = match blorb::image::open(path)? {
+        blorb::image::Opened::Disk(file) => return read_story_off_disk(path, want, &file),
+        blorb::image::Opened::Plain(raw) => raw,
+    };
     if raw.starts_with(ZIP_MAGIC) {
         // A ZIP is somebody's DOWNLOAD, not a lanthorn container (the `.lanthorn`
         // archive is that, and it is a zip too — see `crate::archive`). So it is
         // opened the way a release floppy is: by asking what is INSIDE each
         // entry, not what its name claims. SQ-1085.
         // A named entry is the browser's row (SQ-1098), exactly as it is on a
-        // disk image twenty lines above: the picker listed every story in the
+        // disk image ([`read_story_off_disk`]): the picker listed every story in the
         // archive and this is the one the player chose.
         let scan = zip_story(path, want)?;
         return match scan.story {
@@ -1349,7 +1430,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
             None if want.is_some() => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no story named '{}' in the zip {}",
+                    "no game named '{}' in the zip {}",
                     want.unwrap_or_default(),
                     path.display(),
                 ),
@@ -1372,7 +1453,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 } else {
                     format!(
                         "; it holds {images} disk image{}, which lanthorn does not run from \
-                         inside a zip — unpack them into your story directory and open one \
+                         inside a zip — unpack them into your game directory and open one \
                          of those",
                         if images == 1 { "" } else { "s" },
                     )
@@ -1380,8 +1461,8 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "no story file inside the zip {} ({} entr{} read; none is a Blorb, \
-                         a Z-machine story, a Glulx image or a Scott Adams database{})",
+                        "no game file inside the zip {} ({} entr{} read; none is a Blorb, \
+                         a Z-machine game, a Glulx image or a Scott Adams database{})",
                         path.display(),
                         scan.examined,
                         if scan.examined == 1 { "y" } else { "ies" },
@@ -1468,7 +1549,7 @@ fn for_each_zip_entry(
         if declared == 0 || declared > MAX_ZIP_ENTRY || declared > budget {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
         let mut buf = Vec::new();
         (&mut entry).take(MAX_ZIP_ENTRY + 1).read_to_end(&mut buf)?;
         budget = budget.saturating_sub(buf.len() as u64);
@@ -1587,7 +1668,7 @@ pub fn zip_entry_names(path: &Path) -> io::Result<Vec<String>> {
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if !entry.is_dir() {
-            out.push(entry.name().to_string());
+            out.push(entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned());
         }
     }
     Ok(out)
@@ -1899,7 +1980,7 @@ fn apple_scrambled_picture_files(boot: &Path, side: &Path) -> Vec<(String, Vec<u
     let Some(look) = saga_apple_look_table(boot) else {
         return Vec::new();
     };
-    let Ok(raw) = std::fs::read(side) else {
+    let Ok(raw) = blorb::image::read_bytes(side) else {
         return Vec::new();
     };
     let Some(image) = blorb::medium::apple_raw_sectors(&raw) else {
@@ -1932,13 +2013,10 @@ fn apple_scrambled_picture_files(boot: &Path, side: &Path) -> Vec<(String, Vec<u
 
 /// One disk image's picture files, by `platform`'s naming rule.
 fn picture_files_on(path: &Path, platform: scott::SagaPlatform) -> Vec<(String, Vec<u8>)> {
-    let Ok(raw) = std::fs::read(path) else {
+    let Some(file) = blorb::image::open_disk(path) else {
         return Vec::new();
     };
-    if blorb::medium::DiskImage::detect(&raw).is_none() {
-        return Vec::new();
-    }
-    let Ok(disk) = mount_disk(path, raw) else {
+    let Ok(disk) = mount_disk(path, &file) else {
         return Vec::new();
     };
     let names: fn(&str) -> bool = match platform {
@@ -1977,9 +2055,8 @@ pub fn saga_apple_scrambled(path: &Path) -> bool {
 /// whether this is one of §7.4's scrambled three, and which close-ups it draws
 /// — so that neither has to know how a `.dsk` is opened.
 fn saga_apple_m2(path: &Path) -> Option<Vec<u8>> {
-    let raw = std::fs::read(path).ok()?;
-    blorb::medium::DiskImage::detect(&raw)?;
-    let disk = mount_disk(path, raw).ok()?;
+    let file = blorb::image::open_disk(path)?;
+    let disk = mount_disk(path, &file).ok()?;
     disk.read_named("M2")
 }
 
@@ -2067,7 +2144,7 @@ pub fn saga_companion_side(path: &Path) -> Option<PathBuf> {
 /// here answers with.
 pub fn saga_atari_companion_side(path: &Path) -> Option<Vec<u8>> {
     let side = saga_companion_side(path)?;
-    std::fs::read(&side).ok()
+    blorb::image::read_bytes(&side).ok()
 }
 
 /// Load story bytes from `path`, restricted to **Z-code** images.
@@ -2080,11 +2157,11 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
         LoadedStory::ZCode(b) => Ok(b),
         LoadedStory::Glulx(_) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Glulx story files are not supported on this path".to_string(),
+            "Glulx game files are not supported on this path".to_string(),
         )),
         LoadedStory::Scott(_) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Scott Adams story files are not supported on this path".to_string(),
+            "Scott Adams game files are not supported on this path".to_string(),
         )),
     }
 }
@@ -2184,11 +2261,11 @@ fn unrunnable(bytes: &[u8]) -> String {
     let text: String =
         head.iter().map(|b| if (0x20..0x7f).contains(b) { char::from(*b) } else { '.' }).collect();
     let what = match blorb::medium::DiskImage::detect(bytes) {
-        Some(image) => format!("it is a {} disk image — a container, not a story", image.label()),
+        Some(image) => format!("it is a {} disk image — a container, not a game", image.label()),
         None => "no format lanthorn reads claims it".to_string(),
     };
     format!(
-        "not a story file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \
+        "not a game file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \
          not a Glulx image, not a Scott Adams database, and its first 64 bytes are not a \
          Z-machine header (ZMSD §11.1)",
         bytes.len(),
@@ -2245,8 +2322,8 @@ pub fn read_zip_entry(
         let mut entry = zip
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if pred(entry.name()) {
-            let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?.into_owned();
+        if pred(&name) {
             // Capped read (one byte past the cap detects overflow without ever
             // buffering the excess): the entry's declared size is attacker
             // data, so the *inflated* stream itself is what gets bounded.
@@ -2447,6 +2524,50 @@ mod tests {
         assert_eq!(dl.filename, "zork2inv.z5", "identity, and only identity, decides the match");
     }
 
+    /// IFDB tuid of Zork I (ifdb.org/viewgame?id=0dbnusxunq7fw5ro).
+    const ZORK1_TUID: &str = "0dbnusxunq7fw5ro";
+    /// A build compiled from the public ZIL source: no `known_titles.tsv` entry.
+    const UNKNOWN_IFID: &str = "ZCODE-0-990101-0000";
+
+    #[test]
+    fn an_unknown_ifid_with_an_infocom_tuid_gets_that_games_invisiclues() {
+        let dl = hint_download_for_with_tuid(UNKNOWN_IFID, Some(ZORK1_TUID)).expect("tuid names Zork I");
+        assert_eq!(dl.filename, "zork1inv.z5");
+        assert!(hint_matches_identity_with_tuid("zork1inv.z5", UNKNOWN_IFID, Some(ZORK1_TUID)));
+        assert!(!hint_matches_identity_with_tuid("zork2inv.z5", UNKNOWN_IFID, Some(ZORK1_TUID)));
+    }
+
+    #[test]
+    fn an_unknown_ifid_with_a_non_infocom_tuid_gets_nothing() {
+        assert!(hint_download_for_with_tuid(UNKNOWN_IFID, Some("notaninfocomtuid")).is_none());
+        assert!(!hint_matches_identity_with_tuid("zork1inv.z5", UNKNOWN_IFID, Some("notaninfocomtuid")));
+    }
+
+    #[test]
+    fn a_known_ifid_beats_the_tuid() {
+        // Zork II's build, linked (wrongly) to Zork I's page: the IFID wins.
+        let dl = hint_download_for_with_tuid("ZCODE-48-840904-D899", Some(ZORK1_TUID)).unwrap();
+        assert_eq!(dl.filename, "zork2inv.z5");
+        assert!(hint_matches_identity_with_tuid("zork2inv.z5", "ZCODE-48-840904-D899", Some(ZORK1_TUID)));
+        assert!(!hint_matches_identity_with_tuid("zork1inv.z5", "ZCODE-48-840904-D899", Some(ZORK1_TUID)));
+    }
+
+    #[test]
+    fn sidecar_matching_uses_the_tuid_only_for_an_unknown_ifid() {
+        let target = HintTarget { stem: "story", title: "", ifid: UNKNOWN_IFID };
+        let names = ["zork2inv.z5", "zork1inv.z5"];
+        assert_eq!(match_hint_sidecar_with_tuid(target, Some(ZORK1_TUID), &names), HintPick::One(1));
+        assert_eq!(match_hint_sidecar_with_tuid(target, None, &names), HintPick::NoMatch);
+        assert_eq!(match_hint_sidecar(target, &names), HintPick::NoMatch);
+    }
+
+    #[test]
+    fn an_unknown_ifid_without_a_tuid_gets_nothing() {
+        assert!(hint_download_for_with_tuid(UNKNOWN_IFID, None).is_none());
+        assert!(hint_download_for(UNKNOWN_IFID).is_none());
+        assert!(!hint_matches_identity("zork1inv.z5", UNKNOWN_IFID));
+    }
+
     /// A local sidecar sitting beside a disk image is associated by identity —
     /// comparing the two filenames cannot do it.
     #[test]
@@ -2466,9 +2587,9 @@ mod tests {
     /// clues off them.
     #[test]
     fn title_keys_match_whole_titles_so_near_namesakes_dont_collide() {
-        assert_eq!(identity_hint_key("ZCODE-88-840726-A129"), Some("zork1"));
-        assert_eq!(identity_hint_key("ZCODE-34-871124-0000"), None, "Mini-Zork I");
-        assert_eq!(identity_hint_key("ZCODE-15-840330-0000"), None, "Zork I Demo");
+        assert_eq!(identity_hint_key("ZCODE-88-840726-A129", None), Some("zork1"));
+        assert_eq!(identity_hint_key("ZCODE-34-871124-0000", None), None, "Mini-Zork I");
+        assert_eq!(identity_hint_key("ZCODE-15-840330-0000", None), None, "Zork I Demo");
     }
 
     #[test]
@@ -2870,7 +2991,7 @@ mod tests {
         );
         let err = load_story(&path).expect_err("a save archive is not a game");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("no story file inside the zip"), "{err}");
+        assert!(err.to_string().contains("no game file inside the zip"), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2989,7 +3110,7 @@ mod tests {
         junk[0] = 6;
         let err = extract_story(junk).expect_err("a version byte is not a header");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("not a story file"), "{err}");
+        assert!(err.to_string().contains("not a game file"), "{err}");
 
         // …and every version the Z-machine runs still loads when the header is
         // real, so the gate is on the header and not on the version byte.

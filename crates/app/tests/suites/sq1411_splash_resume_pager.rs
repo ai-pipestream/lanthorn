@@ -155,7 +155,7 @@ fn boot_amiga_zork0() -> Option<GameSession> {
 fn render_state() -> AppState {
     let mut st = AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    st.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st
 }

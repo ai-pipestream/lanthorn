@@ -43,7 +43,7 @@ pub use input::{
     key_press, read_byte_or_eof, read_byte_stdin, read_char_from_line, read_line_or_eof,
     read_line_stdin,
 };
-pub use menu::{Emission, MENU_COMMAND, MenuBlock, MenuTracker, NavKey, Typed, is_menu_request};
+pub use menu::{Emission, MENU_COMMAND, MenuBlock, MenuPart, MenuTracker, NavKey, Typed, is_menu_request};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use pager::{Pager, wait_for_keypress};
 pub use pin::{
@@ -56,7 +56,7 @@ pub use storage::{
     game_dir_with_key, is_yes, known_loose_build, overwrite_warning, pick_save,
     resolve_save_input, save_list_line, story_key, story_key_at, story_key_for, StoryOrigin,
 };
-pub use titles::known_title;
+pub use titles::{known_title, title_for_tuid};
 pub use term::{
     TerminalGuard, cursor_reset, cursor_steady_bar, cursor_steady_block, cursor_steady_underline,
     end_raw_mode, osc_reset_bg, osc_reset_fg, osc_set_bg, osc_set_fg, page_bg_escape,

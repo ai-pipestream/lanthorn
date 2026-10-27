@@ -1,6 +1,6 @@
 # Troubleshooting
 
-For anyone whose screen, sound or story isn't behaving — the things players
+For anyone whose screen, sound or game isn't behaving — the things players
 actually run into, and what to do about each.
 
 ## The map (or a border control) shows boxes or question marks instead of glyphs
@@ -25,13 +25,13 @@ session with no protocol support gets too. `/dump-terminal` shows exactly
 what lanthorn detected versus assumed about the terminal you're on, and is
 the thing to attach to a bug report if art still looks wrong.
 
-## A story seems to have hung
+## A game seems to have hung
 
-It probably hasn't. A Glulx story whose turn runs for ten seconds without ever
+It probably hasn't. A Glulx game whose turn runs for ten seconds without ever
 asking for input is taken to be caught in a runaway loop: lanthorn abandons
 that turn rather than freezing on it, and the map, your scrollback and your
 ability to quit all keep working throughout. A record of what happened lands
-in `~/.lanthorn/crash.log`.
+in `crash.log` in your logs folder (see below).
 
 ## On Windows: I closed the console and lost my progress
 
@@ -42,21 +42,86 @@ only: changing your terminal's font size mid-session isn't picked up until
 you restart lanthorn, because Windows has no way for lanthorn to re-measure
 the terminal on the fly. macOS and Linux pick the change up immediately.
 
-## My story file disappeared after I opened it in Frotz
+## My game file disappeared after I opened it in Frotz
 
-Frotz relocates the story file it opens rather than leaving it in place. If
+Frotz relocates the game file it opens rather than leaving it in place. If
 a game vanishes from where you expect it, check wherever Frotz moved it to
 — lanthorn didn't touch it.
 
 ## Where does lanthorn keep everything?
 
-Config and styles: `~/.lanthorn/config.toml` and `~/.lanthorn/style.toml`.
-Saves and per-game sidecars: `~/.lanthorn/saves/<story>.save/`, one
-directory per game (a disk image keys on its release and serial rather than
-a filename, so different builds of the same story never collide). Crash
-records: `~/.lanthorn/crash.log`. Terminal diagnostics:
-`~/.lanthorn/dump-terminal.log`. `--user-dir` moves the whole `.lanthorn`
-tree; `--data-dir` moves just the saves.
+lanthorn keeps its files in four folders, which on a new install are your
+platform's standard ones:
+
+| | config | data | cache | logs |
+|---|---|---|---|---|
+| macOS and Linux | `~/.config/lanthorn` | `~/.local/share/lanthorn` | `~/.cache/lanthorn` | `~/.local/state/lanthorn` |
+| Windows | `%APPDATA%\lanthorn` | the same folder | `%LOCALAPPDATA%\lanthorn` | `%LOCALAPPDATA%\lanthorn\logs` |
+
+On macOS and Linux the `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and
+`XDG_STATE_HOME` variables move them, as usual (a blank or relative value is
+ignored). macOS uses these terminal-tool folders, not `~/Library`, so your
+config can travel with your dotfiles.
+
+- **Config folder:** `config.toml` and `style.toml`.
+- **Data folder:** saves and per-game sidecars in `saves/<story>.save/`, one
+  directory per game (a disk image keys on its release and serial rather than
+  a filename, so different builds of the same game never collide); other
+  players' trees in `users/`; each game's `documents/` folder; the system disks
+  and Kickstart ROMs you drop in.
+- **Logs folder:** `crash.log`, `trace.log`, `stderr.log` and what
+  `/dump-windows`, `/dump-cells` and `/dump-terminal` write. Attach these to a
+  bug report. With `~/.lanthorn` or `--user-dir` they sit in that one folder.
+- **Cache folder:** only things lanthorn can rebuild on its own, which is safe
+  to delete.
+
+If you already have a `~/.lanthorn` folder from an earlier version with your
+settings or saves in it (a `config.toml`, a `style.toml`, saves, or other
+players' `users/`), lanthorn keeps using it for everything, exactly as before;
+nothing is moved. An empty `~/.lanthorn`, or one holding only an empty `saves/`
+folder, is ignored, so it can never hide the settings in the standard folders.
+
+If both `~/.lanthorn` and the standard folders hold your files, lanthorn asks
+which to use before it starts, showing each one's location, when its
+`config.toml` last changed and how many save files it holds. It then offers to
+rename the other set to `<name>.unused-<date>` beside itself so the question
+does not come back; nothing is ever deleted. Say no and your choice applies to
+that launch only. When lanthorn is not running in a terminal (a script, Docker)
+it never stops to ask: it uses the standard folders and prints one line to
+stderr naming both. Passing `--user-dir <folder>` skips all of this. To keep it
+all in one folder of your choosing, pass `--user-dir <folder>`: config, saves,
+documents and cache all go inside it. `--data-dir` moves just the saves.
+
+If you would rather have the old folder in your platform's
+standard places, run `lanthorn --migrate-user-dir`. It shows you every file it
+will move and where to, asks before doing anything, and then quits without
+opening the game. It will not overwrite or merge: if something is already in the
+new folders it stops and tells you what, leaving everything where it was. Add
+`--yes` to skip the question. It only renames; if your computer refuses a move
+(say the new folder is on another disk), it tells you which item to move by hand
+and deletes nothing.
+
+## Reporting a problem
+
+Found something that still isn't right? Open the game that shows the problem
+and type `/report-bug`. lanthorn prints a short summary (version, system,
+terminal, graphics, settings, game, map), copies it to your clipboard if your
+terminal allows it (tmux may not), and saves the full report as
+`report-bug.txt` in your logs folder (see above); the summary's last line,
+`attach:`, names that file.
+
+Then [open an issue](https://github.com/sharkusk/lanthorn/issues/new/choose),
+pick **Bug in Lanthorn**, paste the summary into the form and drag the
+`report-bug.txt` from the `attach:` line into it. The file includes the
+commands you typed this session, so glance through it first. Please
+don't attach commercial game files; the report already names the file and
+release.
+
+If lanthorn won't start at all, include the output of `lanthorn --version`,
+your operating system and your terminal instead, plus `crash.log` if there is one.
+
+Questions and "how do I..." are welcome in
+[Discussions](https://github.com/sharkusk/lanthorn/discussions).
 
 ## Going deeper
 

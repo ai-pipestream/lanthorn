@@ -45,7 +45,7 @@ fn kinds_of(s: &AppState) -> Vec<TranscriptKind> {
 fn an_assist_is_told_from_the_story_by_its_kind_not_its_text() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true; // the introduction has its own case
-    s.push_assist(&Assist::help("this story knows — light · turn on · burn"));
+    s.push_assist(&Assist::help("this game knows — light · turn on · burn"));
     let ours = s.transcript.last().cloned().unwrap();
 
     // A hostile (or merely unlucky) game prints the identical line itself.
@@ -65,8 +65,8 @@ fn an_assist_is_told_from_the_story_by_its_kind_not_its_text() {
 fn on_screen_an_assist_wears_the_mark_and_not_the_words() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true;
-    s.push_assist(&Assist::help("this story knows — light"));
-    assert_eq!(s.transcript.last().unwrap(), "this story knows — light");
+    s.push_assist(&Assist::help("this game knows — light"));
+    assert_eq!(s.transcript.last().unwrap(), "this game knows — light");
     assert!(
         !s.transcript.iter().any(|l| l.starts_with(EXPORT_PREFIX)),
         "no prefix on screen: {:?}",
@@ -85,7 +85,7 @@ fn an_exported_transcript_says_who_was_speaking() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true;
     s.push_transcript_kind("West of House", TranscriptKind::Story);
-    s.push_assist(&Assist::help("this story knows:\nlight · turn on · burn"));
+    s.push_assist(&Assist::help("this game knows:\nlight · turn on · burn"));
     s.push_transcript_kind("style reloaded", TranscriptKind::Meta);
 
     // By kind, not by index: an app-generated line is INSERTED above a trailing
@@ -105,7 +105,7 @@ fn an_exported_transcript_says_who_was_speaking() {
     assert_eq!(at(TranscriptKind::Meta), vec!["style reloaded"], "a slash dump is not ours to attribute this way");
     assert_eq!(
         at(TranscriptKind::Assist),
-        vec![format!("{EXPORT_PREFIX}this story knows:"), "  light · turn on · burn".to_string()],
+        vec![format!("{EXPORT_PREFIX}this game knows:"), "  light · turn on · burn".to_string()],
         "the first line is marked, the continuation hangs rather than being marked twice"
     );
 }
@@ -117,7 +117,7 @@ fn the_transcript_filter_separates_assists_from_the_story() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true;
     s.push_transcript_kind("West of House", TranscriptKind::Story);
-    s.push_assist(&Assist::help("this story knows — light"));
+    s.push_assist(&Assist::help("this game knows — light"));
     s.push_transcript_kind("style reloaded", TranscriptKind::Meta);
 
     let assist_row = kinds_of(&s)
@@ -149,7 +149,7 @@ fn the_introduction_fires_once_and_shows_the_mark_in_force() {
     s.push_assist(&Assist::help("first"));
     assert_eq!(s.transcript[0], preamble('◈'));
     assert!(s.transcript[0].contains('◈'), "the introduction shows the configured mark");
-    assert!(s.transcript[0].contains("story"), "and whose the marked lines are not");
+    assert!(s.transcript[0].contains("game"), "and whose the marked lines are not");
     assert_eq!(s.transcript[1], "first");
 
     for n in 0..20 {
@@ -173,10 +173,10 @@ fn the_introduction_fires_once_and_shows_the_mark_in_force() {
 #[test]
 fn the_first_push_assist_signals_the_intro_line_and_only_that_line() {
     let mut s = AppState::default();
-    s.push_assist(&Assist::help("this story knows — light"));
+    s.push_assist(&Assist::help("this game knows — light"));
 
     assert_eq!(s.transcript[0], preamble('●'), "line 0 is the introduction");
-    assert_eq!(s.transcript[1], "this story knows — light", "line 1 is the turn's own assist");
+    assert_eq!(s.transcript[1], "this game knows — light", "line 1 is the turn's own assist");
 
     assert_eq!(s.assist_intro_line, Some(0), "the signal names exactly the intro's line");
     assert_eq!(
@@ -231,13 +231,13 @@ fn guidance_off_silences_the_whole_set_including_its_introduction() {
     let mut s = AppState::default();
     assert!(s.config.guidance, "the light is on by default");
     s.config.guidance = false;
-    s.push_assist(&Assist::help("this story knows — light"));
+    s.push_assist(&Assist::help("this game knows — light"));
     s.push_assist(&Assist::caution("that cannot be undone."));
     assert!(s.transcript.is_empty(), "guidance off means silence: {:?}", s.transcript);
 
     // And back on, the session still owes the player its introduction.
     s.config.guidance = true;
-    s.push_assist(&Assist::help("this story knows — light"));
+    s.push_assist(&Assist::help("this game knows — light"));
     assert_eq!(s.transcript.len(), 2, "introduction, then the assist: {:?}", s.transcript);
 }
 
@@ -248,7 +248,7 @@ fn guidance_off_silences_the_whole_set_including_its_introduction() {
 fn no_assist_line_is_bracketed_or_a_flush_left_continuation() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true;
-    s.push_assist(&Assist::help("this story knows:\nlight · turn on · burn"));
+    s.push_assist(&Assist::help("this game knows:\nlight · turn on · burn"));
     for line in &s.transcript {
         assert!(!line.starts_with('['), "assist line wears the parser's brackets: {line:?}");
     }
@@ -393,7 +393,7 @@ fn the_register_says_who_is_speaking() {
     assert!(EXPORT_PREFIX.starts_with("Lanthorn"));
     let p = preamble('●');
     assert!(p.starts_with("Lanthorn's Guiding Light"));
-    assert!(p.contains("story"), "the introduction says whose the marked lines are not: {p:?}");
+    assert!(p.contains("game"), "the introduction says whose the marked lines are not: {p:?}");
     assert!(!p.starts_with('[') && !EXPORT_PREFIX.starts_with('['));
     // Short enough to ride on every exported assist line without reflowing it.
     assert!(EXPORT_PREFIX.len() <= 12, "{EXPORT_PREFIX:?}");

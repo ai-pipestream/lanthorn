@@ -198,7 +198,7 @@ still reach in and override any single selector by name.
   only `chrome` carries a background at all, and `chrome` *is* the page — deriving
   the tip from it painted the card in exactly the colours it floats over, which is
   the same thing as not drawing it. `accent` fails the same way one level down,
-  blue ink (SQ-1531; was cyan) with no fill behind it. So the tip borrows `dialog.list_selected`, the
+  cyan ink with no fill behind it. So the tip borrows `dialog.list_selected`, the
   Black-on-Cyan highlight every menu already uses for the row you're on: a real
   surface, and one you've seen before. It takes that highlight's **colours but not
   its weight** — bold reads as "this one" on a single selected row and as a bold
@@ -274,7 +274,16 @@ switches that make lanthorn feel like yours without opening the whole registry.
 - **Transcript text styling** — color each transcript category independently via
   bare selectors — `transcript`, `transcript_input`, `transcript_meta`,
   `transcript_warning`, `transcript_system`, `transcript_crash` (`fg`/`bg`/
-  `bold`/`italic`). Story lines also run through styling rules: built-in ones for
+  `bold`/`italic`). `transcript_input` dresses the command you type in BOTH
+  prompt modes: the command bar's own `> cmd` line, and — in the default inline
+  mode — the span you typed after the game's `>` (a marked run on the story line,
+  `StyleRun::glk_style == GLK_STYLE_TYPED_INPUT`, so the prompt itself stays story
+  text). A game's own input style wins where it states one: Glulx `style_Input`
+  stylehints (bold unless a weight hint says otherwise), or the Z-machine text
+  style and colour at the `@read` that differ from the prompt just printed; its COLOUR only with
+  `honor_game_colours` on. On a game-coloured prompt line the command keeps the
+  game's background and falls back to the game's prompt ink when the chosen colour
+  contrasts too little with it (`colors::MIN_INPUT_CONTRAST`). Story lines also run through styling rules: built-in ones for
   the room-name **location** header (`transcript_location`) and bracketed
   **system** lines such as `[Your score just went up.]` (`transcript_system`),
   plus your own ordered `[[transcript.rule]]` regex rules in `style.toml` (e.g.
@@ -478,7 +487,9 @@ size in pixels), `WindowBorders`, `WindowFrame`, `WindowMask` (a Blorb Pict id),
 the font keys and `FullScreen`. Key meanings come from Windows Glulxe's own
 `config.htm`. So far only `WindowBorders` acts: the borderless-windows
 preference resolves per-game `config.toml` → garglk.ini `wborder` → the `.cfg`
-(`WindowBorders=no` → borderless) → bordered, in the one function
+(`WindowBorders=no` → borderless) → the global `config.toml` `borderless_windows`
+(`Config::borderless_windows`, an `Option<bool>`; absent = no user default, SQ-1740)
+→ bordered, in the one function
 `glk_cfg::resolve_borderless` that boot, `@restart` and the settings screen
 share.
 
@@ -681,7 +692,7 @@ re-seed the new template, or hand-write the new shape from
   forks your game into a silent throwaway copy, types each suggestion into it
   from exactly where you are standing, keeps only the ones that did something and
   throws every copy away — so the line reads `try instead — light` rather than
-  `this story knows — light`, because it is a recommendation and not a lookup.
+  `this game knows — light`, because it is a recommendation and not a lookup.
   Nothing the copy does reaches your screen, your saves or the game you are
   playing: sound and graphics are off in it, it may READ your game's own stored
   data and never write a byte of it, and a story that reaches for `@save` inside
@@ -701,7 +712,7 @@ re-seed the new template, or hand-write the new shape from
   The **word reveal** is the same light pointed the other way. The offer can only
   help once the parser has already said no; click the `◈` on the story pane's
   bottom border (or run `/reveal-words`) and every noun, name or object *already
-  on screen* that this story knows lights up for a few seconds, over the story's
+  on screen* that this game knows lights up for a few seconds, over the story's
   own prose, without moving a line of it. It goes out on your next keystroke, on
   your next turn, or on its own — one press, one look, and you are back in the
   game. It answers the oldest frustration in the genre: a room description names
@@ -711,7 +722,7 @@ re-seed the new template, or hand-write the new shape from
   heard the word `field` at all, so that one stays dark while the rest light.
   The question it asks is **does one of your OBJECTS answer to this word**,
   asked of the story's own things first, and it says so in the corner every
-  time: *words this story knows — not necessarily things that are here*. A
+  time: *words this game knows — not necessarily things that are here*. A
   description that mentions a sword sitting in the next room lights it, and that
   is the point rather than a leak — every word it touches is one the story has
   already printed on your own screen, so it can reveal nothing you have not been
@@ -787,6 +798,16 @@ re-seed the new template, or hand-write the new shape from
   than the pane is drawn centred, and a pinned width wider than it scrolls to
   follow the cursor. Version 6 stories ignore both: they lay out on their own
   fixed pixel screen, which lanthorn scales into whatever pane it has.
+- **Status width** — `status_width` (global `config.toml` and the per-game
+  `config.toml` beside the game) decides what width a v4/v5/v7/v8 game is told.
+  `"auto"` (default) plays a throwaway copy of the game before starting it
+  (`zvm::width_probe`, a few milliseconds) and watches whether it re-reads the
+  screen width: a game that does (Inform games, Border Zone) is told the pane's
+  width and told again on every resize; a game that lays its status line out once
+  (older Infocom) is told 80 columns for the whole session and never sees a
+  resize, with the grid narrowed or centred for display. `"fixed"` forces 80,
+  `"pane"` forces the pane's width, for a game the probe misjudged. A pinned
+  `virtual_screen_cols` outranks all three.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
 - **Random seed** — `random_seed` pins the number every engine's random-number

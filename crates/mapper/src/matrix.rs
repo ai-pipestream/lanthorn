@@ -60,11 +60,17 @@ pub enum MatrixCell {
     /// Leaves the layer. The destination is footnoted rather than tagged, because it has no row
     /// in this table to point at.
     LeavesLayer { dest: RoomId },
-    /// Tried, and no path was found. A later OBSERVED loop upgrades this to [`MatrixCell::SelfLoop`];
+    /// Tried, and no path was found -- blocked WHEN TRIED, not for ever: a scan-confirmed exit
+    /// ([`MatrixCell::Exit`]) outranks an older typed refusal. A later OBSERVED loop upgrades this to [`MatrixCell::SelfLoop`];
     /// nothing infers one from the probe alone.
     Probed,
     /// Never tried — the exploration frontier.
     Untried,
+    /// A real exit nobody has walked yet (SQ-1773): an exit scan asked the game and the move
+    /// worked, into a room the map does not hold. Unlike [`MatrixCell::Untried`] this is not a
+    /// maybe -- the game said yes -- and it names NO destination, because the map must not
+    /// reveal a room the player has not seen. Walking it is an ordinary first walk.
+    Exit,
     /// Tried; the story sent the player somewhere different each time (SQ-1257) —
     /// Lost Pig's gnome tunnels are the specimen. Explored, not a frontier, and
     /// names no SINGLE destination because none is stable enough to name: the
@@ -94,6 +100,7 @@ impl MatrixCell {
             MatrixCell::SelfLoop
             | MatrixCell::Probed
             | MatrixCell::Untried
+            | MatrixCell::Exit
             | MatrixCell::Random { .. } => None,
         }
     }
@@ -133,6 +140,15 @@ impl MatrixCell {
 /// the rule from showing both at once.
 pub fn classify(graph: &MapGraph, room: RoomId, dir: Direction) -> MatrixCell {
     classify_with(graph, &ConnIndex::new(graph), room, dir)
+}
+
+/// [`classify`] for every one of [`MATRIX_DIRS`] out of `room`, against ONE connection index --
+/// the whole direction table of a single room, in matrix-column order. For a surface that shows
+/// what the map knows about each way out of the current room (the command band's compass, SQ-1780)
+/// and must agree with the matrix cell for cell, so it asks the same classifier.
+pub fn classify_room(graph: &MapGraph, room: RoomId) -> Vec<(Direction, MatrixCell)> {
+    let idx = ConnIndex::new(graph);
+    MATRIX_DIRS.iter().map(|&d| (d, classify_with(graph, &idx, room, d))).collect()
 }
 
 /// The graph's connections indexed by origin room, built once per [`build`]
@@ -191,9 +207,24 @@ fn classify_with(graph: &MapGraph, idx: &ConnIndex<'_>, room: RoomId, dir: Direc
         if graph.self_loops(room).contains(&dir) {
             return MatrixCell::SelfLoop;
         }
+        // A scan-confirmed exit beats an older typed refusal (SQ-1783): a refusal is a fact about
+        // a moment, and a later scan that found the way open is newer than the `tried` mark.
+        if graph.is_scanned(room) && graph.is_scan_exit(room, dir) {
+            return MatrixCell::Exit;
+        }
         // No edge at all: the room's own record of what has been TYPED here is the only thing
         // that separates a wall from unexplored ground.
-        return if graph.is_tried(room, dir) { MatrixCell::Probed } else { MatrixCell::Untried };
+        if graph.is_tried(room, dir) {
+            return MatrixCell::Probed;
+        }
+        // A room whose exit scan has finished (SQ-1773) KNOWS: a real exit not walked yet is
+        // `Exit`, and a direction the game refused is a wall, not a maybe. Only a room nobody
+        // has scanned keeps the old `Untried`.
+        return if graph.is_scanned(room) {
+            MatrixCell::Probed
+        } else {
+            MatrixCell::Untried
+        };
     };
     if graph.layer_of(dest) != graph.layer_of(room) {
         return MatrixCell::LeavesLayer { dest };
@@ -445,6 +476,19 @@ pub fn build(graph: &MapGraph, layer: LayerId) -> Matrix {
 mod tests {
     use super::*;
     use crate::layer::MAIN_LAYER;
+
+    #[test]
+    fn classify_room_agrees_with_classify_for_every_matrix_direction() {
+        let (g, _) = maze();
+        for room in [1u16, 2, 3, 4] {
+            let all = classify_room(&g, room.into());
+            assert_eq!(all.len(), MATRIX_DIRS.len());
+            for (i, (d, cell)) in all.into_iter().enumerate() {
+                assert_eq!(d, MATRIX_DIRS[i], "matrix-column order");
+                assert_eq!(cell, classify(&g, room.into(), d), "room {room} {d:?}");
+            }
+        }
+    }
 
     /// A miniature of the reference map: a numbered group, one uniquely-named room, and one edge
     /// out of the layer.
@@ -725,5 +769,54 @@ mod tests {
         // The existing OUTBOUND crossing (2 → 9) must never appear as inbound.
         assert!(edges.iter().all(|&(o, _, d)| o != 2 || d != 9));
         assert!(inbound_border_edges(&g, l).iter().all(|&(o, _, _)| g.layer_of(o) != l));
+    }
+
+    /// SQ-1783: a scan-confirmed exit beats an older typed refusal.
+    #[test]
+    fn a_scan_exit_beats_an_older_typed_refusal() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.mark_tried(1, Direction::N);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Probed);
+        g.record_scan(1, &[Direction::N], &[Direction::N]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Exit, "the scan is newer");
+        assert!(g.untried(1).contains(&Direction::N), "offered as unexplored");
+        // It shuts again: the next scan's refusal takes the exit back.
+        g.record_scan(1, &[Direction::N], &[]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Probed);
+    }
+
+    /// SQ-1773: a scanned room KNOWS. A real exit nobody has walked is `Exit`, a direction the
+    /// scan asked and the game refused is a wall (`Probed`), and an unscanned room keeps `Untried`.
+    #[test]
+    fn a_scanned_room_reads_real_exits_and_walls_not_maybes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Elsewhere".into());
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Untried, "unscanned: a maybe");
+        assert_eq!(g.untried(1).len(), 10);
+
+        g.record_scan(1, &[Direction::N, Direction::E, Direction::In], &[Direction::N, Direction::In]);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::Exit);
+        assert_eq!(classify(&g, 1, Direction::In), MatrixCell::Exit, "in/out are exits too");
+        assert_eq!(classify(&g, 1, Direction::E), MatrixCell::Probed, "refused: a wall");
+        assert_eq!(
+            classify(&g, 1, Direction::S),
+            MatrixCell::Probed,
+            "a scanned room has no maybes left"
+        );
+        assert!(!MatrixCell::Exit.is_frontier(), "a yes is not dimmed like a maybe");
+        assert_eq!(g.untried(1), vec![Direction::N, Direction::In], "unexplored = the real exits");
+        assert_eq!(g.scan_walls(1), vec![Direction::E]);
+
+        // Walking it: the edge wins, and it is no longer unexplored.
+        g.add_edge(1, Direction::N, 2);
+        assert_eq!(classify(&g, 1, Direction::N), MatrixCell::OneWay { dest: 2 });
+        assert_eq!(g.untried(1), vec![Direction::In]);
+
+        // A later visit finds the door open: the wall leaves the list and becomes an exit.
+        g.record_scan(1, &[Direction::E], &[Direction::E]);
+        assert_eq!(classify(&g, 1, Direction::E), MatrixCell::Exit);
+        assert!(g.scan_walls(1).is_empty());
     }
 }

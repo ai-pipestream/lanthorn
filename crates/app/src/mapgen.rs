@@ -1166,7 +1166,7 @@ struct RawEdge {
 /// The note every [`EdgeKind::Routine`] edge carries (SQ-1334): the SAME text
 /// regardless of which engine's reader found it, so a consumer never sees two
 /// spellings of the same fact.
-const ROUTINE_NOTE: &str = "decided by the story's code; the way back is declared";
+const ROUTINE_NOTE: &str = "decided by the game's code; the way back is declared";
 
 /// From every declared exit that resolves to a destination — `(origin, dir,
 /// dest)` triples — the `(destination, the direction that reaches it) ->
@@ -1313,7 +1313,7 @@ fn annotate_rooms(map: &mut GeneratedMap) {
             // SQ-1334: the destination came from another room's declared
             // reverse, not from this room's own (unresolvable) code.
             EdgeKind::Routine => {
-                let note = f.note.as_deref().unwrap_or("decided by the story's code");
+                let note = f.note.as_deref().unwrap_or("decided by the game's code");
                 entry.routines.push(format!("{dir}→({note})"));
             }
             _ => {}
@@ -1362,7 +1362,7 @@ fn z_compass(d: Direction) -> Option<zvm::world::Compass> {
 
 fn zmachine_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
     let mem = zvm::memory::Memory::new(bytes.to_vec())
-        .map_err(|e| GenError::Engine(format!("not a readable Z-machine story: {e:?}")))?;
+        .map_err(|e| GenError::Engine(format!("not a readable Z-machine game: {e:?}")))?;
     let wm = zvm::world::WorldModel::discover(&mem);
 
     // Which convention answered. `discover` fills `exit_props` from the Inform
@@ -1374,7 +1374,7 @@ fn zmachine_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
         SourceKind::Zil
     } else {
         return Err(GenError::NoStaticSource(
-            "no static map source: this Z-machine story declares neither the Inform 6 \
+            "no static map source: this Z-machine game declares neither the Inform 6 \
              library's door_dir/*_to exit convention nor ZIL's exit properties, so nothing \
              in the file says where its rooms lead"
                 .into(),
@@ -1448,7 +1448,7 @@ fn zmachine_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
     if room_set.is_empty() {
         return Err(GenError::NoStaticSource(format!(
             "no static map source: the {} exit convention was identified but no object \
-             declares an exit, so this story's map is not in its object table",
+             declares an exit, so this game's map is not in its object table",
             source.as_str()
         )));
     }
@@ -1496,7 +1496,7 @@ fn zmachine_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
                     dest,
                     EdgeKind::Conditional,
                     None,
-                    Some("open only while the story allows it (ZIL CEXIT)".to_string()),
+                    Some("open only while the game allows it (ZIL CEXIT)".to_string()),
                 ),
                 // SQ-1334: a `Code` exit whose destination some other room's
                 // own declared exit gives away (see `declared_to` above).
@@ -1590,7 +1590,7 @@ fn g_direction(c: gvm::world::Compass) -> Direction {
 
 fn glulx_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
     let mem = gvm::memory::Memory::new(bytes.to_vec())
-        .map_err(|e| GenError::Engine(format!("not a readable Glulx story: {e:?}")))?;
+        .map_err(|e| GenError::Engine(format!("not a readable Glulx game: {e:?}")))?;
     let names = gvm::objects::ParseNames::detect(&mem)
         .map_err(|e| GenError::Engine(format!("Glulx object table not readable: {e:?}")))?;
 
@@ -1598,7 +1598,8 @@ fn glulx_map(bytes: &[u8], file: String) -> Result<GeneratedMap, GenError> {
 
     // Inform 7's own map table first — it is the higher authority for any story
     // that has one, since it is what the I7 runtime itself reads.
-    if let Some(w) = gvm::i7map::I7World::detect(&mem, &names) {
+    // SQ-1747: only a world with its `Map_Storage` — a rooms-only one knows no exits.
+    if let Some(w) = gvm::i7map::I7World::detect(&mem, &names).filter(|w| w.has_map()) {
         return Ok(i7_map(&mem, &names, &w, story));
     }
     i6_glulx_map(&mem, &names, story)
@@ -1768,7 +1769,7 @@ fn i6_glulx_map(
 
     if !any_declaration {
         return Err(GenError::NoStaticSource(
-            "no static map source: this Glulx story carries no Inform 7 Map_Storage table \
+            "no static map source: this Glulx game carries no Inform 7 Map_Storage table \
              (so it is not an I7 build this reader recognises) and declares no Inform 6 \
              library door_dir/*_to exits either"
                 .into(),

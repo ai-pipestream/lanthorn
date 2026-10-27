@@ -370,11 +370,13 @@ fn glulx_item_observations_reaches_an_inform_7_object_with_no_printed_name() {
     );
 
     // Confirm the premise directly against the object list: this room really does hold an
-    // object with an empty raw printed name but a real display name.
+    // object the story gives no short name, only parse words. (SQ-1751: the room-contents list
+    // now names such an object by the word the room text used, so the raw name is no longer
+    // empty here; the item tracker below still resolves from the unfiltered object list.)
     let loc = r.location.clone().unwrap();
     let room_objects = s.introspect().unwrap().room_objects_excluding(loc.number, None);
     let unnamed: Vec<_> =
-        room_objects.iter().filter(|o| o.printed_name.is_empty() && o.display_name().is_some()).collect();
+        room_objects.iter().filter(|o| o.words.len() > 1 && o.display_name().is_some()).collect();
     assert!(
         !unnamed.is_empty(),
         "premise: the lobby holds an Inform-7-style object with no printed name: {room_objects:?}"
@@ -1540,4 +1542,112 @@ fn counterfeit_monkey_carried_items_are_tracked_from_the_very_first_inventory_li
 
     let remover = r.items.iter().find(|i| i.words.refers_to("remover")).expect("the R-remover is tracked");
     assert_eq!(remover.location, app::session::ObservedItemLocation::Carried);
+}
+
+
+// ── SQ-1774: a Glulx name a FUNCTION computes ─────────────────────────────
+//
+// The King of Shreds and Patches (Inform 7 build 5J39, Release 12 / 090722,
+// `stories/King_of_Shreds_and_Patches.gblorb`) gives the ink ball on the printing
+// press's table no hardware name and no parse-name array that spells it: what the
+// game prints for it comes from a `short_name` FUNCTION. Before the fix the item
+// tracker's panel and the WHAT-CARRIED column fell through to a single dictionary
+// word of it.
+
+/// Shreds past its title menu (`S`: start without the tutorial) to the first
+/// command prompt in Fletcher's Printworks.
+fn boot_shreds() -> Option<GlulxSession> {
+    let image = glulx_image("King_of_Shreds_and_Patches.gblorb")?;
+    let mut s = GlulxSession::new(image, 80, 24, true, false, false, (1.0, 1.0), None, &[]).ok()?;
+    // Six Enters (the splash), then SPACE (the title card) and `s` (the menu).
+    for _ in 0..6 {
+        s.submit_key(KeyInput::Enter);
+    }
+    for k in [' ', 's'] {
+        s.submit_key(KeyInput::Char(k));
+    }
+    assert_eq!(s.pending_input(), app::session::InputKind::Line, "boot reaches a command prompt");
+    Some(s)
+}
+
+/// The inventory panel's name for each carried item (`TurnResult::items`) and the
+/// WHAT-CARRIED column's (`Introspect::visible_contents` through `vocab::typeable_name`,
+/// the call `command_band::refresh_objects` makes).
+fn glulx_carried_names(s: &GlulxSession, items: &[app::session::ItemObservation]) -> (Vec<String>, Vec<String>) {
+    let panel: Vec<String> = items
+        .iter()
+        .filter(|i| matches!(i.location, app::session::ObservedItemLocation::Carried))
+        .map(|i| i.name.clone())
+        .collect();
+    let player = s.introspect().and_then(|i| i.player_object()).expect("the player is identifiable");
+    let mut vocab = app::vocab::VocabState::default();
+    let vocab = vocab.get(s);
+    let band: Vec<String> = s
+        .introspect()
+        .unwrap()
+        .visible_contents(player)
+        .iter()
+        .filter_map(|o| app::vocab::typeable_name(o, vocab))
+        .collect();
+    (panel, band)
+}
+
+#[test]
+fn shreds_ink_ball_is_named_by_its_function_in_the_panel_and_in_what_carried() {
+    let Some(mut s) = boot_shreds() else {
+        eprintln!("SKIP: gitignored stories/King_of_Shreds_and_Patches.gblorb missing");
+        return;
+    };
+    let r = s.submit("take ink ball");
+    assert!(r.transcript.contains("Taken"), "non-vacuity: {}", r.transcript);
+    let (panel, band) = glulx_carried_names(&s, &r.items);
+    assert!(panel.iter().any(|n| n == "ink ball"), "inventory panel: {panel:?}");
+    assert!(band.iter().any(|n| n == "ink ball"), "WHAT-CARRIED: {band:?}");
+    // Non-vacuity on the premise: the object really has no static printed name.
+    let player = s.introspect().and_then(|i| i.player_object()).unwrap();
+    let ball = s.introspect().unwrap().contents(player).into_iter().find(|o| o.refers_to("ink")).expect("the ink ball");
+    assert_eq!(ball.printed_name, "ink ball", "the function's text is the name");
+}
+
+/// SQ-1785: the gown in Hitchhiker's opening is carried once picked up, in BOTH editions. The
+/// v3 avatar prints "it" and answers to "protag"; Solid Gold r31's (v5) answers to "protagoni"
+/// (the 9-character dictionary), while a global "yourself" (#19, under the globals object)
+/// used to be locked as the player instead, so every carried item read as Vanished.
+fn hhgg_gown_is_carried(file: &str) {
+    let Some(bytes) = story(file) else {
+        eprintln!("SKIP: gitignored stories/{file} missing");
+        return;
+    };
+    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)))
+        .expect("boots without a ZError");
+    let _ = s.submit("");
+    let mut mapper = mapper::mapper::Mapper::default();
+    let mut turn = 0u32;
+    let mut last = None;
+    for cmd in ["turn on light", "get up", "get gown"] {
+        let r = s.submit(cmd);
+        turn += 1;
+        app::session::apply_turn(&mut mapper, cmd, &r, &mut Default::default());
+        app::session::apply_item_observations(&mut mapper, turn, &r);
+        last = Some(r);
+    }
+    let r = last.unwrap();
+    let gown = r.items.iter().find(|o| o.name.contains("gown")).unwrap_or_else(|| {
+        panic!("{file}: the gown is observed after picking it up; items: {:?}", r.items)
+    });
+    assert_eq!(
+        mapper.graph.item(gown.key).unwrap().last_seen,
+        mapper::graph::ItemLocation::Carried,
+        "{file}: the gown is carried"
+    );
+}
+
+#[test]
+fn hhgg_solid_gold_v5_gown_is_carried() {
+    hhgg_gown_is_carried("hitchhiker-invclues-r31-s871119.z5");
+}
+
+#[test]
+fn hhgg_v3_gown_is_carried() {
+    hhgg_gown_is_carried("hitchhiker-r59-s851108.z3");
 }

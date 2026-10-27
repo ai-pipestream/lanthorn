@@ -30,6 +30,12 @@ mod verb_tiers;
 mod border_controls;
 #[path = "suites/return_probe.rs"]
 mod return_probe;
+#[path = "suites/relocation_probe.rs"]
+mod relocation_probe;
+#[path = "suites/chain_probe.rs"]
+mod chain_probe;
+#[path = "suites/exit_scan.rs"]
+mod exit_scan;
 #[path = "suites/declared_exit.rs"]
 mod declared_exit;
 #[path = "suites/room_description.rs"]
@@ -96,6 +102,8 @@ mod sq1283b_shogun_below_decks_fan;
 mod sq1285_bolded_object_name_room;
 #[path = "suites/sq1293_glulx_opening_room.rs"]
 mod sq1293_glulx_opening_room;
+#[path = "suites/sq1747_glulx_first_room_contents.rs"]
+mod sq1747_glulx_first_room_contents;
 #[path = "suites/sq1294_glulx_silent_vehicle_move.rs"]
 mod sq1294_glulx_silent_vehicle_move;
 #[path = "suites/sq1295_glulx_bold_name_below_heading.rs"]
@@ -148,3 +156,5 @@ mod sq1653_superluminal_phantom_screens;
 mod sq1551_host_map_editing;
 #[path = "suites/sq1562_folded_updown_layout.rs"]
 mod sq1562_folded_updown_layout;
+#[path = "suites/zilf_zapf_automap.rs"]
+mod zilf_zapf_automap;

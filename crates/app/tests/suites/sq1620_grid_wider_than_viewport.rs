@@ -117,7 +117,7 @@ const REGRESSION_CELL: (u16, u16) = (8, 16);
 fn state_at(cell_px: (u16, u16), honor: bool) -> app::state::AppState {
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1));
+    st.set_game_picker(Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1)));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st.config.honor_game_colours = honor;
     st

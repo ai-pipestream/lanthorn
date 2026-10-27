@@ -184,6 +184,33 @@ fn the_host_sets_a_zmachine_storys_screen_size() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// SQ-1750: the pane's last column goes to the TUI's scrollbar by default, so a
+/// v4+ story is told one column less than the pane; a host with no scrollbar
+/// column turns that off and the story gets the whole pane, as Glulx does.
+#[test]
+fn a_host_without_a_scrollbar_column_gives_the_story_the_whole_pane() {
+    let story = fixture_path("LostPig.z8");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let width_told = |gutter: Option<bool>| {
+        let home = app::scratch_dir("host-gutter");
+        let mut b = boot(story.clone(), &home);
+        if let Some(g) = gutter {
+            b.state.config.story_scrollbar_gutter = g;
+        }
+        assert!(app::host::screen::set_story_pane(&mut *b.session, &b.state, (90, 28)));
+        let z = app::engine_helpers::zvm_session_opt(&*b.session).unwrap();
+        let w = z.machine.mem.read_byte(0x21);
+        let _ = std::fs::remove_dir_all(&home);
+        w
+    };
+    assert_eq!(width_told(None), 89, "default: the scrollbar column is reserved");
+    assert_eq!(width_told(Some(true)), 89);
+    assert_eq!(width_told(Some(false)), 90, "no gutter: the story gets the whole pane");
+}
+
 // ── Exit save, reset, and the game's own SAVE/RESTORE ─────────────────────────
 
 /// The exit save leaves a resume point the next boot picks up, and the game
@@ -315,6 +342,42 @@ fn a_game_save_answered_by_name_is_what_a_later_restore_reads() {
     // Perturb: the restored game plays on from the saved room.
     let _ = command(&mut b, "north");
     assert_eq!(here(&b).as_deref(), Some("End of Alley"));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// SQ-1807: the outcome of a RESTORE answered through the file prompt carries the
+/// restore turn's own paging, so a host reading turns aloud knows where the
+/// restored history ends and the game's reply ("Ok.") begins.
+#[test]
+fn an_ingame_restore_answered_by_name_reports_where_the_reply_begins() {
+    let story = fixture_path("minizork-r34-s871124.z3");
+    if !story.is_file() {
+        eprintln!("SKIP: {} absent", story.display());
+        return;
+    }
+    let home = app::scratch_dir("host-restore-outcome");
+    let mut b = boot(story, &home);
+    let _ = command(&mut b, "save");
+    assert_eq!(pending_file_prompt(&b.state), Some(FilePrompt::Save));
+    let _ = answer_file_prompt(
+        &mut *b.session, &mut b.mapper, &mut b.state, &b.game_dir, &b.ifid, Some("first"), None,
+    );
+    let _ = command(&mut b, "open mailbox");
+
+    let _ = command(&mut b, "restore");
+    assert_eq!(pending_file_prompt(&b.state), Some(FilePrompt::Restore));
+    let out = answer_file_prompt(
+        &mut *b.session, &mut b.mapper, &mut b.state, &b.game_dir, &b.ifid, Some("first"), None,
+    );
+    assert_eq!(pending_file_prompt(&b.state), None);
+    let first = out.paging.first_line;
+    let tail = b.state.transcript[first.min(b.state.transcript.len())..].join("\n");
+    assert!(first > 0, "the reply starts past the restored history, not at line 0");
+    assert!(tail.contains("Ok."), "first_line points at the game's reply: {tail:?}");
+    assert!(
+        !tail.contains("West of House"),
+        "and nothing of the restored history is on or after it: {tail:?}"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -644,14 +707,17 @@ fn resume_from_turn_rewinds_engine_transcript_map_and_recenters() {
     );
     assert_eq!(b.state.transcript_para.len(), b.state.transcript.len());
     let transcript = b.state.transcript.join("\n");
-    assert!(transcript.contains("> south"), "the echoed command survives the rebuild: {transcript:?}");
+    // SQ-1715: the live transcript is cut back, so it is the screen the player saw
+    // -- the game's own `>south` echo and the opening banner included -- not a
+    // rebuild's `> south`.
+    assert!(transcript.contains(">south"), "the echoed command survives the cut-back: {transcript:?}");
     assert!(
         transcript.contains("facing the south side"),
         "and turn 1's own output: {transcript:?}"
     );
     assert!(
-        !transcript.contains("mailbox") && !transcript.contains("> west"),
-        "only turn 1 is rebuilt, nothing from the discarded turns 2-3: {transcript:?}"
+        !transcript.contains(">west") && !transcript.contains("> west"),
+        "only turn 1 is kept, nothing from the discarded turns 2-3: {transcript:?}"
     );
     assert_ne!(b.state.scroll, (999, 999), "the map pane recenters on the resumed room");
     assert_eq!(

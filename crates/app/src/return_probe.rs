@@ -245,6 +245,57 @@ impl ReturnSearch {
     }
 }
 
+/// The directions a search from `here` should try, best first, each with the word to send --
+/// [`MapGraph::probe_candidates`]'s order for the move `cmd` made, with the SQ-1290 substitution
+/// of the player's own vocabulary for the reciprocal. Shared by [`arm_return_search`] and
+/// [`reseed_after_upgrade`], so the two cannot disagree about what a walked `cmd` asks first.
+///
+/// [`MapGraph::probe_candidates`]: mapper::graph::MapGraph::probe_candidates
+fn candidate_queue(
+    graph: &mapper::graph::MapGraph,
+    here: RoomId,
+    cmd: &str,
+) -> Vec<(Direction, &'static str)> {
+    let candidates = graph.probe_candidates(here, mapper::direction::parse_direction(cmd));
+    let mut queue: Vec<(Direction, &'static str)> =
+        candidates.iter().map(|&d| (d, long_label(d))).collect();
+    // SQ-1290: ask the way back in the player's OWN vocabulary first. After "fore" the way back
+    // is overwhelmingly "aft", not the compass "south" -- both fill the same slot
+    // ([`mapper::direction::reciprocal_word`]'s second element), but a story that models
+    // FORE/AFT/PORT/STARBOARD as exits distinct from the compass (Shogun) refuses the compass
+    // word and answers only the nautical one. Only when that slot survived
+    // `probe_candidates`'s own tried/probed filter -- respecting the same "never re-ask a
+    // direction already spent" rule as every other candidate, not a special case for this one.
+    if let Some((word, dir)) = mapper::direction::reciprocal_word(cmd) {
+        if candidates.contains(&dir) {
+            queue.insert(0, (dir, word));
+        }
+    }
+    queue
+}
+
+/// A relocation search just gave a no-direction crossing its direction (SQ-1771): re-aim the
+/// return search that was armed for the same crossing, as if the player had typed `word`.
+///
+/// [`arm_return_search`] ran at turn time, when the crossing was a `?` stub and its candidate
+/// order had no move to seed from. The search has not asked anything yet (the relocation search
+/// holds the shadow until it is done, see [`pump_return_search`]), so its queue can simply be
+/// rebuilt for the walked move. A search already running for another crossing, or one that has an
+/// attempt out, is left alone.
+pub fn reseed_after_upgrade(state: &mut AppState, mapper: &Mapper, origin: RoomId, here: RoomId, word: &str) {
+    let Some(search) = &mut state.return_search else { return };
+    if search.origin != origin || search.here != here || search.attempt.is_some() {
+        return;
+    }
+    let mut queue = candidate_queue(&mapper.graph, here, word);
+    if queue.is_empty() {
+        state.return_search = None;
+        return;
+    }
+    queue.reverse();
+    search.queue = queue;
+}
+
 /// Start a search for the way back, if this turn earned one (SQ-0785).
 ///
 /// Called once per turn, after `apply_turn` has settled where the player is.
@@ -296,29 +347,16 @@ pub fn arm_return_search(
     if mapper.graph.connections().iter().any(|c| c.origin == here && c.dest == origin) {
         return;
     }
-    let candidates = mapper.graph.probe_candidates(here, mapper::direction::parse_direction(cmd));
-    if candidates.is_empty() {
+    let queue = candidate_queue(&mapper.graph, here, cmd);
+    if queue.is_empty() {
         return;
-    }
-    let mut queue: Vec<(Direction, &'static str)> =
-        candidates.iter().map(|&d| (d, long_label(d))).collect();
-    // SQ-1290: ask the way back in the player's OWN vocabulary first. After "fore" the way back
-    // is overwhelmingly "aft", not the compass "south" — both fill the same slot
-    // ([`mapper::direction::reciprocal_word`]'s second element), but a story that models
-    // FORE/AFT/PORT/STARBOARD as exits distinct from the compass (Shogun) refuses the compass
-    // word and answers only the nautical one. Only when that slot survived
-    // `probe_candidates`'s own tried/probed filter — respecting the same "never re-ask a
-    // direction already spent" rule as every other candidate, not a special case for this one.
-    if let Some((word, dir)) = mapper::direction::reciprocal_word(cmd) {
-        if candidates.contains(&dir) {
-            queue.insert(0, (dir, word));
-        }
     }
     // The one snapshot the whole search runs from, and the one thing here the
     // player's thread pays for. Taken now rather than per attempt — and shared
     // with this turn's history capture and auto-save (SQ-1178), so arming a
     // search costs no extra save_state when either of those already paid.
     let Some(from) = state.probe.snapshot_from(live, || turn_save.get(live)) else { return };
+    let mut queue = queue;
     queue.reverse(); // popped from the back, so the best candidate goes last
     state.return_search = Some(ReturnSearch { origin, here, queue, attempt: None, from });
 }
@@ -333,6 +371,14 @@ pub fn pump_return_search(state: &mut AppState) -> bool {
     let Some(search) = &state.return_search else { return false };
     if search.attempt.is_some() {
         return false; // one out already
+    }
+    if state.relocation_search.is_some()
+        || !state.relocation_queue.is_empty()
+        || state.chain_replay.is_some()
+    {
+        // SQ-1771: a crossing still to be named goes first, and then re-aims this. SQ-1772: so
+        // does a chained line still to be replayed, which decides what the crossing even was.
+        return false;
     }
     let Some(&(dir, word)) = search.queue.last() else {
         // Nothing left to try. Total failure records nothing about the map: a
@@ -669,6 +715,8 @@ mod tests {
                 quit: false,
                 escaped: false,
                 died,
+                room_name: None,
+                after: None,
             }],
         };
         let recorded =

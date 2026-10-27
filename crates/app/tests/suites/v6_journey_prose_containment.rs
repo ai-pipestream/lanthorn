@@ -81,7 +81,7 @@ fn journey(profile: InterpreterProfile) -> Option<GameSession> {
 fn kitty_state(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(kitty_picker(8, 18));
+    state.set_game_picker(Some(kitty_picker(8, 18)));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state

@@ -950,6 +950,24 @@ pub fn room_dock_mouse_action(
     Some(Action::None)
 }
 
+/// The action a mouse event on the command bar's send button means (SQ-1801): a left-press on
+/// it is exactly Enter, so it yields the same `Action::SubmitCommand` the Enter key does and the
+/// run loop's one submit arm handles both. `None` for everything else — including a click on the
+/// bar's text, which keeps placing the caret.
+pub fn submit_button_action(
+    state: &AppState,
+    m: &crossterm::event::MouseEvent,
+) -> Option<Action> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+        && state.input_submit_hit(m.column, m.row)
+    {
+        Some(Action::SubmitCommand(state.input.value.clone()))
+    } else {
+        None
+    }
+}
+
 /// Per-modal button-to-action mapping for the config screen.
 /// Maps a `ButtonId` click (or the close [X] hit) to the appropriate `Action`.
 fn config_dialog_action(
@@ -4031,6 +4049,7 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
         &state.dict_words,
         &state.seen_words,
         &state.scope_words,
+        &state.command_history,
     );
 }
 
@@ -5105,6 +5124,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         28 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance_probe = !cs.working.guidance_probe; } }
         29 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
         30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.return_probe = !cs.working.return_probe; } }
+        31 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.scan_exits = !cs.working.scan_exits; } }
         _ => {}
     }
 }
@@ -5208,6 +5228,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         28 => working.guidance_probe = !working.guidance_probe,
         29 => working.hide_adult_words = !working.hide_adult_words,
         30 => working.return_probe = !working.return_probe,
+        31 => working.scan_exits = !working.scan_exits,
         _ => {}
     }
 }
@@ -6509,6 +6530,46 @@ mod tests {
         assert_eq!(s.suggestion_idx, 0);
         // Suggestions should now match "nor".
         assert!(s.suggestions.iter().any(|w| w.starts_with("nor")));
+    }
+
+    /// SQ-1790: Tab walks EVERY match, not the first six, and the TUI ranks with the
+    /// command history the way a host handed the same slice would.
+    #[test]
+    fn tab_cycles_through_every_match_and_ranks_common_verbs_first() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.dict_words = vec!["look".to_string()];
+        s.dict_words.extend((0..10).map(|i| format!("lo{i}x")));
+        type_text(&mut s, &mut m, "lo");
+        assert_eq!(s.suggestions.len(), 11, "nothing cut off at six: {:?}", s.suggestions);
+        assert_eq!(s.suggestions[0], "look", "the common verb leads: {:?}", s.suggestions);
+        let mut reached = Vec::new();
+        for _ in 0..11 {
+            apply_action(Action::Autocomplete, &mut s, &mut m);
+            reached.push(s.input.value.clone());
+        }
+        reached.sort();
+        reached.dedup();
+        assert_eq!(reached.len(), 11, "Tab reached every candidate: {reached:?}");
+        // Shift-Tab walks them too, wrapping.
+        s.input.set("lo", true);
+        recompute_suggestions(&mut s);
+        s.suggestion_idx = 0;
+        s.suggestion_active = false;
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        assert_eq!(s.input.value, s.suggestions[10], "Shift-Tab wraps to the last candidate");
+    }
+
+    /// SQ-1790: the TUI hands `command_history` to the shared ranking.
+    #[test]
+    fn the_tuis_suggestions_use_the_command_history() {
+        let mut s = AppState::default();
+        s.dict_words = vec!["lantern".to_string(), "lamp".to_string()];
+        s.command_history = vec!["take lantern".to_string()];
+        s.input.set("drop la", true);
+        recompute_suggestions(&mut s);
+        assert_eq!(s.suggestions, ["lantern", "lamp"], "typed before beats shorter");
     }
 
     // ── Leader-letter 'i' toggle tests ────────────────────────────────────────
@@ -12255,6 +12316,69 @@ mod tests {
             matches!(action, Action::Autocomplete),
             "a showing completion wins over CursorToClick, got {:?}", action
         );
+    }
+
+    /// SQ-1801: a left-press on the command bar's published send-button rect is Enter —
+    /// the very same `SubmitCommand` carrying the typed line (slash commands included) —
+    /// while a press on the bar's text still places the caret.
+    #[test]
+    fn left_click_on_the_send_button_submits_like_enter_and_the_text_still_places_the_caret() {
+        use crossterm::event::MouseEventKind;
+
+        let mut s = AppState::default();
+        s.config.command_bar = true;
+        s.input.set("/help", true);
+        // Text starts at column 85 (inside story_rect), the button is the last column.
+        s.input_text_origin.set(Some((85, 5)));
+        s.input_submit_rect.set(Some(ratatui::layout::Rect::new(117, 5, 1, 1)));
+
+        let down = |col, row| mouse_event(MouseEventKind::Down(MouseButton::Left), col, row, KeyModifiers::NONE);
+        let enter = match key_to_command(&s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyResolve::Action(a) => a,
+            _ => panic!("Enter should resolve to an action"),
+        };
+        let click = submit_button_action(&s, &down(117, 5)).expect("the button submits");
+        assert!(
+            matches!((&click, &enter), (Action::SubmitCommand(a), Action::SubmitCommand(b)) if a == b && a == "/help"),
+            "click {:?} must equal Enter {:?}", click, enter
+        );
+
+        // Beside the button, or on the text: not a submit; the text keeps the caret.
+        assert!(submit_button_action(&s, &down(116, 5)).is_none());
+        assert!(submit_button_action(&s, &down(117, 4)).is_none());
+        assert!(submit_button_action(&s, &down(87, 5)).is_none());
+        let action = mouse_to_action(&s, down(87, 5), map_rect(), story_rect(), &[], &None);
+        assert!(matches!(action, Action::CursorToClick(87, 5)), "text click keeps the caret, got {:?}", action);
+
+        // Only the left press: release and right-press do nothing.
+        assert!(submit_button_action(&s, &mouse_event(MouseEventKind::Up(MouseButton::Left), 117, 5, KeyModifiers::NONE)).is_none());
+        assert!(submit_button_action(&s, &mouse_event(MouseEventKind::Down(MouseButton::Right), 117, 5, KeyModifiers::NONE)).is_none());
+
+        // A stale rect never submits an empty line, a hidden prompt, or under a modal.
+        let mut empty = AppState::default();
+        empty.config.command_bar = true;
+        empty.input_submit_rect.set(Some(ratatui::layout::Rect::new(117, 5, 1, 1)));
+        assert!(submit_button_action(&empty, &down(117, 5)).is_none(), "empty line");
+        s.char_mode = true;
+        assert!(submit_button_action(&s, &down(117, 5)).is_none(), "char mode");
+    }
+
+    /// SQ-1801: in inline prompt mode the send button is the command panel's. A click on its
+    /// rect submits only while the panel is open (a stale rect after closing it is inert).
+    #[test]
+    fn inline_send_button_click_submits_only_while_the_command_panel_is_open() {
+        use crossterm::event::MouseEventKind;
+
+        let mut s = AppState::default();
+        s.config.command_bar = false;
+        s.input.set("open door", true);
+        s.input_submit_rect.set(Some(ratatui::layout::Rect::new(12, 5, 1, 1)));
+        let down = mouse_event(MouseEventKind::Down(MouseButton::Left), 12, 5, KeyModifiers::NONE);
+
+        assert!(submit_button_action(&s, &down).is_none(), "panel closed: stale rect is inert");
+        s.overlays.command_band = Some(crate::state::CommandBandState::default());
+        let a = submit_button_action(&s, &down).expect("panel open: the button submits");
+        assert!(matches!(a, Action::SubmitCommand(ref l) if l == "open door"), "got {:?}", a);
     }
 
     /// With no completion showing, a click in the story pane keeps today's

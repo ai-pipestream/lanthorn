@@ -302,13 +302,13 @@ fn the_restored_ground_is_the_same_at_any_pane_size_and_on_any_backend() {
             };
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(picker);
+            state.set_game_picker(Some(picker));
             *state.v6_paint.borrow_mut() = Engine::paint_surface(&fresh);
             let model = fresh.screen();
             let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
             // The gate is asked per pane/backend; the canvas it guards is native.
             let _gen = app::render::screen::v6_raster_gen(
-                items, &state, pane, state.game_picker.as_ref().expect("picker"),
+                items, &state, pane, state.game_picker().expect("picker"),
             );
             let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
             let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);

@@ -293,7 +293,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
     // The scheme resolves standard colour numbers through the same table the
     // machine does — the card's, on a press that has one (SQ-1393).
     state.colors = app::colors::ColorScheme::terminal_default_in(machine_palette);
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honoured;
     let elems = Engine::take_transcript_elems(&mut session);

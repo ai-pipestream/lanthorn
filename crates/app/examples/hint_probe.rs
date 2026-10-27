@@ -134,7 +134,7 @@ fn main() {
     // ── the host state the render paths actually read ────────────────────────
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
-    st.game_picker = Some(app::render::graphics::kitty_picker(8, 18));
+    st.set_game_picker(Some(app::render::graphics::kitty_picker(8, 18)));
     st.config.honor_game_colours = true;
     if let Some(sc) = art_scale { st.v6_art_scale = sc; }
     st.v6_text = text_face;

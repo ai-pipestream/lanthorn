@@ -413,7 +413,7 @@ fn a_direction_object_no_longer_earns_a_false_positive() {
 /// was disqualified, and no refusal signature could be learned.
 ///
 /// Falsify by folding `WorldPrint`'s three facts back into one hash: this
-/// assertion then reads `this story knows — …`, which is the reported symptom.
+/// assertion then reads `this game knows — …`, which is the reported symptom.
 #[test]
 fn a_story_that_does_not_repaint_its_status_bar_is_still_vetted() {
     for (name, cmd, want) in [
@@ -508,7 +508,7 @@ fn without_the_probe_the_line_makes_the_weaker_claim() {
     p.state.config.guidance_probe = false;
     p.walk(TO_THE_LAMP);
     p.turn("illuminate lamp");
-    assert_eq!(p.assists(), vec!["this story knows — light"]);
+    assert_eq!(p.assists(), vec!["this game knows — light"]);
 }
 
 /// And an unarmed seam — every `AppState::default()`, and any session whose
@@ -523,7 +523,7 @@ fn an_unarmed_seam_makes_the_weaker_claim_too() {
     p.state.probe = app::probe::ShadowProbe::default();
     p.walk(TO_THE_LAMP);
     p.turn("illuminate lamp");
-    assert_eq!(p.assists(), vec!["this story knows — light"]);
+    assert_eq!(p.assists(), vec!["this game knows — light"]);
 }
 
 // ── The story's own signature of failure, discovered ────────────────────────
@@ -1272,7 +1272,7 @@ fn tangle_to_the_lockpick(p: &mut Play) {
 /// is surfaced for a shape-only match — not which verb the story's grammar
 /// and the ranking tie-break happen to put first. A vetted `try instead` pick
 /// is the strong claim (`crate::probe` actually watched it do something from
-/// exactly here); the unvetted `this story knows` fallback would mean the
+/// exactly here); the unvetted `this game knows` fallback would mean the
 /// probe never confirmed anything and is not enough to pass this test.
 ///
 /// `attach lockpick to plate` also solves this puzzle in the real game, but
@@ -1303,7 +1303,7 @@ fn a_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
     assert_eq!(
         offer.kind,
         app::assist::OfferKind::VettedOffer,
-        "a bare `this story knows` fallback means the probe never confirmed the verb \
+        "a bare `this game knows` fallback means the probe never confirmed the verb \
          actually does anything here, which is not what this source claims"
     );
     assert_eq!(offer.word.as_deref(), Some("use"));
@@ -1427,7 +1427,7 @@ fn a_surviving_first_round_pick_is_not_joined_by_the_shape_scan() {
 /// the MECHANISM works — a real, vetted, functioning verb is surfaced for a
 /// bare-noun coincidence — not which verb the story's grammar and the
 /// ranking tie-break happen to put first. A vetted `try instead` pick is the
-/// strong claim; the unvetted `this story knows` fallback would mean the
+/// strong claim; the unvetted `this game knows` fallback would mean the
 /// probe never confirmed anything and is not enough to pass this test.
 ///
 /// Falsify by turning the bare-noun grammar-shape source off (temporarily
@@ -1443,7 +1443,7 @@ fn a_bare_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
     assert_eq!(
         offer.kind,
         app::assist::OfferKind::VettedOffer,
-        "a bare `this story knows` fallback means the probe never confirmed the verb \
+        "a bare `this game knows` fallback means the probe never confirmed the verb \
          actually does anything here, which tier 4 must never show at all (SQ-1644)"
     );
     assert_eq!(offer.word.as_deref(), Some("glorpex"));
@@ -1464,7 +1464,7 @@ fn a_bare_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
 /// pick here comes from tier 4 alone (`glorpex mailbox` has nothing else to
 /// fall back to: no near miss, no meaning, no story synonym, and tier 3
 /// itself declines for lacking a literal preposition). Tier 0-3 fall back to
-/// the unvetted "this story knows" line in that situation; tier 4 must fall
+/// the unvetted "this game knows" line in that situation; tier 4 must fall
 /// silent instead, because an unvetted claim built on the single commonest
 /// shape in the medium is exactly the noise tier 3's own preposition gate
 /// was written to keep out (see `by_bare_grammar_shape`'s own doc) — and
@@ -1472,7 +1472,7 @@ fn a_bare_shape_only_match_is_vetted_and_surfaced_on_a_real_story() {
 ///
 /// Falsify by dropping the `None if must_vet => None` arm from
 /// `offer_vocabulary`: this test then fails with the bare-noun coincidence
-/// named unvetted, e.g. `this story knows — open`.
+/// named unvetted, e.g. `this game knows — open`.
 #[test]
 fn without_a_probe_a_bare_shape_match_is_silent_not_unvetted() {
     let Some(mut p) = Play::zork1() else { return };

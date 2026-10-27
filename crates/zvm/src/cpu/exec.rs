@@ -707,13 +707,23 @@ pub struct Machine {
     /// The host uses this to tell a story that only ever reads `$21` once, at
     /// boot, and bakes its status-line field columns into fixed positions
     /// forever after (Zork 1 r52) from one that recomputes its layout from the
-    /// header every turn (Lost Pig) — the SQ-0681 restore-width floor on
-    /// `boot_screen_cols` protects the former permanently and the latter only
-    /// until its next repaint, and this flag is how the host tells which one
-    /// it is running. Mirrors [`crate::screen::ScreenState::erase_lower_requested`]'s
+    /// header every turn (Lost Pig) — [`crate::width_probe`] (SQ-1809) plays a
+    /// throwaway copy before the real boot and uses this flag to tell which one
+    /// it is, so a host can give the former a fixed width and the latter the
+    /// pane's. Mirrors [`crate::screen::ScreenState::erase_lower_requested`]'s
     /// shape: set inside opcode execution, drained once per turn by the host
     /// via [`Self::take_header_width_read`].
     header_width_read: bool,
+    /// How many `set_cursor` moves the story aimed at the UPPER window since the
+    /// host last drained them, and how many of those named a column past the
+    /// header's screen width ($21), which ZMSD §8.7.2.3 makes illegal and this
+    /// interpreter therefore drops. Every window-1
+    /// character printed past the right margin (clipped, SQ-1808) counts too. A host that narrows $21 on a throwaway copy
+    /// and replays a turn reads these to learn whether the story re-lays its
+    /// status line out for the width it is told (no overreach) or has the
+    /// columns baked in (overreach). See [`Self::take_upper_cursor_moves`].
+    upper_cursor_moves: u32,
+    upper_cursor_overreach: u32,
     /// v5/v6 mouse state (ZMSD §15/§8). Set by [`set_mouse`](Machine::set_mouse)
     /// when the host reports a click; `read_mouse` (EXT:0x16) reports these back.
     /// Coordinates are game pixels, 1-based (ZMSD §8.8.1 coordinate convention).
@@ -911,6 +921,8 @@ impl Machine {
             buffer_screen_mode: 0,
             transcript_bit_seen: false,
             header_width_read: false,
+            upper_cursor_moves: 0,
+            upper_cursor_overreach: 0,
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: 0,
@@ -2007,6 +2019,16 @@ impl Machine {
         result
     }
 
+    /// Record a synthetic fault, as if a runtime error had occurred at the
+    /// instruction about to run. Used by the host to abort a runaway turn (an
+    /// unbounded game loop) so the app survives instead of hard-hanging; the
+    /// trace is read back with [`Self::take_fault_trace`] exactly like a real
+    /// fault's. The caller stops stepping (the Glulx twin is `abort_with_fault`).
+    pub fn abort_with_fault(&mut self, msg: String) {
+        let pc = self.state.pc;
+        self.fault_trace = Some(self.build_trace(msg, pc, "(host abort)".to_string()));
+    }
+
     /// Take and clear the stack trace captured at the last fault.
     pub fn take_fault_trace(&mut self) -> Option<crate::cpu::trace::StackTrace> {
         self.fault_trace.take()
@@ -2165,6 +2187,14 @@ impl Machine {
     /// last drained it (SQ-1604).
     pub fn take_header_width_read(&mut self) -> bool {
         std::mem::take(&mut self.header_width_read)
+    }
+
+    /// Take and clear the upper-window `set_cursor` tally as
+    /// `(moves, overreach)`: every move the story aimed at window 1, and the
+    /// subset whose column lay past header byte $21 (and was dropped as illegal,
+    /// ZMSD §8.7.2.3). v1-5 only; a v6 story never reaches this arm.
+    pub fn take_upper_cursor_moves(&mut self) -> (u32, u32) {
+        (std::mem::take(&mut self.upper_cursor_moves), std::mem::take(&mut self.upper_cursor_overreach))
     }
 
     /// Latch a fault for an opcode number this Z-machine version does not
@@ -3813,6 +3843,12 @@ impl Machine {
                         && col >= 1
                         && (screen_rows == 0 || row <= screen_rows)
                         && (screen_cols == 0 || col <= screen_cols);
+                    if self.screen.current_window == 1 {
+                        self.upper_cursor_moves += 1;
+                        if screen_cols != 0 && col > screen_cols {
+                            self.upper_cursor_overreach += 1;
+                        }
+                    }
                     if self.screen.current_window == 1 && in_range {
                         self.screen.cursor_row = row;
                         self.screen.cursor_col = col;
@@ -5265,6 +5301,47 @@ impl Machine {
         ret
     }
 
+    /// Call `packed_routine` with no arguments on a machine nobody will keep,
+    /// giving up after `max_steps` instructions (SQ-1774).
+    ///
+    /// For a THROWAWAY machine only — one built to answer a single question and
+    /// then dropped or reset by its owner, like `objects::NameRunner`'s. Unlike
+    /// [`Machine::run_routine`] it takes no care to preserve a suspended
+    /// read/save/restore, because a throwaway has none. It returns `Some(value)`
+    /// when the routine returned within the cap, and `None` when it ran out of
+    /// steps, faulted, or tried to read/save/restore/restart/quit; on every exit
+    /// the call and evaluation stacks are left as they were found.
+    pub fn run_routine_capped(&mut self, packed_routine: u16, max_steps: u32) -> Option<u16> {
+        let base_frames = self.state.frames.len();
+        let base_stack = self.state.eval_stack.len();
+        call_routine(&mut self.state, &mut self.mem, packed_routine, &[], Some(0));
+        if self.state.frames.len() == base_frames {
+            // packed 0 / bad address: call_routine pushed 0 to the stack already.
+            let ret = self.state.eval_stack.pop();
+            self.state.eval_stack.truncate(base_stack);
+            return ret;
+        }
+        self.nested_call_depth += 1;
+        let mut finished = false;
+        for _ in 0..max_steps {
+            match self.step() {
+                StepResult::Continue => {
+                    if self.state.frames.len() <= base_frames {
+                        finished = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        self.nested_call_depth -= 1;
+        let ret = if finished { self.state.eval_stack.pop() } else { None };
+        self.state.frames.truncate(base_frames);
+        self.state.eval_stack.truncate(base_stack);
+        self.state.fault = None;
+        ret
+    }
+
     /// v6 newline interrupt (ZMSD §8.8.3.2.2) — the print-path analogue of
     /// Frotz's `countdown()` (`src/common/screen.c`). Each new-line a *scrolling*
     /// window emits decrements that window's interrupt countdown (prop 9); when it
@@ -6021,6 +6098,18 @@ impl Machine {
         if self.screen.current_window == 1 {
             let style = self.screen.text_style;
             let cols = self.screen.upper.cols.max(1);
+            // SQ-1808: v4+ (v6 returned above) window 1 clips at the right
+            // margin instead of wrapping onto a new row. ZMSD §8.7.3.1: "The
+            // upper window should never be scrolled: it is legal for a
+            // character to be printed on the bottom right position of the
+            // upper window (but the position of the cursor after this
+            // operation is undefined: the author suggests that it stay put)."
+            // The Standard states this for the bottom-right cell; a character
+            // beyond the last column has no cell and, by the same "stay put"
+            // reading, is dropped rather than wrapped (wrapping would grow the
+            // grid, which §8.7.3.1 forbids for an unscrolled window). v3's
+            // status line keeps the old behaviour.
+            let clips_at_margin = self.mem.version() != 3;
             // Games may draw in the upper window at rows below the split height
             // (Inform's menu library does this — e.g. LostPig's HELP menu splits
             // to 7 rows then prints 5 items at rows 6–10). Real interpreters keep
@@ -6044,8 +6133,19 @@ impl Machine {
                 if r > self.screen.upper.rows && r <= screen_h {
                     self.screen.upper.grow_rows(r);
                 }
+                if clips_at_margin && c > cols {
+                    // SQ-1808: past the right margin nothing is drawn and the
+                    // cursor stays put. Counted as overreach: the story laid
+                    // this line out for a wider screen than the one it is told.
+                    self.upper_cursor_overreach += 1;
+                    continue;
+                }
                 self.screen.upper.put(r, c, out_ch, style, self.screen.current_fg, self.screen.current_bg);
-                if self.screen.cursor_col >= cols {
+                if clips_at_margin {
+                    // Rests one past the last column (still on the row), so the
+                    // next character is the one that gets clipped.
+                    self.screen.cursor_col = c + 1;
+                } else if self.screen.cursor_col >= cols {
                     self.screen.cursor_row += 1;
                     self.screen.cursor_col = 1;
                 } else {
@@ -12314,6 +12414,46 @@ pub(crate) mod tests {
         m.print_text("X");
         assert_eq!(m.screen.upper.cell(4, 1).ch, 'X', "write past split kept, not dropped");
         assert!(m.screen.upper.rows >= 4, "grid grew to include row 4");
+    }
+
+    #[test]
+    fn upper_window_print_past_the_right_edge_clips_instead_of_wrapping() {
+        // SQ-1808: ZMSD §8.7.3.1 -- the upper window never scrolls; a character
+        // past the last column is dropped, the cursor stays put, no new row.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None); // split_window 1
+        m.exec_var(0x0B, &[1], None, None); // set_window 1
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        let _ = m.take_upper_cursor_moves();
+        m.print_text("abcde"); // exactly fills the row
+        assert_eq!(m.take_upper_cursor_moves().1, 0, "filling the row is not overreach");
+        m.print_text("fg");
+        assert_eq!(m.screen.upper.rows, 1, "grid did not grow");
+        assert_eq!(m.screen.cursor_row, 1, "cursor stayed on the row");
+        assert_eq!(m.screen.cursor_col, 6, "cursor rests at the right margin");
+        assert_eq!(m.screen.upper.cell(1, 5).ch, 'e', "last column untouched by the overflow");
+        // A newline still moves down.
+        m.print_text("\n");
+        assert_eq!(m.screen.cursor_row, 2);
+        assert_eq!(m.screen.cursor_col, 1);
+    }
+
+    #[test]
+    fn upper_window_clipped_print_counts_as_overreach() {
+        // SQ-1808: the host's shadow turn reads clipped prints as a baked layout.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None);
+        m.exec_var(0x0B, &[1], None, None);
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 4;
+        let _ = m.take_upper_cursor_moves();
+        m.print_text("xyz"); // x at 4, y at 5, z past the edge
+        assert_eq!(m.take_upper_cursor_moves(), (0, 1));
     }
 
     #[test]

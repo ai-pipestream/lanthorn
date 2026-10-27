@@ -210,6 +210,9 @@ pub struct SearchHit {
     pub published: Option<String>,
     /// Rounded ½-star rating, if the game has ratings.
     pub star_rating: Option<f32>,
+    /// IFDB's true average rating (`averageRating`), unrounded; the number the
+    /// story list shows after a fetch. `None` when the reply left it empty.
+    pub average_rating: Option<f32>,
     pub num_ratings: Option<u32>,
     pub has_cover: bool,
 }
@@ -276,6 +279,16 @@ pub struct ResolvedGame {
     /// documents chooser (SQ-1680) — parsed from the same response, so offering
     /// them costs no request of its own.
     pub documents: Vec<crate::ifdb_documents::DocumentOption>,
+    /// Story files already in the user's library that are this game, matched by
+    /// IFID or IFDB tuid wherever they sit under the library root (SQ-1755).
+    /// Filled by [`SearchWorker`] after the source resolves the game: the walk
+    /// opens every story file, so it never runs on the UI thread. Empty when no
+    /// library root is configured or the record carries nothing to match on.
+    pub held: Vec<PathBuf>,
+    /// Parallel to `options`: library files (any folder under the library root)
+    /// whose name is that option's filename (SQ-1757). Names only. Filled by
+    /// [`SearchWorker`] beside `held`; empty when there is no library root.
+    pub option_held: Vec<Vec<PathBuf>>,
 }
 
 /// What a `Range: bytes=0-0` probe learned about a URL (SQ-1680).
@@ -295,8 +308,9 @@ pub enum SearchError {
     Transport(String),
     /// IFDB returned a well-formed `<error>` reply.
     Remote(String),
-    /// The download exceeded [`MAX_DOWNLOAD`].
-    TooLarge,
+    /// A download or read exceeded `limit` bytes — [`MAX_DOWNLOAD`] for a
+    /// whole file, a smaller cap for a slice or an entry.
+    TooLarge { limit: u64 },
     /// The URL yielded no usable, accepted-extension filename.
     NoFilename,
     /// The downloaded bytes don't look like a story of the type the filename
@@ -315,9 +329,9 @@ impl std::fmt::Display for SearchError {
         match self {
             SearchError::Transport(_) => write!(f, "IFDB unreachable"),
             SearchError::Remote(m) => write!(f, "IFDB: {m}"),
-            SearchError::TooLarge => f.write_str(&too_large_message(MAX_DOWNLOAD)),
-            SearchError::NoFilename => write!(f, "no downloadable story file"),
-            SearchError::NotAStory => write!(f, "downloaded file is not a valid story file"),
+            SearchError::TooLarge { limit } => f.write_str(&too_large_message(*limit)),
+            SearchError::NoFilename => write!(f, "no downloadable game file"),
+            SearchError::NotAStory => write!(f, "downloaded file is not a valid game file"),
             SearchError::Io(m) => write!(f, "could not save file: {m}"),
             SearchError::Archive(m) => write!(f, "{m}"),
         }
@@ -368,11 +382,13 @@ pub struct IfdbSearchClient {
 
 impl IfdbSearchClient {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .user_agent(user_agent())
-            .build();
-        Self { agent: ureq::Agent::new_with_config(config) }
+        Self::with_policy(crate::fetch_policy::FetchPolicy::current())
+    }
+
+    /// A client that connects only where `policy` allows (SQ-1731).
+    pub fn with_policy(policy: crate::fetch_policy::FetchPolicy) -> Self {
+        let builder = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).user_agent(user_agent());
+        Self { agent: crate::fetch_policy::agent(builder, policy) }
     }
 }
 
@@ -415,7 +431,7 @@ impl SearchSource for IfdbSearchClient {
         // itself is unaffected.
         let record = crate::ifiction::parse(&bytes).ok().map(Box::new);
         let documents = crate::ifdb_documents::parse_document_options(&bytes);
-        Ok(ResolvedGame { options, record, documents })
+        Ok(ResolvedGame { options, record, documents, held: Vec::new(), option_held: Vec::new() })
     }
 
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError> {
@@ -424,15 +440,25 @@ impl SearchSource for IfdbSearchClient {
 
     fn probe_range(&self, url: &str) -> Result<RangeProbe, SearchError> {
         let resp = self
-            .file_request(url)
+            .ranged_request(url)
             .header("Range", "bytes=0-0")
             .call()
             .map_err(|e| SearchError::Transport(e.to_string()))?;
         let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+        // SQ-1756: with `Accept-Encoding: identity` a 206 carries the file's real
+        // size in `Content-Range`. A server that compresses anyway makes ureq
+        // inflate the body AND strip `Content-Encoding`/`Content-Length` (it does
+        // so only when it decodes), while `Content-Range` still counts the
+        // ENCODED bytes. So a 206 whose `Content-Length` is not the one byte
+        // asked for cannot be trusted for a size: report none.
         if resp.status().as_u16() == 206 {
-            if let Some(total) = header("content-range").as_deref().and_then(content_range_total) {
-                return Ok(RangeProbe::Supported { total });
+            let one_byte = header("content-length").as_deref().map(str::trim) == Some("1");
+            if one_byte {
+                if let Some(total) = header("content-range").as_deref().and_then(content_range_total) {
+                    return Ok(RangeProbe::Supported { total });
+                }
             }
+            return Ok(RangeProbe::Unsupported { length: None });
         }
         let length = header("content-length").and_then(|s| s.parse::<u64>().ok());
         Ok(RangeProbe::Unsupported { length })
@@ -443,23 +469,23 @@ impl SearchSource for IfdbSearchClient {
             return Ok(Vec::new());
         }
         let mut resp = self
-            .file_request(url)
+            .ranged_request(url)
             .header("Range", format!("bytes={start}-{}", start + len - 1))
             .call()
             .map_err(|e| SearchError::Transport(e.to_string()))?;
-        match resp.status().as_u16() {
-            // Never more than was asked for: a host that sends extra is stopped.
-            206 => read_capped(resp.body_mut().as_reader(), len),
-            200 if start == 0 => {
-                let mut buf = Vec::new();
-                resp.body_mut()
-                    .as_reader()
-                    .take(len)
-                    .read_to_end(&mut buf)
-                    .map_err(|e| SearchError::Transport(e.to_string()))?;
-                Ok(buf)
-            }
-            _ => Err(SearchError::Transport("server ignored the Range request".into())),
+        let status = resp.status().as_u16();
+        // SQ-1756: a host that sends more than was asked for (a gzip reply ureq
+        // inflated past the slice) keeps its first `len` bytes, not an error.
+        if status == 206 || (status == 200 && start == 0) {
+            let mut buf = Vec::new();
+            resp.body_mut()
+                .as_reader()
+                .take(len)
+                .read_to_end(&mut buf)
+                .map_err(|e| SearchError::Transport(e.to_string()))?;
+            Ok(buf)
+        } else {
+            Err(SearchError::Transport("server ignored the Range request".into()))
         }
     }
 
@@ -472,7 +498,7 @@ impl SearchSource for IfdbSearchClient {
             .and_then(|s| s.parse::<u64>().ok())
         {
             if len > cap {
-                return Err(SearchError::TooLarge);
+                return Err(SearchError::TooLarge { limit: cap });
             }
         }
         read_capped(resp.body_mut().as_reader(), cap)
@@ -509,7 +535,7 @@ impl IfdbSearchClient {
             .and_then(|s| s.parse::<u64>().ok())
         {
             if len > cap {
-                return Err(SearchError::TooLarge);
+                return Err(SearchError::TooLarge { limit: cap });
             }
         }
 
@@ -538,6 +564,17 @@ impl IfdbSearchClient {
 
     /// A GET on a file host with the download phase budgets (see the timeouts
     /// above) rather than the XML endpoints' whole-call 15 seconds.
+    /// [`Self::file_request`] for a `Range` request: `Accept-Encoding: identity`
+    /// (SQ-1756), so the `Content-Range` total is the file's real size and the
+    /// slice is raw bytes. ureq 3.3 (`run.rs`) adds its automatic `gzip` only
+    /// when the request has no `Accept-Encoding` of its own, so setting one
+    /// overrides it. Decoding is triggered by the RESPONSE's `Content-Encoding`
+    /// alone, so a host that ignores `identity` is still inflated (and has
+    /// `Content-Encoding`/`Content-Length` stripped) — see [`Self::probe_range`].
+    fn ranged_request(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        self.file_request(url).header("Accept-Encoding", "identity")
+    }
+
     fn file_request(&self, url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
         self.agent
             .get(url)
@@ -563,8 +600,18 @@ fn user_agent() -> String {
     format!("lanthorn/{} (+https://github.com/sharkusk/lanthorn)", env!("CARGO_PKG_VERSION"))
 }
 
+/// IFDB's `downloadable:yes` search operator (https://ifdb.org/search?help:
+/// "downloadable:yes|no — lists games that are/are not downloadable", i.e. with
+/// at least one story-file or application download link). Appended to every
+/// query so the browser does not list games with nothing to download
+/// (SQ-1716 step 1; format filtering is a later step).
+const DOWNLOADABLE_ONLY: &str = "downloadable:yes";
+
 fn search_url(query: &str) -> String {
-    format!("https://ifdb.org/search?xml&game&searchfor={}", percent_encode(query))
+    format!(
+        "https://ifdb.org/search?xml&game&searchfor={}",
+        percent_encode(&format!("{query} {DOWNLOADABLE_ONLY}"))
+    )
 }
 
 /// The "Popular on IFDB" seed query (SQ-0473) — see the module header's "(1b)"
@@ -572,7 +619,7 @@ fn search_url(query: &str) -> String {
 fn hot_url() -> String {
     format!(
         "https://ifdb.org/search?xml&game&searchfor={}&sortby=ratu",
-        percent_encode("rating:4- #ratings:10-")
+        percent_encode(&format!("rating:4- #ratings:10- {DOWNLOADABLE_ONLY}"))
     )
 }
 
@@ -628,6 +675,7 @@ fn parse_game(game: roxmltree::Node) -> Option<SearchHit> {
         link: child_text(game, "link"),
         published,
         star_rating: child_text(game, "starRating").and_then(|s| s.parse().ok()),
+        average_rating: child_text(game, "averageRating").and_then(|s| s.parse().ok()),
         num_ratings: child_text(game, "numRatings").and_then(|s| s.parse().ok()),
         has_cover,
     })
@@ -739,7 +787,7 @@ pub fn read_capped<R: Read>(r: R, cap: u64) -> Result<Vec<u8>, SearchError> {
     let mut buf = Vec::new();
     r.take(cap + 1).read_to_end(&mut buf).map_err(|e| SearchError::Transport(e.to_string()))?;
     if buf.len() as u64 > cap {
-        return Err(SearchError::TooLarge);
+        return Err(SearchError::TooLarge { limit: cap });
     }
     Ok(buf)
 }
@@ -813,28 +861,7 @@ pub fn looks_like_story_file(filename: &str, bytes: &[u8]) -> bool {
 /// control chars and anything path-significant, and require it to still end in
 /// an accepted story extension. `None` if nothing safe/openable remains.
 pub fn sanitize_filename(raw: &str) -> Option<String> {
-    sanitize_basename(raw).filter(|c| is_named_story_file(Path::new(c)))
-}
-
-/// [`sanitize_filename`] without the story-extension requirement: the safe final
-/// component of an untrusted name, for the documents downloader (SQ-1680), whose
-/// files are manuals and maps rather than stories.
-pub(crate) fn sanitize_basename(raw: &str) -> Option<String> {
-    // Final component under BOTH separators — `a/../b`, `..\\evil`, `/etc/x`.
-    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
-    // A lone/leading-dot name (".", "..", ".z5") is never a real story file.
-    if base.is_empty() || base.starts_with('.') {
-        return None;
-    }
-    let cleaned: String = base
-        .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
-        .collect();
-    let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() || cleaned == ".." {
-        return None;
-    }
-    Some(cleaned)
+    crate::documents::sanitise_filename(raw).filter(|c| is_named_story_file(Path::new(c)))
 }
 
 /// A non-colliding path in `dir` for `filename`: returns `dir/filename` if free,
@@ -1065,14 +1092,49 @@ impl SearchWorker {
         covers: Box<dyn MetadataSource>,
         roots: crate::data_roots::DataRoots,
     ) -> Self {
+        Self::with_library(gate, source, covers, roots, None)
+    }
+
+    /// [`Self::new`] plus the library root: each resolved game is then checked
+    /// against every story under it by IFID/tuid ([`ResolvedGame::held`],
+    /// SQ-1755), on this worker's thread.
+    pub fn with_library(
+        gate: IfdbGate,
+        source: Box<dyn SearchSource>,
+        covers: Box<dyn MetadataSource>,
+        roots: crate::data_roots::DataRoots,
+        library_root: Option<PathBuf>,
+    ) -> Self {
+        Self::with_library_index(gate, source, covers, roots, library_root, Default::default())
+    }
+
+    /// [`Self::with_library`] plus the picker's shared index (SQ-1757): once the
+    /// picker stores its finished entries there, a resolve matches IFIDs against
+    /// them and reads no story file; until then it scans the folders itself.
+    pub fn with_library_index(
+        gate: IfdbGate,
+        source: Box<dyn SearchSource>,
+        covers: Box<dyn MetadataSource>,
+        roots: crate::data_roots::DataRoots,
+        library_root: Option<PathBuf>,
+        index: crate::library_match::LibraryIndex,
+    ) -> Self {
         Self::spawn(gate, move |job, out| {
-            out.send_last(run_job(source.as_ref(), covers.as_ref(), &roots, job))
+            let finished = index.lock().ok().and_then(|g| g.clone());
+            out.send_last(run_job(
+                source.as_ref(),
+                covers.as_ref(),
+                &roots,
+                library_root.as_deref(),
+                finished.as_deref().map(Vec::as_slice),
+                job,
+            ))
         })
     }
 }
 
 /// Run one job to an event, mapping every error to a friendly display string.
-fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, roots: &crate::data_roots::DataRoots, job: SearchJob) -> SearchEvent {
+fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, roots: &crate::data_roots::DataRoots, library_root: Option<&Path>, index: Option<&[crate::picker::StoryEntry]>, job: SearchJob) -> SearchEvent {
     match job {
         SearchJob::Seed => match source.hot() {
             Ok(hits) => SearchEvent::Results(hits),
@@ -1083,7 +1145,18 @@ fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, roots: &crate
             Err(e) => SearchEvent::Failed(e.to_string()),
         },
         SearchJob::Resolve(tuid) => match source.download_options(&tuid) {
-            Ok(resolved) => SearchEvent::Options(resolved),
+            Ok(mut resolved) => {
+                if let Some(root) = library_root {
+                    (resolved.held, resolved.option_held) = crate::library_match::resolve_in_library(
+                        root,
+                        roots,
+                        resolved.record.as_deref(),
+                        &resolved.options,
+                        index,
+                    );
+                }
+                SearchEvent::Options(resolved)
+            }
             Err(e) => SearchEvent::Failed(e.to_string()),
         },
         SearchJob::Download { url, dest, record } => match source.download(&url, &dest) {
@@ -1156,6 +1229,7 @@ mod tests {
         assert_eq!(dsd.author.as_deref(), Some("Michael J. Roberts and Steve McAdams"));
         assert_eq!(dsd.published.as_deref(), Some("1990"));
         assert_eq!(dsd.star_rating, Some(2.5));
+        assert!((dsd.average_rating.unwrap() - 2.428_571_4).abs() < 1e-6, "SQ-1746: the true average rides beside the half-star");
         assert_eq!(dsd.num_ratings, Some(7));
         assert!(dsd.has_cover, "hasCoverArt + coverArtLink → has_cover");
     }
@@ -1169,6 +1243,7 @@ mod tests {
         // "Eclipse" — empty <starRating></starRating>/<numRatings>0 → None/0.
         let eclipse = hits.iter().find(|h| h.title == "Eclipse").unwrap();
         assert_eq!(eclipse.star_rating, None, "an empty rating element is None, not 0.0");
+        assert_eq!(eclipse.average_rating, None, "an empty averageRating is None, not 0.0");
         assert!(!eclipse.has_cover);
     }
 
@@ -1384,7 +1459,7 @@ mod tests {
         assert_eq!(ok.len(), 8);
         // cap + 1: rejected as TooLarge.
         match read_capped(&[7u8; 9][..], 8) {
-            Err(SearchError::TooLarge) => {}
+            Err(SearchError::TooLarge { limit: 8 }) => {}
             other => panic!("expected TooLarge, got {other:?}"),
         }
     }
@@ -1419,10 +1494,10 @@ mod tests {
         let dest = crate::scratch_dir("ifdb-story-cap-declared");
         let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n", zcode(5000));
         let err = IfdbSearchClient::new().download_capped(&url, &dest, 1000).unwrap_err();
-        assert!(matches!(err, SearchError::TooLarge), "{err:?}");
+        assert!(matches!(err, SearchError::TooLarge { limit: 1000 }), "{err:?}");
         assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "no partial file");
         assert_eq!(too_large_message(100 * 1024 * 1024), "Too large to download (over 100 MB)");
-        assert_eq!(SearchError::TooLarge.to_string(), "Too large to download (over 100 MB)");
+        assert_eq!(SearchError::TooLarge { limit: MAX_DOWNLOAD }.to_string(), "Too large to download (over 100 MB)");
         let _ = std::fs::remove_dir_all(dest);
     }
 
@@ -1439,9 +1514,118 @@ mod tests {
         body.extend_from_slice(b"0\r\n\r\n");
         let url = serve_once("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n", body);
         let err = IfdbSearchClient::new().download_capped(&url, &dest, 2000).unwrap_err();
-        assert!(matches!(err, SearchError::TooLarge), "{err:?}");
+        assert!(matches!(err, SearchError::TooLarge { limit: 2000 }), "{err:?}");
         assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "no partial file");
         let _ = std::fs::remove_dir_all(dest);
+    }
+
+    /// Like [`serve_once`], but also hands back the request the client sent, so a
+    /// case can assert on its headers (SQ-1756).
+    fn serve_capturing(head: String, body: Vec<u8>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut req = [0u8; 4096];
+            let n = sock.read(&mut req).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&req[..n]).to_string());
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(&body);
+        });
+        (format!("http://127.0.0.1:{port}/notes.txt"), rx)
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    /// SQ-1756: ranged requests ask for `identity`, so a compressing host sends
+    /// the real bytes and the real total.
+    #[test]
+    fn ranged_requests_ask_for_identity_encoding() {
+        let (url, rx) = serve_capturing(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/302511\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+                .into(),
+            b"x".to_vec(),
+        );
+        let probe = IfdbSearchClient::new().probe_range(&url).unwrap();
+        assert_eq!(probe, RangeProbe::Supported { total: 302511 });
+        let req = rx.recv().unwrap().to_ascii_lowercase();
+        assert!(req.contains("accept-encoding: identity\r\n"), "{req}");
+        assert!(!req.contains("gzip"), "{req}");
+
+        let (url, rx) = serve_capturing(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
+                .into(),
+            b"abcd".to_vec(),
+        );
+        assert_eq!(IfdbSearchClient::new().fetch_range(&url, 0, 4).unwrap(), b"abcd");
+        let req = rx.recv().unwrap().to_ascii_lowercase();
+        assert!(req.contains("accept-encoding: identity\r\n"), "{req}");
+        assert!(!req.contains("gzip"), "{req}");
+    }
+
+    /// SQ-1756: a host that gzips a ranged reply anyway describes the ENCODED
+    /// body in `Content-Range` (allthingsjacq.com: 45112 for a 302511-byte file).
+    /// That number is never shown as the file's size.
+    #[test]
+    fn a_gzip_encoded_range_reply_gives_no_size() {
+        let body = gzip(b"x");
+        let head = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Encoding: gzip\r\nContent-Range: bytes 0-0/45112\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let (url, _rx) = serve_capturing(head, body);
+        let probe = IfdbSearchClient::new().probe_range(&url).unwrap();
+        assert_eq!(probe, RangeProbe::Unsupported { length: None });
+    }
+
+    /// SQ-1756: more bytes than asked for are trimmed to what was asked, whether
+    /// the host just over-sent or a gzip slice inflated past the window.
+    #[test]
+    fn a_preview_that_over_delivers_keeps_the_first_n_bytes() {
+        let text: Vec<u8> = (0..40_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let (url, _rx) = serve_capturing(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/50\r\nContent-Length: 50\r\nConnection: close\r\n\r\n".into(),
+            text[..50].to_vec(),
+        );
+        assert_eq!(IfdbSearchClient::new().fetch_range(&url, 0, 10).unwrap(), text[..10]);
+
+        let body = gzip(&text);
+        let head = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Encoding: gzip\r\nContent-Range: bytes 0-16383/45112\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let (url, _rx) = serve_capturing(head, body);
+        let got = IfdbSearchClient::new().fetch_range(&url, 0, 16 * 1024).unwrap();
+        assert_eq!(got, text[..16 * 1024]);
+    }
+
+    /// SQ-1756: the refusal names the cap that was actually hit, not 100 MB.
+    #[test]
+    fn too_large_names_the_cap_that_was_hit() {
+        let err = read_capped(&[0u8; 20_000][..], 16 * 1024).unwrap_err();
+        assert!(matches!(err, SearchError::TooLarge { limit: 16384 }), "{err:?}");
+        assert_eq!(err.to_string(), "Too large to download (over 16 KB)");
+        assert_eq!(SearchError::TooLarge { limit: 5 * 1024 * 1024 }.to_string(), "Too large to download (over 5 MB)");
+    }
+
+    /// Manual check against the live host from SQ-1756; run with
+    /// `cargo nextest run -p lanthorn --lib --features t-picker --run-ignored only live_gzip_range_host`.
+    #[test]
+    #[ignore = "network"]
+    fn live_gzip_range_host() {
+        let url = "https://allthingsjacq.com/intfic_clubfloyd_20071101.html";
+        let c = IfdbSearchClient::new();
+        let probe = c.probe_range(url);
+        let preview = c.fetch_range(url, 0, 16 * 1024).map(|b| b.len());
+        eprintln!("probe={probe:?} preview={preview:?}");
+        assert!(preview.is_ok());
     }
 
     /// A story under the cap downloads as before.
@@ -1524,17 +1708,25 @@ mod tests {
     fn search_url_encodes_the_query_and_targets_the_xml_game_endpoint() {
         assert_eq!(
             search_url("Deep Space Drifter"),
-            "https://ifdb.org/search?xml&game&searchfor=Deep%20Space%20Drifter"
+            "https://ifdb.org/search?xml&game&searchfor=Deep%20Space%20Drifter%20downloadable%3Ayes"
         );
-        assert!(search_url("A&B").ends_with("searchfor=A%26B"));
+        assert!(search_url("A&B").ends_with("searchfor=A%26B%20downloadable%3Ayes"));
     }
 
     #[test]
     fn hot_url_uses_the_verified_rating_floor_and_browse_sort() {
         assert_eq!(
             hot_url(),
-            "https://ifdb.org/search?xml&game&searchfor=rating%3A4-%20%23ratings%3A10-&sortby=ratu"
+            "https://ifdb.org/search?xml&game&searchfor=rating%3A4-%20%23ratings%3A10-%20downloadable%3Ayes&sortby=ratu"
         );
+    }
+
+    #[test]
+    fn search_and_hot_urls_both_require_downloadable_games() {
+        assert!(search_url("zork").contains("zork%20downloadable%3Ayes"));
+        let hot = hot_url();
+        assert!(hot.contains("downloadable%3Ayes"));
+        assert!(hot.contains("rating%3A4-") && hot.contains("%23ratings%3A10-"));
     }
 
     #[test]
@@ -1629,6 +1821,91 @@ mod tests {
         panic!("no event arrived");
     }
 
+    /// SQ-1755: the worker, not the UI, walks the library and reports a game
+    /// held in a subfolder by IFID.
+    #[test]
+    fn resolve_reports_the_library_copy_found_by_ifid() {
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../zvm/tests/fixtures/etude.z5")).unwrap();
+        let root = crate::scratch_dir("ifdb-held");
+        let sub = root.join("zcode");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("etude.z5"), &bytes).unwrap();
+        let record = IFiction { ifids: vec![crate::ifid::compute_ifid(&bytes)], ..Default::default() };
+        let source = Fake { hits: vec![], options: vec![], record: Some(record), fail: false };
+        let data = crate::scratch_dir("ifdb-held-data");
+        let w = SearchWorker::with_library(
+            IfdbGate::default(),
+            Box::new(source),
+            Box::new(FakeCovers::new()),
+            crate::data_roots::DataRoots::single(data.clone()),
+            Some(root.clone()),
+        );
+        w.request(SearchJob::Resolve("abc".into()));
+        match drain_one(&w) {
+            SearchEvent::Options(o) => assert_eq!(o.held, vec![sub.join("etude.z5")]),
+            _ => panic!("expected Options"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SQ-1757: `option_held` arrives with the event, parallel to the options.
+    #[test]
+    fn resolve_reports_option_files_found_in_subfolders() {
+        let root = crate::scratch_dir("ifdb-opt-held");
+        let sub = root.join("Glulx Stories");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("Game.ulx"), b"x").unwrap();
+        let mk = |n: &str| DownloadOption { filename: n.into(), url: format!("https://x/{n}"), format: None, title: None, desc: None };
+        let source = Fake { hits: vec![], options: vec![mk("game.ulx"), mk("other.z5")], record: None, fail: false };
+        let data = crate::scratch_dir("ifdb-opt-held-data");
+        let w = SearchWorker::with_library(
+            IfdbGate::default(),
+            Box::new(source),
+            Box::new(FakeCovers::new()),
+            crate::data_roots::DataRoots::single(data.clone()),
+            Some(root.clone()),
+        );
+        w.request(SearchJob::Resolve("abc".into()));
+        match drain_one(&w) {
+            SearchEvent::Options(o) => assert_eq!(o.option_held, vec![vec![sub.join("Game.ulx")], vec![]]),
+            _ => panic!("expected Options"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// SQ-1757: a finished index handed to the worker decides `held`; the file
+    /// it names does not exist, so nothing was walked and hashed to find it.
+    #[test]
+    fn resolve_uses_a_supplied_index_instead_of_hashing() {
+        let root = crate::scratch_dir("ifdb-idx");
+        let ghost = root.join("nowhere").join("g.z5");
+        let mut e = crate::picker::StoryEntry::folder(ghost.clone(), "g");
+        e.kind = crate::picker::RowKind::Story;
+        e.meta.ifid = "ZCODE-IDX-1".into();
+        let index: crate::library_match::LibraryIndex = Default::default();
+        *index.lock().unwrap() = Some(std::sync::Arc::new(vec![e]));
+        let record = IFiction { ifids: vec!["ZCODE-IDX-1".into()], ..Default::default() };
+        let source = Fake { hits: vec![], options: vec![], record: Some(record), fail: false };
+        let data = crate::scratch_dir("ifdb-idx-data");
+        let w = SearchWorker::with_library_index(
+            IfdbGate::default(),
+            Box::new(source),
+            Box::new(FakeCovers::new()),
+            crate::data_roots::DataRoots::single(data.clone()),
+            Some(root.clone()),
+            index,
+        );
+        w.request(SearchJob::Resolve("abc".into()));
+        match drain_one(&w) {
+            SearchEvent::Options(o) => assert_eq!(o.held, vec![ghost]),
+            _ => panic!("expected Options"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     #[test]
     fn worker_runs_search_resolve_download_serially() {
         let hit = SearchHit {
@@ -1638,6 +1915,7 @@ mod tests {
             link: None,
             published: None,
             star_rating: None,
+            average_rating: None,
             num_ratings: None,
             has_cover: false,
         };
@@ -1832,7 +2110,7 @@ mod tests {
 
         // The row the browser builds for the file that just landed.
         let entry = crate::picker::resolve_entry(&path, &crate::data_roots::DataRoots::single(&data_base))
-            .expect("the downloaded blorb scans as a playable story");
+            .expect("the downloaded blorb scans as a playable game");
         assert!(
             entry.meta.ifid.starts_with("GLULX-"),
             "non-vacuity: the row's IFID is the computed Glulx one, neither the \
@@ -1892,8 +2170,9 @@ mod tests {
         let fetched = info.fetched.expect("a fetched block was written");
         assert_eq!(fetched.title.as_deref(), Some("Deep Space Drifter"));
         assert_eq!(fetched.author.as_deref(), Some("Michael J. Roberts"));
-        assert_eq!(fetched.cover.as_deref(), Some("cover.png"));
-        assert!(game_dir.join("cover.png").exists());
+        assert_eq!(fetched.cover.as_deref(), Some("k82q3libhff6ks8l.png"));
+        assert!(data_base.join("ifdb").join("k82q3libhff6ks8l.png").exists());
+        assert!(!game_dir.join("cover.png").exists(), "the cover is shared, not per copy");
         assert_eq!(
             cover_calls.lock().unwrap().as_slice(),
             &["https://ifdb.org/coverart?id=k82q3libhff6ks8l&version=1".to_string()],

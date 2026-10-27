@@ -12,10 +12,10 @@ mkdir -p stories && docker compose up -d
 
 `docker-compose.yml` at the repo root is a ready-made deployment: drop your
 game files into the new `stories/` folder, run that command, and open
-<http://localhost:7681>. You'll see a real terminal running lanthorn's story
+<http://localhost:7681>. You'll see a real terminal running lanthorn's game
 picker, delivered to the page by [ttyd](https://github.com/tsl0922/ttyd)
 serving an xterm.js terminal — everyone who opens it gets their own game, so
-several people can play at once, sharing the same story library and the same
+several people can play at once, sharing the same game library and the same
 saves.
 
 Without compose, the same thing is one `docker run`:
@@ -31,7 +31,7 @@ docker run -d --name lanthorn \
 ## What the browser can show
 
 xterm.js doesn't speak the kitty graphics protocol, but the browser terminal
-does render **sixel** — so cover art in the picker and graphical v6 stories
+does render **sixel** — so cover art in the picker and graphical v6 games
 show up in the browser as real pictures, not half-block cells. sixel is a
 256-colour format per image, so a cover is close to the original but not
 photographic. Text games, the automap, mouse support and the full TUI look
@@ -63,7 +63,7 @@ the whole thing off, for a server that would rather every visit start fresh.
 
 ## Playing on a tablet or phone
 
-Dragging one finger up or down the transcript or the story picker's list
+Dragging one finger up or down the transcript or the game picker's list
 scrolls it, same as a mouse wheel. Drag one finger sideways, or drag with two
 fingers in any direction, to pan the map or resize a pane's splitter — a
 plain tap still just taps, so the on-screen keyboard still comes up when you
@@ -73,7 +73,7 @@ since a one-finger drag that starts moving up or down is read as a scroll.
 browser handle touch its own way.
 
 The edges you drag are made wider here than on a desktop, because a fingertip
-is not a mouse pointer: the splitter between the story and the Journal, and the
+is not a mouse pointer: the splitter between the game and the Journal, and the
 top edge of the command panel, are four cells deep instead of
 two. `LANTHORN_WEB_GRAB_ZONE` sets that (anything from 1 to 6), and whatever
 you set in lanthorn's own settings screen wins over it from then on.
@@ -109,9 +109,9 @@ easiest way to keep that: Docker manages it for you and it just works across
 upgrades. If you'd rather see your saves as ordinary files on your machine,
 mount a folder of your own there instead — but mount it at
 `/data/.lanthorn`, not `/data` itself, and pick a dedicated folder like
-`~/lanthorn-docker` rather than your host's own `~/.lanthorn`, since a
+`~/lanthorn-docker` rather than your host's own lanthorn folders, since a
 native lanthorn install and the container don't understand each other's
-story paths. `docker-compose.yml` has that alternative ready to uncomment.
+game paths. `docker-compose.yml` has that alternative ready to uncomment.
 
 On a shared server you want the library's titles, blurbs, ratings and cover
 art fetched once, up front, rather than per visitor. Run the fetch on the
@@ -136,7 +136,7 @@ docker compose run --rm -v "$PWD/curated.tsv:/curated.tsv:ro" \
 
 To let others on your network in, point them at your machine's address
 instead of `localhost`. **Do not expose an unauthenticated port beyond your
-own network** — a lanthorn session includes a story picker that can browse
+own network** — a lanthorn session includes a game picker that can browse
 and download into `/stories`, and any writable terminal is an interactive
 program running on your machine. Set `LANTHORN_WEB_CREDENTIAL` for HTTP
 basic auth, and put a reverse proxy (Caddy, nginx, Traefik) in front for TLS

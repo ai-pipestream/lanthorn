@@ -117,8 +117,18 @@ impl From<&Cli> for LaunchFlags {
 /// default is the honest answer for a host that is not one.
 #[derive(Default)]
 pub struct TerminalFacts {
+    /// The plain facts of the image backend (cell px, protocol) for a host that
+    /// has NO terminal picker (SQ-1804) — always present, so a build without the
+    /// `terminal` feature can still say "images are on, at this cell size".
+    /// **Precedence:** when a [`TerminalFacts::game_picker`] is given (needs the
+    /// `terminal` feature) the imaging is derived from it and this field is
+    /// ignored; this is the answer only when there is no picker. `None` with
+    /// neither means game images are off.
+    pub game_imaging: Option<crate::imaging::GameImaging>,
     /// The in-game image-protocol picker (`None` with `--images off`, when the
-    /// terminal draws no images, or when there is no terminal).
+    /// terminal draws no images, or when there is no terminal). Takes precedence
+    /// over [`TerminalFacts::game_imaging`]. Needs the `terminal` feature.
+    #[cfg(feature = "terminal")]
     pub game_picker: Option<ratatui_image::picker::Picker>,
     /// Whether the picker's query got any answer at all (SQ-1511).
     pub game_picker_query_answered: bool,
@@ -386,7 +396,7 @@ pub fn resolve_pict_blorb(story_path: &Path, images: bool) -> Option<blorb::Blor
 /// inventory panel are left at their true boot-time state — closed; both open
 /// only after this session already exists (`initial_panel`, further down) —
 /// and neither affects the WIDTH this seeds anyway, only rows, which the
-/// SQ-0679 floor never gates.
+/// fixed-width rule (SQ-1809) never touches.
 ///
 /// `None` when the frame is zero-area; the constructor then falls back to the
 /// 80×24 boot default.
@@ -543,6 +553,8 @@ pub(super) fn bump_dim_for_floor(current: u16, floor: u16, probe: impl Fn(u16) -
 pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<BootedStory, BootError> {
     let BootRequest { story_path, disk_entry, overrides, mut cfg, roots, flags, terminal, fresh_start } = req;
     let TerminalFacts {
+        game_imaging: stated_imaging,
+        #[cfg(feature = "terminal")]
         game_picker,
         game_picker_query_answered,
         term_default_colors,
@@ -551,6 +563,15 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         min_story_screen,
         glk_cell_px,
     } = terminal;
+    // Core boot code reads only the plain facts of the image backend (SQ-1804).
+    // The ONE precedence rule: a picker, when the host has one, outranks the
+    // imaging it states, which is then derived from it — see
+    // `TerminalFacts::game_imaging`. The state install below applies the same
+    // rule through `AppState`'s two setters.
+    #[cfg(feature = "terminal")]
+    let game_imaging = game_picker.as_ref().map(crate::imaging::GameImaging::from).or(stated_imaging);
+    #[cfg(not(feature = "terminal"))]
+    let game_imaging = stated_imaging;
 
     // `disk_entry` is which story on the image the browser row stood for
     // (SQ-0859) — `None` for every loose file and every single-story floppy, and
@@ -695,6 +716,10 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         cfg.interpreter_number = Some(n);
         cfg.one_run.pin(crate::config::keys::INTERPRETER_NUMBER, n);
     }
+    // SQ-1809: this game's own `status_width` outranks the global one.
+    if let Some(w) = crate::styles::read_per_game_status_width(&game_dir) {
+        cfg.status_width = w;
+    }
     // Ride with the story for the session: the restart path re-resolves artwork
     // and has no other way to know which game on the disc this is (SQ-0876).
     cfg.disk_entry = disk_entry.map(str::to_string);
@@ -767,12 +792,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     let char_px: (f64, f64) = match glk_cell_px {
         Some(px) => px,
         None => {
-            let char_px = game_picker
-                .as_ref()
-                .map(|p| {
-                    let f = p.font_size();
-                    (f.width as u32, f.height as u32)
-                })
+            let char_px = game_imaging
+                .map(|g| (g.cell_px.0 as u32, g.cell_px.1 as u32))
                 .unwrap_or((8, 16));
             // SQ-0593: divide out the terminal's scale before the game sees it. A
             // Glk game's graphics-window sizes are pixel constants its author
@@ -802,7 +823,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // sidecar in place (SQ-0290).
     let _ = std::fs::create_dir_all(&game_dir);
     let vfs_sidecar = crate::vfs_store::read_vfs(&game_dir);
-    crate::trace::hostio(&cfg.user_dir, cfg.trace.hostio,
+    crate::trace::hostio(cfg.logs_root(), cfg.trace.hostio,
         format!("vfs_read({} bytes)", vfs_sidecar.len()));
 
     // Resolve the look from style.toml (the single styling source) BEFORE the
@@ -812,8 +833,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // the theme pairs must be in the backend first — and the garglk.ini overlay
     // below must land in `cs` before they are derived. `state.colors` is assigned
     // from these below.
-    let (style_doc, style_w1) = crate::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (mut cs, set, style_w2) = crate::style::resolve(&style_doc, &cfg.user_dir, machine_palette);
+    let (style_doc, style_w1) = crate::style::load_style(cfg.style.as_deref(), cfg.config_root());
+    let (mut cs, set, style_w2) = crate::style::resolve(&style_doc, cfg.config_root(), machine_palette);
     // SQ-0319: discover a per-game garglk.ini beside the story and overlay its
     // colours onto the resolved theme BEFORE the backend snapshot below, so the
     // imported look is in the backend for glk_style_measure and painted from
@@ -894,6 +915,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         crate::styles::read_per_game_borderless(&game_dir),
         garglk_overlay.as_ref(),
         glk_design.as_ref(),
+        cfg.borderless_windows,
     );
     // SQ-0304: per-game map-panel visibility. `Some(false)` → start with the map
     // hidden (captured here before `cfg` is moved into the engine build below).
@@ -1232,7 +1254,11 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 // before the constructor rather than facts of this boot.
                 machine_palette,
                 cfg.interpreter_version,
-            );
+            )
+            // SQ-1809: what width a v4+ story is told — probed inside
+            // `new_for_machine`, unless the config (or a pinned
+            // `virtual_screen_cols`) already says.
+            .with_status_width(cfg.effective_status_width());
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
             // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and
@@ -1256,8 +1282,8 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                     use zvm::error::ZError;
                     let msg = match e {
                         ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
-                        ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
-                        ZError::Truncated => "story file is truncated".to_string(),
+                        ZError::NotAStoryFile => "file is not a valid Z-machine game file".to_string(),
+                        ZError::Truncated => "game file is truncated".to_string(),
                         _ => format!("{e:?}"),
                     };
                     return Err(BootError(msg));
@@ -1327,7 +1353,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 Some(random_seed),
             ) {
                 Ok(s) => Box::new(s),
-                Err(e) => return Err(BootError(format!("cannot load Glulx story: {e:?}"))),
+                Err(e) => return Err(BootError(format!("cannot load Glulx game: {e:?}"))),
             }
         }
         crate::hints::LoadedStory::Scott(bytes) => {
@@ -1339,7 +1365,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 &bytes,
                 &game_dir,
                 resolve_pict_blorb(&story_path, cfg.images),
-                game_picker.as_ref(),
+                game_imaging,
                 cfg.scott_picture_resolution_override,
             );
             match crate::scott_session::ScottSession::new_with_options(
@@ -1354,7 +1380,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                 pictures,
             ) {
                 Ok(s) => Box::new(s),
-                Err(e) => return Err(BootError(format!("cannot load Scott Adams story: {e}"))),
+                Err(e) => return Err(BootError(format!("cannot load Scott Adams game: {e}"))),
             }
         }
     };
@@ -1452,7 +1478,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
                                 ac.meta.format_version,
                                 crate::engine_helpers::is_v6_session(&*session),
                             ));
-                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para, ac.transcript_images));
+                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para, ac.transcript_images, ac.anchors));
                             startup_history = ac.history;
                             // Restore the turn counter from the same archive (SQ-0429):
                             // the auto_load resume path mirrors the interactive restore,
@@ -1493,7 +1519,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // archive predating this gate could carry a bogus room from exactly that
     // false positive, and this stops it from ever growing further, though it
     // does not retroactively clean one out.
-    if crate::engine_helpers::zmachine_story_has_no_grammar(&*session) {
+    if crate::engine_helpers::zmachine_story_is_menu_driven_v6(&*session) {
         mapper.disable_mapping();
     }
 
@@ -1548,7 +1574,13 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     }
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_status_bar = cfg.show_status_bar;
-    state.game_picker = game_picker;
+    #[cfg(feature = "terminal")]
+    match game_picker {
+        Some(picker) => state.set_game_picker(Some(picker)),
+        None => state.set_game_imaging(game_imaging),
+    }
+    #[cfg(not(feature = "terminal"))]
+    state.set_game_imaging(game_imaging);
     state.game_picker_query_answered = game_picker_query_answered;
     state.glk_cell_px = glk_cell_px;
     // SQ-1703 P3: a story with a `.cfg` design size lays out at it and is
@@ -1640,7 +1672,7 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // Debug trace (trace feature): start a fresh log for this run and arm the
     // engine's screen-trace buffer per config; no-op when no section is active.
     if state.config.trace.any() {
-        crate::trace::truncate(&state.config.user_dir);
+        crate::trace::truncate(state.config.logs_root());
     }
     session.set_trace_screen(state.config.trace.screen);
 
@@ -1701,11 +1733,15 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // Each entry spelled out where the dictionary cut it short (SQ-1553):
     // completion offers `lantern`, not `lanter`, and applying it still reaches
     // the same entry. This is also where the one-time story-text read is paid.
-    let words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
+    // The same words `Engine::vocabulary_words` answers, spelled through the
+    // cached `VocabState` so the story-text read is not paid a second time.
+    let words = session.dictionary_words();
     state.dict_words = match state.vocab.get(session.as_ref()) {
-        Some(v) => words.iter().map(|w| v.spell(w).to_string()).collect(),
+        Some(v) => v.spell_all(words),
         None => words,
     };
+
+    state.hint_booklet_notice = session.advertises_hint_booklet();
 
     // Open whichever panel this story starts with (SQ-1123): the per-game override, or the global
     // `[command_panel] auto_open` fallback resolved into `initial_panel` above.
@@ -1761,7 +1797,15 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // names the game the way the list does. The banner heuristic is the tier
     // below it, and the filename stem is the last resort it was meant to be.
     let meta_title =
-        crate::picker::metadata_title_in(&story_path, &catalogue_dir, &ifid, is_scott, &story_bytes);
+        crate::picker::metadata_title_in(
+            &story_path,
+            &catalogue_dir,
+            &ifid,
+            is_scott,
+            &story_bytes,
+            // A zip member names itself, not its archive (SQ-1720).
+            disk_entry.filter(|_| disk_image.is_none()).map(crate::picker::zip_member_stem),
+        );
     state.title =
         crate::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1860,7 +1904,12 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     // comment). Applied UNCONDITIONALLY, before the location test below, because a story whose
     // starting room is undetectable still has a boot to drain.
     if let Some(snap_number) = seed_result.location.as_ref().map(|snap| snap.number) {
+        // SQ-1743: the seed carries its detection method, so a NameOnly opening room
+        // must be corroborated like any turn's — by the banner, which `seed_result` no
+        // longer holds (lifted out above), lent to `apply_turn` for this one call.
+        let seed_text = std::mem::replace(&mut seed_result.transcript, banner.clone());
         apply_turn(&mut mapper, "", &seed_result, &mut state.death_watch);
+        seed_result.transcript = seed_text;
         // SQ-1629 Fix 2: the starting room's own description/items, off the SAME boot drain —
         // `apply_room_description`/`apply_item_observations` are the identical engine-neutral
         // calls `finish_command_turn`/`finish_resumed_turn` already make for every later turn
@@ -1875,12 +1924,12 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
         let drain_turns = startup_turns.unwrap_or(state.turns);
         crate::session::apply_room_description(&mut mapper, drain_turns, &seed_result);
         crate::session::apply_item_observations(&mut mapper, drain_turns, &seed_result);
-        flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
-        flush_v6_trace(&state.config.user_dir, &mut *session, state.config.trace.v6);
+        flush_screen_trace(state.config.logs_root(), &mut *session, state.config.trace.screen);
+        flush_v6_trace(state.config.logs_root(), &mut *session, state.config.trace.v6);
         if state.config.trace.any() {
             let ptr = format!(
                 "[trace → {}: {}]",
-                state.config.user_dir.join("trace.log").display(),
+                state.config.logs_root().join("trace.log").display(),
                 state.config.trace.active_list(),
             );
             state.push_transcript_internal(&ptr, crate::state::TranscriptKind::Meta);
@@ -1898,6 +1947,9 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
             24,
         );
     }
+    // The seed above feeds only the mapper; the status line, `save_summary` and a
+    // Save State taken before the first turn read `current_room_name` (SQ-1749).
+    crate::host::turn::sync_current_room(&mut state, &*session);
 
     // [more] pager for the OPENING BANNER (SQ-0532 wave-5). The banner is one
     // batch of game output exactly like a turn's, and a v6 story box is small —
@@ -1921,10 +1973,12 @@ pub fn boot_story(req: BootRequest<'_>, hooks: &mut dyn BootHooks) -> Result<Boo
     }
 
     // If an archived transcript was loaded on startup, replace the fresh one.
-    if let Some((lines, kinds, runs, para, images)) = startup_transcript {
+    if let Some((lines, kinds, runs, para, images, anchors)) = startup_transcript {
         state.transcript = lines;
-        state.clear_anchor = None;
-        state.top_anchor = None;
+        // Auto-resume keeps the scrollback the game cleared hidden (SQ-1713).
+        state.clear_anchor = anchors.clear;
+        state.pending_clear = false;
+        state.top_anchor = anchors.top;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
         state.transcript_para = para;

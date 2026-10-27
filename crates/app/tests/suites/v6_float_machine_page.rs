@@ -142,7 +142,7 @@ fn frame_at(file: &str, pictures: Option<&str>, honor: bool, pane: Rect) -> Opti
 
     let mut state = AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honoured;
     let elems = Engine::take_transcript_elems(&mut session);

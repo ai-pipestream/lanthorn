@@ -119,7 +119,7 @@ fn build(nodes: &[(usize, PNode)], idx: &mut usize, n: usize) -> WinNode {
                 // Solid magenta so the harness exercises the graphics-as-cells path
                 // (a game's divider chrome) and it's visible in the rendered grid.
                 let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 255, 255]));
-                WinNode::Graphics(crate::engine::GraphicsWindow { win: *id, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
+                WinNode::Graphics(crate::engine::GraphicsWindow { win: *id, canvas: std::sync::Arc::new(img), version: 1, upscale: false, undrawn: false })
             }
         },
         PNode::Pair { vertical, border, split, key_bg } => {
@@ -169,10 +169,8 @@ pub fn model_from_dump(dump: &str, lines_per_win: usize) -> ScreenModel {
 /// multi-byte box glyphs don't break slicing) and `buf` is the raw buffer.
 pub fn render_to_text(dump: &str, area: Rect, lines_per_win: usize) -> (Vec<Vec<char>>, Buffer) {
     let model = model_from_dump(dump, lines_per_win);
-    let mut state = crate::state::AppState {
-        colors: crate::colors::ColorScheme::terminal_default(),
-        ..Default::default()
-    };
+    let mut state = crate::state::AppState::default();
+    state.colors = crate::colors::ColorScheme::terminal_default();
     state.config.honor_game_colours = true;
     // A dump records the origins a REAL session laid out, and that session reserved
     // a gutter for every bordered pair. Since SQ-0821 the gutter is a theme

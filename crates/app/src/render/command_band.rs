@@ -70,6 +70,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use crate::state::AppState;
+use crate::vocab::CORE_VERBS;
 
 // ── Grammar: the story's own syntax, narrowed to what the band can compose ───
 
@@ -549,20 +550,6 @@ pub fn default_verbs() -> VerbTable {
     VerbTable::new(entries, VerbSource::Builtin)
 }
 
-/// The verbs nearly every parser game needs, in the order a player reaches for
-/// them — the curated half of [`VerbTier::Core`] (SQ-1554).
-///
-/// Only ever INTERSECTED with a story's grammar: a word here that the story
-/// does not hold contributes nothing, and one it does hold is shown as spelled
-/// here — `examine`, not the `examin` a Version 3 dictionary stores — which the
-/// parser truncates back to the same entry. Two of them reaching one verb
-/// (`talk` and `tell` in a story that files them together) make one row, under
-/// whichever comes first.
-pub const CORE_VERBS: &[&str] = &[
-    "look", "examine", "take", "drop", "inventory", "open", "close", "put", "go", "enter",
-    "wait", "read", "push", "pull", "turn", "give", "talk", "ask", "tell",
-];
-
 /// The story's own verb column: one row per VERB of its grammar, tiered for a
 /// player and not for a parser (SQ-1554).
 ///
@@ -976,6 +963,49 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
     }
     band.here_source = source;
     true
+}
+
+/// Recompute [`crate::state::CommandBandState::dir_states`] from the map (SQ-1780).
+///
+/// Keyed on the current room plus the graph's two generation counters, so the
+/// twelve classifications run when the room changes or the map learns something
+/// (a walked exit, a finished exit scan bumps `tried_gen`), not every tick and
+/// never per frame. Returns `true` when the states changed (-> repaint).
+pub fn refresh_dir_states(state: &mut AppState, graph: &mapper::graph::MapGraph) -> bool {
+    let Some(band) = state.overlays.command_band.as_mut() else { return false };
+    let room = graph.current().filter(|r| graph.room(*r).is_some());
+    let key = room.map(|r| (r, graph.struct_gen(), graph.tried_gen()));
+    if band.dir_states_key == key {
+        return false;
+    }
+    band.dir_states_key = key;
+    let states = match room {
+        Some(r) => mapper::matrix::classify_room(graph, r)
+            .into_iter()
+            .map(|(d, c)| (d, dir_state_of(c)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let changed = band.dir_states != states;
+    band.dir_states = states;
+    changed
+}
+
+/// Fold the mapper's classification into the four states the quick block draws.
+fn dir_state_of(cell: mapper::matrix::MatrixCell) -> crate::state::QuickDirState {
+    use crate::state::QuickDirState as Q;
+    use mapper::matrix::MatrixCell as M;
+    match cell {
+        M::Reciprocal { .. }
+        | M::ReturnBy { .. }
+        | M::OneWay { .. }
+        | M::LeavesLayer { .. }
+        | M::SelfLoop
+        | M::Random { .. } => Q::Explored,
+        M::Exit => Q::Exit,
+        M::Probed => Q::Blocked,
+        M::Untried => Q::Untried,
+    }
 }
 
 // ── Hit rects ────────────────────────────────────────────────────────────────
@@ -1503,11 +1533,25 @@ fn draw_quick_block(
     // used to carry) — reversed video, deliberately distinct from the column
     // rows' `dialog.list_selected` (a fg/bg swap, not REVERSED — see the
     // design doc amendment for why reversed was safe to pick).
-    let cell_style = |qi: usize| {
+    // The map's word on a rose/cluster direction (SQ-1780) patches ON TOP of the
+    // quick style; hover then patches over that, so hover still wins.
+    let dir_style = |d: Option<mapper::direction::Direction>| {
+        use crate::state::QuickDirState as Q;
+        let Some(d) = d else { return style };
+        let Some(&(_, st)) = band.dir_states.iter().find(|(x, _)| *x == d) else { return style };
+        let sel = match st {
+            Q::Explored => "command_panel.quick:explored",
+            Q::Exit => "command_panel.quick:exit",
+            Q::Blocked => "command_panel.quick:blocked",
+            Q::Untried => "command_panel.quick:untried",
+        };
+        style.patch(theme.get(sel).style)
+    };
+    let cell_style = |qi: usize, d: Option<mapper::direction::Direction>| {
         if band.quick_hover == Some(qi) {
-            style.patch(theme.get("command_panel.quick:hover").style)
+            dir_style(d).patch(theme.get("command_panel.quick:hover").style)
         } else {
-            style
+            dir_style(d)
         }
     };
 
@@ -1526,7 +1570,7 @@ fn draw_quick_block(
             let cell_area = Rect { x, y, width: ROSE_CELL_W, height: 1 };
             let Some(qi) = layout.rose[cell] else { continue };
             let lx = x + ROSE_CELL_W.saturating_sub(label.chars().count() as u16);
-            let st = cell_style(qi);
+            let st = cell_style(qi, Some(ROSE_ORDER[cell]));
             if band.quick_hover == Some(qi) {
                 for cx in cell_area.x..cell_area.right() {
                     if let Some(c) = buf.cell_mut((cx, y)) {
@@ -1566,7 +1610,7 @@ fn draw_quick_block(
             let Some(qi) = layout.cluster[slot] else { continue };
             let x = cx0 + x_off;
             let cell_area = Rect { x, y, width: 1, height: 1 };
-            crate::render::draw_char_clipped(buf, x, y, glyph, cell_style(qi), cell_area);
+            crate::render::draw_char_clipped(buf, x, y, glyph, cell_style(qi, Some(CLUSTER_ORDER[slot])), cell_area);
             hits.push((qi, cell_area));
         }
     }
@@ -1584,7 +1628,7 @@ fn draw_quick_block(
             }
             let w = (word.chars().count() as u16).min(area.right() - x);
             let r = Rect { x, y, width: w, height: 1 };
-            crate::render::draw_str_clipped(buf, x, y, word, cell_style(qi), area);
+            crate::render::draw_str_clipped(buf, x, y, word, cell_style(qi, None), area);
             hits.push((qi, r));
         }
     }
@@ -3199,5 +3243,100 @@ mod tests {
             style_at(&buf2, carried.right(), cur.y),
             "the accent moved with the current column"
         );
+    }
+
+    // ── SQ-1780: the compass wears what the map knows ────────────────────────
+    use ratatui::style::Modifier;
+
+    /// A band whose current room (1) has: N walked (and returned), E a scanned exit,
+    /// everything else a scanned wall. Returns the state and the graph.
+    fn state_on_scanned_room() -> AppState {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Study".into());
+        g.add_edge(1, mapper::direction::Direction::N, 2);
+        g.add_edge(2, mapper::direction::Direction::S, 1);
+        g.record_scan(
+            1,
+            &[mapper::direction::Direction::E, mapper::direction::Direction::W],
+            &[mapper::direction::Direction::E],
+        );
+        g.set_current(1);
+        let mut s = state_with_band();
+        assert!(refresh_dir_states(&mut s, &g), "first refresh fills the states");
+        assert!(!refresh_dir_states(&mut s, &g), "an unchanged map is not recomputed");
+        s
+    }
+
+    /// The style of the last glyph of the quick word `word`, wherever the block drew it.
+    fn quick_cell_style(s: &AppState, word: &str) -> Style {
+        let mut buf = Buffer::empty(BAND);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(s, BAND, &mut buf, &mut 0, &mut hits);
+        let qi = s.overlays.command_band.as_ref().unwrap().quick.iter().position(|q| q == word).unwrap();
+        let (_, r) = *hits.quick.iter().find(|(i, _)| *i == qi).expect("hit rect");
+        buf.cell((r.right() - 1, r.y)).unwrap().style()
+    }
+
+    #[test]
+    fn rose_cells_wear_the_state_the_map_gives_their_direction() {
+        let s = state_on_scanned_room();
+        let plain = quick_cell_style(&state_with_band(), "n");
+        let theme = &s.colors.theme;
+        let exit = quick_cell_style(&s, "e");
+        assert_eq!(exit.fg, theme.get("map.matrix.cell:exit").style.fg, "an exit shares the matrix colour");
+        assert!(exit.add_modifier.contains(Modifier::BOLD), "an exit is bold");
+        let blocked = quick_cell_style(&s, "w");
+        assert!(blocked.add_modifier.contains(Modifier::DIM), "a wall is dimmed: {blocked:?}");
+        assert_ne!(blocked, plain);
+        assert_eq!(quick_cell_style(&s, "n"), plain, "an explored way looks as it always did");
+    }
+
+    #[test]
+    fn cluster_glyphs_wear_their_state_too() {
+        let s = state_on_scanned_room();
+        // up/down/in/out were asked of nobody, so the scan made them walls.
+        assert!(quick_cell_style(&s, "up").add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn hover_still_wins_over_the_exit_style() {
+        let mut s = state_on_scanned_room();
+        let qi = s.overlays.command_band.as_ref().unwrap().quick.iter().position(|q| q == "e").unwrap();
+        s.overlays.command_band.as_mut().unwrap().quick_hover = Some(qi);
+        assert!(quick_cell_style(&s, "e").add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn an_untried_direction_and_an_unknown_room_draw_as_before() {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.set_current(1);
+        let mut s = state_with_band();
+        refresh_dir_states(&mut s, &g);
+        let band = s.overlays.command_band.as_ref().unwrap();
+        assert!(band.dir_states.iter().all(|(_, q)| *q == crate::state::QuickDirState::Untried));
+        let plain = quick_cell_style(&state_with_band(), "e");
+        assert_eq!(quick_cell_style(&s, "e"), plain);
+
+        let empty = mapper::graph::MapGraph::new();
+        assert!(refresh_dir_states(&mut s, &empty), "losing the room clears the states");
+        assert!(s.overlays.command_band.as_ref().unwrap().dir_states.is_empty());
+        assert_eq!(quick_cell_style(&s, "e"), plain);
+    }
+
+    #[test]
+    fn a_tried_wall_reads_blocked_and_a_finished_scan_re_dresses_the_rose() {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.set_current(1);
+        let mut s = state_with_band();
+        refresh_dir_states(&mut s, &g);
+        g.mark_tried(1, mapper::direction::Direction::W);
+        assert!(refresh_dir_states(&mut s, &g));
+        assert!(quick_cell_style(&s, "w").add_modifier.contains(Modifier::DIM));
+        g.record_scan(1, &[mapper::direction::Direction::E], &[mapper::direction::Direction::E]);
+        assert!(refresh_dir_states(&mut s, &g), "a scan result lands without a turn");
+        assert!(quick_cell_style(&s, "e").add_modifier.contains(Modifier::BOLD));
     }
 }

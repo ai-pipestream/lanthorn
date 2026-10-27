@@ -36,6 +36,11 @@ pub struct HintSession {
     /// screen for a menu redraw (menu-reprint collapse anchor). `None` until
     /// the first screen clear establishes an anchor.
     pub clear_anchor: Option<usize>,
+    /// The clear boundary the panel top-anchors against (equal to `clear_anchor`
+    /// after every clear, as on `AppState`): lines from here on are the screen the
+    /// program last drew; older lines are scrollback. An embedding host reading
+    /// `transcript` shows `transcript[top_anchor..]` as the cleared view.
+    pub top_anchor: Option<usize>,
     /// Smooth-scroll animation easing the *displayed* offset toward `scroll`.
     /// `None` when settled or animation is disabled (the instant path).
     pub scroll_anim: Option<ScrollAnim>,
@@ -48,6 +53,14 @@ pub struct HintSession {
 }
 
 impl HintSession {
+    /// Whether the panel draws the "this game has its own hints" suggestion.
+    /// Never while a companion hint program is running (SQ-1745): the player is
+    /// already reading hints, and pointing at the story's `HINT` on top of them
+    /// is noise.
+    pub fn shows_builtin_line(&self) -> bool {
+        self.builtin_hint && !matches!(self.source, HintSource::Zcode(_))
+    }
+
     /// Scroll the transcript by `delta` rows, clamped to `[0, max]`, easing the
     /// displayed offset per the `[animation]` config (instant when disabled).
     ///
@@ -99,9 +112,17 @@ impl HintSession {
     pub fn apply_turn(&mut self, result: &crate::session::TurnResult) {
         let mut changed = false;
         if result.erase_lower {
-            let anchor = self.clear_anchor.unwrap_or(self.transcript.len());
-            self.transcript.truncate(anchor);
-            self.clear_anchor = Some(self.transcript.len());
+            // Same semantics as the story pane (`AppState::mark_screen_clear` and
+            // `apply_game_driven_result`), via the shared `screen_clear` helpers:
+            // a reprint of the screen since the last clear collapses; anything else
+            // stays as scrollback; either way the post-clear output pins to the top.
+            if let Some(anchor) =
+                crate::screen_clear::collapse_target(self.clear_anchor, &self.transcript, &result.transcript)
+            {
+                self.transcript.truncate(anchor);
+            }
+            self.clear_anchor = crate::screen_clear::pin_after_clear(self.transcript.len());
+            self.top_anchor = self.clear_anchor;
             changed = true;
         }
         if !result.transcript.is_empty() {
@@ -442,6 +463,29 @@ pub struct CommandBandState {
     /// What the WHAT column's rows actually are, which is what its header may
     /// claim. Recomputed with the lists themselves; see [`HereSource`].
     pub here_source: HereSource,
+    /// What the map knows about each way out of the CURRENT room (SQ-1780), for the
+    /// compass rose and portal cluster to dress. Empty when the current room is not
+    /// on the map, which draws exactly as before. Refreshed by
+    /// [`crate::render::command_band::refresh_dir_states`] only when `dir_states_key`
+    /// changes, never per frame.
+    pub dir_states: Vec<(Direction, QuickDirState)>,
+    /// `(room, struct_gen, tried_gen)` that `dir_states` was computed from.
+    pub dir_states_key: Option<(RoomId, u64, u64)>,
+}
+
+/// How the map sees one direction out of the current room, for the quick block
+/// (SQ-1780). A fold of the mapper's `MatrixCell`, so the compass and the direction
+/// table never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickDirState {
+    /// Walked: an edge, a loop, a layer exit or a random exit is on the map.
+    Explored,
+    /// A real exit an exit scan found, not yet walked.
+    Exit,
+    /// Tried or scanned, and the way is shut.
+    Blocked,
+    /// Never tried.
+    Untried,
 }
 
 /// Where the WHAT column's rows came from, and therefore what its header is
@@ -1149,8 +1193,16 @@ pub struct StyleRun {
     #[serde(default)]
     pub link: u32, // Glk hyperlink value for this span (0 = no link)
     #[serde(default)]
-    pub glk_style: u8, // Glk style class (0=Normal .. 10=User2); indexes the theme's per-style colour slot (SQ-0331)
+    pub glk_style: u8, // Glk style class (0=Normal .. 10=User2); indexes the theme's per-style colour slot (SQ-0331). `GLK_STYLE_TYPED_INPUT` marks the player's typed command (SQ-1758)
+    #[serde(default)]
+    pub ink: u32, // typed-command runs only: the STORY's own input colour (packed ZColour; 0 = no opinion) — `fg`/`bg` stay the prompt line's colours (SQ-1758)
 }
+
+/// `StyleRun::glk_style` value (past every Glk class, 0..=10) marking the span of
+/// a transcript line the PLAYER typed after the game's own `>` prompt (SQ-1758).
+/// The renderer draws it in the `transcript_input` theme style, unless the story
+/// stated an input style of its own (`bits`/`ink`) and `honor_game_colours` is on.
+pub const GLK_STYLE_TYPED_INPUT: u8 = 0xFF;
 
 /// Per-paragraph layout formatting for one transcript line, derived from the Glk
 /// paragraph stylehints (SQ-0330). A logical transcript line is one paragraph, so
@@ -2451,13 +2503,14 @@ pub type PendingResume =
     Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>;
 
 /// Transcript bundle loaded from an archive at startup: (lines, kinds, per-line
-/// style runs, per-line paragraph layout, per-line inline image).
+/// style runs, per-line paragraph layout, per-line inline image, clear anchors).
 pub type LoadedTranscript = Option<(
     Vec<String>,
     Vec<TranscriptKind>,
     Vec<Vec<StyleRun>>,
     Vec<ParaFmt>,
     Vec<Option<crate::inline_image::InlineImage>>,
+    crate::archive::ClearAnchors,
 )>;
 
 /// The cached map render model for the live graph, keyed by graph generation and
@@ -2707,6 +2760,29 @@ pub struct AppState {
     /// a new move ends whatever was in flight, because the move may itself be the
     /// walk back. See [`crate::return_probe`].
     pub return_search: Option<crate::return_probe::ReturnSearch>,
+    /// A search for the direction word behind a crossing the player made without naming one,
+    /// running right now, if any (SQ-1771): `climb tree` changed the room and filed a `?`. At most
+    /// one. Session state, never persisted -- what it learns is a passage in the graph. See
+    /// [`crate::relocation_probe`].
+    pub relocation_search: Option<crate::relocation_probe::RelocationSearch>,
+    /// Relocation searches waiting their turn behind [`Self::relocation_search`] (SQ-1772): a
+    /// replayed chained line can leave several unnamed crossings at once. Session state.
+    pub relocation_queue: Vec<crate::relocation_probe::RelocationSearch>,
+    /// A replay of a chained command line (`north then east`) in the shadow, running right now,
+    /// if any (SQ-1772). At most one. Session state. See [`crate::chain_probe`].
+    pub chain_replay: Option<crate::chain_probe::ChainReplay>,
+    /// The exit scan of one room running right now, if any (SQ-1773). At most one, and only when
+    /// nothing more urgent wants the shadow. Session state, never persisted -- what it learns is
+    /// on the room. See [`crate::scan_probe`].
+    pub scan_search: Option<crate::scan_probe::ExitScan>,
+    /// Exit scans waiting their turn behind the other searches (SQ-1773). Session state.
+    pub scan_queue: Vec<crate::scan_probe::ExitScan>,
+    /// Rooms an unscanned-room scan has already been queued for this session, so a room whose
+    /// `look` control keeps failing is not re-armed every turn (SQ-1773). Session state.
+    pub scan_attempted: Vec<mapper::graph::RoomId>,
+    /// In/Out passages `(origin, portal, dest)` whose compass alias has already been searched
+    /// for (SQ-1771): each is asked once, the first time the map sees it. Session state.
+    pub alias_searched: Vec<(mapper::graph::RoomId, mapper::direction::Direction, mapper::graph::RoomId)>,
     /// A Phase-2 randomness search running right now, if any (SQ-1257): after a move Phase 1
     /// could not classify statically (`DeclaredExit::Absent`/`Code`), a reseeded shadow walk
     /// asked whether the story is deciding this direction at random. Session state, never
@@ -2807,6 +2883,14 @@ pub struct AppState {
     /// replaced transcript is not merely unhelpful, it can coincide with
     /// real content and mis-anchor it).
     pub top_anchor: Option<usize>,
+    /// A clear of the primary window made by a GAME-DRIVEN turn (key, timer,
+    /// mouse, hyperlink), which records no `TurnRecord` of its own (SQ-1714). The
+    /// next recorded turn takes it over as its `cleared` flag, so a rewind past
+    /// that point re-pins the cleared screen. A bool, not a position: the
+    /// rebuilt transcript holds no lines of the game-driven turn, so a live
+    /// transcript index has no referent there. Several before one record
+    /// collapse into one (the last wins, as `clear_anchor` does).
+    pub pending_clear: bool,
     /// Monotonic transcript-content generation, bumped by every mutation of the
     /// transcript vecs (append / insert / merge / in-place edit / wholesale
     /// reset). Distinguishes a same-length content replacement (rewind / restore)
@@ -2821,6 +2905,17 @@ pub struct AppState {
     /// changed", which is the difference between the wrap cache appending and
     /// rebuilding. (SQ-1034)
     pub transcript_edits: u64,
+    /// Transcript REWRITE epoch (SQ-1715): bumped whenever the transcript is
+    /// shortened, an earlier line is shifted or replaced, or it is replaced
+    /// wholesale -- everything EXCEPT appending lines and growing the last line
+    /// in place (the typed-command echo, a game-driven fold onto the prompt).
+    /// A [`crate::history::TurnRecord`] stamps the epoch it was made under, so a
+    /// rewind can tell "the live transcript still starts with exactly the lines
+    /// that turn left behind" (cut it back) from "it has been reshaped since"
+    /// (rebuild from the records). Never persisted: an archive filters the
+    /// transcript on write, so a loaded transcript's line indices are not the
+    /// live ones the records measured.
+    pub transcript_epoch: u64,
     /// The current unbroken run of [`TranscriptEdit::Inserted`] edits, if any
     /// (SQ-1179) — what lets the wrap cache REPAIR through an
     /// insert-above-the-prompt instead of rebuilding. A `Cell` because the
@@ -2871,6 +2966,9 @@ pub struct AppState {
     /// layout the input code cannot see. `None` before the first frame, or when the command bar is
     /// hidden.
     pub(crate) input_text_origin: std::cell::Cell<Option<(u16, u16)>>,
+    /// Screen rect of the command bar's send button (SQ-1801), published by the renderer each
+    /// frame the button is drawn and `None` otherwise (empty line, char mode, no command bar).
+    pub(crate) input_submit_rect: std::cell::Cell<Option<ratatui::layout::Rect>>,
     /// Size `(cols, rows)` of the map pane's inner content, captured by the renderer each frame
     /// so `Action::Recenter` can centre against the pane the player is actually looking at
     /// (SQ-0349).
@@ -3048,6 +3146,13 @@ pub struct AppState {
     /// sit beside. Following the art instead is what made Zork Zero's drop-cap
     /// eight rows tall beside the four-line paragraph it opens.
     pub v6_hybrid_ring: std::cell::Cell<bool>,
+    /// The width a width-caching Z-machine story (v4/v5/v7/v8) was TOLD, when that
+    /// is not the pane's (`GameSession::fixed_cols`, SQ-1809) — `None` for every
+    /// other story and engine. Published each pass by
+    /// `host::screen::sync_zvm_screen_dims`, read by `render_transcript` for the
+    /// lower window's block shift (SQ-1810, `render::hand_layout`), and part of the
+    /// wrap cache's key since it moves where lines sit.
+    pub story_told_cols: std::cell::Cell<Option<u16>>,
     /// The per-axis density of the artwork this launch mounted —
     /// [`crate::graphics::PictSource::art_scale`], resolved once at boot by
     /// `startup.rs` (and again by an `@restart`, `reset.rs`) from the archive's own
@@ -3469,6 +3574,9 @@ pub struct AppState {
     /// `zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem)`.
     /// If empty, autocomplete draws only from room-description words.
     pub dict_words: Vec<String>,
+    /// The story's only `HINT` text is Infocom's InvisiClues booklet advert
+    /// (SQ-1745), so `hint` in [`Self::dict_words`] is not a built-in-hints signal.
+    pub hint_booklet_notice: bool,
     /// The words the story has PRINTED that its own dictionary holds — deduped,
     /// **most recently printed first**, extended once a turn by
     /// [`crate::input::refresh_seen_words`] (SQ-1116, accumulated by SQ-1135).
@@ -3717,7 +3825,18 @@ pub struct AppState {
     pub picture_pace_next: Option<std::time::Instant>,
 
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
-    pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// Private: written only by [`AppState::set_game_picker`], which also
+    /// derives `game_imaging`, so the two cannot drift (SQ-1804). Read through
+    /// [`AppState::game_picker`].
+    #[cfg(feature = "terminal")]
+    game_picker: Option<ratatui_image::picker::Picker>,
+    /// The plain facts (cell px, protocol) of the image backend, for core code
+    /// that must not name `ratatui_image` (SQ-1804). With the `terminal` feature
+    /// it is derived from `game_picker` whenever one is installed (`Some`
+    /// exactly when the picker is), so the two cannot disagree; a host with no
+    /// picker states it directly through [`AppState::set_game_imaging`]. Read
+    /// through [`AppState::game_imaging`].
+    game_imaging: Option<crate::imaging::GameImaging>,
     /// Whether `game_picker`'s LAUNCH-time build got any answer at all from a
     /// real stdio query (SQ-1511). `false` when `--image-protocol halfblocks`
     /// forced a picker that never queried (`Picker::halfblocks()` touches no
@@ -3811,6 +3930,7 @@ pub struct AppState {
     /// Cached graphics-window protocols (interior-mutable for the render pass).
     pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
     /// Inline-image band blitter (interior-mutable for the render pass).
+    #[cfg(feature = "terminal")]
     pub inline_image_render: std::cell::RefCell<crate::render::inline_image::InlineImageRender>,
 
     /// Set when a gvm runtime fault has halted the VM (as opposed to a clean
@@ -3919,6 +4039,13 @@ impl Default for AppState {
             reveal: None,
             probe: crate::probe::ShadowProbe::default(),
             return_search: None,
+            relocation_search: None,
+            relocation_queue: Vec::new(),
+            chain_replay: None,
+            scan_search: None,
+            scan_queue: Vec::new(),
+            scan_attempted: Vec::new(),
+            alias_searched: Default::default(),
             random_exit_search: None,
             random_exit_pre_move_save: None,
             random_exit_agreements: None,
@@ -3948,9 +4075,11 @@ impl Default for AppState {
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,
             clear_anchor: None,
+            pending_clear: false,
             top_anchor: None,
             transcript_gen: 0,
             transcript_edits: 0,
+            transcript_epoch: 0,
             transcript_tail_insert: std::cell::Cell::new(None),
             transcript_wrap: std::cell::RefCell::new(None),
             raster_wrap: std::cell::RefCell::new(None),
@@ -3959,6 +4088,7 @@ impl Default for AppState {
             render_job: std::cell::RefCell::new(None),
             render_steps: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             input_text_origin: std::cell::Cell::new(None),
+            input_submit_rect: std::cell::Cell::new(None),
             map_pane_size: std::cell::Cell::new(None),
             modal_list_viewport: 0,
             input: crate::text_field::TextField::default(),
@@ -3997,6 +4127,7 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_hybrid_ring: std::cell::Cell::new(false),
+            story_told_cols: std::cell::Cell::new(None),
             v6_art_scale: (crate::session::V6_ART_SCALE, crate::session::V6_ART_SCALE),
             v6_scale_lock_fallback: std::cell::Cell::new(false),
             v6_scale_lock_inapplicable: std::cell::Cell::new(false),
@@ -4043,6 +4174,7 @@ impl Default for AppState {
             pending_filename: None,
             filename_submitted: None,
             dict_words: Vec::new(),
+            hint_booklet_notice: false,
             seen_words: Vec::new(),
             seen_nouns: Vec::new(),
             seen_scanned: 0,
@@ -4083,7 +4215,9 @@ impl Default for AppState {
             input_deadline: None,
             glulx_timer_next_fire: None,
             picture_pace_next: None,
+            #[cfg(feature = "terminal")]
             game_picker: None,
+            game_imaging: None,
             game_picker_query_answered: false,
             glk_cell_px: None,
             min_story_screen: None,
@@ -4092,6 +4226,7 @@ impl Default for AppState {
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             query_sweep: crate::query_sweep::QuerySweep::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),
+            #[cfg(feature = "terminal")]
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
             game_ended: false,
@@ -4107,6 +4242,44 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Install (or clear) the in-game graphics picker. The ONLY writer of
+    /// `game_picker`: it derives `game_imaging` from the same value, so core
+    /// code reading the plain facts can never disagree with the picker
+    /// (SQ-1804).
+    #[cfg(feature = "terminal")]
+    pub fn set_game_picker(&mut self, picker: Option<ratatui_image::picker::Picker>) {
+        self.game_imaging = picker.as_ref().map(crate::imaging::GameImaging::from);
+        self.game_picker = picker;
+    }
+
+    /// The real picker, for the code that builds and encodes protocols. Core
+    /// code that only wants "images on / cell px / protocol" reads
+    /// [`AppState::game_imaging`] instead.
+    #[cfg(feature = "terminal")]
+    pub fn game_picker(&self) -> Option<&ratatui_image::picker::Picker> {
+        self.game_picker.as_ref()
+    }
+
+    /// Install (or clear) the image-backend facts for a host that has no terminal
+    /// picker (SQ-1804). Always available. With the `terminal` feature it also
+    /// CLEARS `game_picker`, so the invariant "if a picker is present, the
+    /// imaging is derived from it" holds whichever setter ran last: imaging
+    /// stated here means imaging without a terminal picker.
+    pub fn set_game_imaging(&mut self, imaging: Option<crate::imaging::GameImaging>) {
+        #[cfg(feature = "terminal")]
+        {
+            self.game_picker = None;
+        }
+        self.game_imaging = imaging;
+    }
+
+    /// The plain image-backend facts (`Some` exactly when game images are on).
+    /// Derived from the picker when there is one, stated by the host otherwise.
+    /// SQ-1804.
+    pub fn game_imaging(&self) -> Option<crate::imaging::GameImaging> {
+        self.game_imaging
+    }
+
     /// Return true if any time-based animation/effect is in flight, so the run
     /// loop should fast-poll (and redraw) to advance it without input. Covers the
     /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
@@ -5092,7 +5265,7 @@ impl AppState {
                 if job.gen == graph.struct_gen() {
                     if self.config.trace.map {
                         let steps = self.render_steps_snapshot();
-                        write_map_trace(&self.config.user_dir, &steps, true);
+                        write_map_trace(self.config.logs_root(), &steps, true);
                     }
                     *self.map_render.borrow_mut() =
                         Some(MapRenderCache { gen: job.gen, layer: job.layer, rm });
@@ -5126,6 +5299,7 @@ impl AppState {
     /// Poll the background v6 raster encode (SQ-0469): install a completed
     /// protocol and report whether a redraw is warranted. Called once per loop
     /// tick so an off-thread encode surfaces within a poll interval.
+    #[cfg(feature = "terminal")]
     pub fn poll_v6_encode_job(&self) -> bool {
         self.graphics_render.borrow_mut().poll_v6_job()
     }
@@ -5421,7 +5595,7 @@ impl AppState {
     /// rather than an organically-followed reader, and takes the instant-jump
     /// path instead of arming a follow-ease (SQ-1607).
     pub fn mark_screen_clear(&mut self) {
-        self.clear_anchor = Some(self.transcript.len());
+        self.clear_anchor = crate::screen_clear::pin_after_clear(self.transcript.len());
         self.top_anchor = self.clear_anchor;
         self.transcript_scroll = 0;
         self.scroll_anim = None;
@@ -5442,6 +5616,33 @@ impl AppState {
         self.transcript_runs.truncate(len);
         self.transcript_para.truncate(len);
         self.transcript_images.truncate(len);
+        self.bump_transcript_epoch();
+        self.touch_transcript(TranscriptEdit::Rewrote);
+    }
+
+    /// Record that the transcript was shortened or an earlier line moved or was
+    /// replaced (see [`AppState::transcript_epoch`]). Called by the shared
+    /// mutators; a site that clears `transcript` by hand must call it too.
+    pub fn bump_transcript_epoch(&mut self) {
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+    }
+
+    /// Trim the last transcript line to its first `chars` chars, dropping or
+    /// clamping its style runs to match -- the inverse of
+    /// [`append_to_last_transcript_line`](Self::append_to_last_transcript_line),
+    /// used by a rewind to undo the echo that grew the prompt line (SQ-1715). A
+    /// no-op when the line is already that short. Not an epoch bump: it only
+    /// undoes a tail-grow.
+    pub fn shrink_last_transcript_line(&mut self, chars: usize) {
+        let Some(last) = self.transcript.last_mut() else { return };
+        let Some((byte, _)) = last.char_indices().nth(chars) else { return };
+        last.truncate(byte);
+        if let Some(runs) = self.transcript_runs.last_mut() {
+            runs.retain(|r| r.start < chars);
+            for r in runs.iter_mut() {
+                r.end = r.end.min(chars);
+            }
+        }
         self.touch_transcript(TranscriptEdit::Rewrote);
     }
 
@@ -5536,6 +5737,8 @@ impl AppState {
             }
             TranscriptEdit::Inserted { at, count } => {
                 debug_assert!(count > 0, "an insert of zero lines is a no-op mischaracterized as Inserted");
+                // Lines at and after `at` shifted down (SQ-1715).
+                self.bump_transcript_epoch();
                 self.transcript_edits = self.transcript_edits.wrapping_add(1);
                 let since_edits = self.transcript_edits - 1;
                 let run = match self.transcript_tail_insert.take() {
@@ -5755,9 +5958,15 @@ impl AppState {
     /// Append `text` to the last transcript line in place (used in inline-prompt
     /// mode so the typed command joins the game's `>` line). If the transcript is
     /// empty, push `text` as a new line instead. Only the last line's String is
-    /// edited; its parallel runs/kinds/images/styles are left as-is (the appended
-    /// chars carry no style runs and render in the input style).
-    pub fn append_to_last_transcript_line(&mut self, text: &str) {
+    /// edited; its parallel kinds/images/styles are left as-is.
+    ///
+    /// The appended chars get a [`GLK_STYLE_TYPED_INPUT`] run (SQ-1758), so the
+    /// renderer draws them in the `transcript_input` style while the `>` before
+    /// them stays story text — the line's KIND is deliberately not changed. The run
+    /// carries `style`, the story's own input style (`bits`/`ink`), and the prompt
+    /// line's colours when it has any, so the game's background band stays
+    /// continuous across the command (SQ-0269, SQ-0263).
+    pub fn append_to_last_transcript_line(&mut self, text: &str, style: crate::engine::InputStyle) {
         if self.transcript.is_empty() {
             self.push_transcript_kind(text, TranscriptKind::Input);
             return;
@@ -5766,16 +5975,22 @@ impl AppState {
         let start = self.transcript.last().unwrap().chars().count();
         self.transcript.last_mut().unwrap().push_str(text);
         let end = start + text.chars().count();
-        // Inherit the colour of the line's trailing style run so the echoed command
-        // is drawn in the game's prompt colours instead of the uncoloured theme base,
-        // and the SQ-0263 background band stays continuous across it. Only fg/bg are
-        // carried (not reverse/bold bits or a hyperlink). No coloured run → plain
-        // append (the theme case), unchanged. (SQ-0269)
-        if let Some(runs) = self.transcript_runs.last_mut() {
-            if let Some(&StyleRun { fg, bg, .. }) = runs.last() {
-                if fg != 0 || bg != 0 {
-                    runs.push(StyleRun { start, end, bits: 0, fg, bg, link: 0, glk_style: 0 });
-                }
+        if end > start {
+            self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
+            if let Some(runs) = self.transcript_runs.last_mut() {
+                // The prompt's colours are the trailing run's fg/bg (SQ-0269). Only
+                // fg/bg are taken, not reverse/bold bits or a hyperlink.
+                let (fg, bg) = runs.last().map(|r| (r.fg, r.bg)).unwrap_or((0, 0));
+                runs.push(StyleRun {
+                    start,
+                    end,
+                    bits: style.bits,
+                    fg,
+                    bg,
+                    link: 0,
+                    glk_style: GLK_STYLE_TYPED_INPUT,
+                    ink: style.ink,
+                });
             }
         }
         // The only caller (`finish_command_turn`, inline-prompt mode) joins the
@@ -5783,6 +5998,42 @@ impl AppState {
         // sink has no such line to join, so it gets the same `> ` prefix the
         // command-bar path writes via `push_transcript_kind` (SQ-0410).
         self.stream_transcript(&format!("> {text}"), TranscriptKind::Input);
+    }
+
+    /// Decide what of the story's RAW input style `raw` is actually a style for
+    /// INPUT, by comparing it with what the prompt on screen was printed in
+    /// (SQ-1758). A story that colours all its text -- Photopia's black page ink --
+    /// is not styling its input, so a colour equal to the prompt's is "no opinion"
+    /// and the theme's input colour applies. Z-machine bits are compared the same
+    /// way (`bits_vs_prompt`); Glulx `style_Input` hints always stand.
+    ///
+    /// The prompt's style is read from the transcript's last line -- its trailing
+    /// run, else the colour prevailing before it -- never from engine memory, which
+    /// a Save State restore would reset. With neither, there is no reference and
+    /// the story's ink (and Z-machine bits) count as no opinion.
+    pub fn input_style_against_prompt(&self, raw: crate::engine::InputStyle) -> crate::engine::InputStyle {
+        let trailing = self.transcript_runs.last().and_then(|runs| runs.last());
+        let prevailing = self.prevailing_run_colour_before(self.transcript.len());
+        // Nothing on screen to compare with (the boot banner is pushed as flat text):
+        // a story's own colour wins only by being SHOWN to differ from its prompt, so
+        // the theme applies. The same goes for Z-machine bits; Glulx hints still stand.
+        if trailing.is_none() && prevailing.is_none() {
+            return crate::engine::InputStyle {
+                bits: if raw.bits_vs_prompt { 0 } else { raw.bits },
+                ink: 0,
+                bits_vs_prompt: raw.bits_vs_prompt,
+            };
+        }
+        let bits = trailing.map(|r| r.bits & 0x07).unwrap_or(0);
+        let fg = match trailing {
+            Some(r) if r.fg != 0 => r.fg,
+            _ => prevailing.map(|(fg, _)| fg).unwrap_or(0),
+        };
+        crate::engine::InputStyle {
+            bits: if raw.bits_vs_prompt && raw.bits == bits { 0 } else { raw.bits },
+            ink: if raw.ink == fg { 0 } else { raw.ink },
+            bits_vs_prompt: raw.bits_vs_prompt,
+        }
     }
 
     /// Merge transcript line `idx` into line `idx - 1`, concatenating the text and
@@ -5793,6 +6044,12 @@ impl AppState {
     /// rather than on a detached line below (SQ-0274). A no-op for `idx == 0` or
     /// out of range. Assumes the parallel arrays are length-aligned (the push
     /// methods maintain this).
+    ///
+    /// Does NOT bump [`AppState::transcript_epoch`] (SQ-1715): both callers fold a
+    /// line just pushed at the end onto the prompt line before it, which only
+    /// GROWS the old last line. A rewind's cut-back undoes that growth with the
+    /// record's `transcript_tail_chars`; a caller that merged anywhere else would
+    /// have to bump the epoch itself.
     pub fn merge_line_into_previous(&mut self, idx: usize) {
         if idx == 0 || idx >= self.transcript.len() {
             return;
@@ -5883,7 +6140,7 @@ impl AppState {
                 Some(last) if last.end == c && last.bits == bits && last.fg == cf && last.bg == cb && last.link == link && last.glk_style == gs => {
                     last.end = c + 1;
                 }
-                _ => runs.push(StyleRun { start: c, end: c + 1, bits, fg: cf, bg: cb, link, glk_style: gs }),
+                _ => runs.push(StyleRun { start: c, end: c + 1, bits, fg: cf, bg: cb, link, glk_style: gs, ink: 0 }),
             }
         }
         if idx < self.transcript_runs.len() {
@@ -6069,7 +6326,7 @@ impl AppState {
                         Some(r) if r.end == col && r.bits == bits && r.fg == pfg && r.bg == pbg && r.link == link && r.glk_style == glk_style => {
                             r.end = col + 1;
                         }
-                        _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg, link, glk_style }),
+                        _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg, link, glk_style, ink: 0 }),
                     }
                 }
                 rem = rem.saturating_sub(1);
@@ -6177,9 +6434,19 @@ impl AppState {
     /// `Some(..)` at retained head indices (e.g. an inline image a Glulx game drew
     /// before the load, now indexing a different, shorter transcript).
     pub fn reset_transcript_sidecars(&mut self) {
+        self.bump_transcript_epoch();
         self.touch_transcript(TranscriptEdit::Rewrote);
         self.transcript_styles = vec![None; self.transcript.len()];
         self.transcript_images = vec![None; self.transcript.len()];
+        self.reset_transcript_derived();
+    }
+
+    /// The state DERIVED from the transcript rather than parallel to it: the
+    /// scraped word set and the `[more]` pager's baseline. Dropped whenever the
+    /// transcript is replaced or cut back, rebuilt from what is left (SQ-1715
+    /// splits this out of [`reset_transcript_sidecars`](Self::reset_transcript_sidecars)
+    /// so a rewind that KEEPS its styles and images can still reset these).
+    pub fn reset_transcript_derived(&mut self) {
         // The scraped word set is a sidecar too, and the most derived one of the
         // lot: it is the transcript read through the story's dictionary
         // (SQ-1135). A wholesale replacement — a restore, a resume — is exactly
@@ -6273,6 +6540,30 @@ impl AppState {
         }
         let cell = (col - x0) as usize;
         Some(crate::textwidth::col_to_char_idx(self.input.as_str(), cell).min(self.input.char_len()))
+    }
+
+    /// The command bar's send button rect as last drawn, if it is on screen (SQ-1801).
+    pub fn input_submit_area(&self) -> Option<ratatui::layout::Rect> {
+        self.input_submit_rect.get()
+    }
+
+    /// Is `(col, row)` on the command bar's send button (SQ-1801)?
+    ///
+    /// The rect is the renderer's, so this is only true while the button is actually on screen:
+    /// the renderer publishes `None` for an empty line, char mode and an off command bar, and the
+    /// guards here cover the frames in between (a stale rect after the line is cleared, a modal
+    /// covering the bar).
+    pub fn input_submit_hit(&self, col: u16, row: u16) -> bool {
+        // The inline prompt's button (the command panel's) exists only while the panel is up;
+        // the command bar's does not care about the panel.
+        (self.config.command_bar || self.command_band_visible())
+            && !self.char_mode
+            && !self.event_wait
+            && !self.input.value.is_empty()
+            && !self.any_modal_overlay_open()
+            && self.input_submit_rect.get().is_some_and(|r| {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            })
     }
 
     /// Clear the current autocomplete suggestions.
@@ -6420,6 +6711,56 @@ pub(crate) fn write_map_trace(user_dir: &std::path::Path, steps: &[String], on: 
 #[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
+
+    /// SQ-1804: `game_imaging` is derived from `game_picker` by the one setter,
+    /// so installing, replacing and clearing the picker moves both together.
+    #[test]
+    fn set_game_picker_keeps_game_imaging_in_step() {
+        use crate::imaging::{GameImaging, ImageProtocol};
+        let mut s = AppState::default();
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        assert_eq!(
+            s.game_imaging(),
+            Some(GameImaging { cell_px: (9, 19), protocol: ImageProtocol::Kitty })
+        );
+        assert!(s.game_picker().is_some());
+
+        s.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+        let g = s.game_imaging().expect("halfblocks picker installed");
+        assert_eq!(g.protocol, ImageProtocol::Halfblocks);
+        let f = s.game_picker().expect("picker").font_size();
+        assert_eq!(g.cell_px, (f.width, f.height));
+
+        s.set_game_picker(None);
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+    }
+
+    /// SQ-1804: imaging stated without a picker clears any picker, so "a picker
+    /// is present => the imaging is derived from it" holds whichever setter ran
+    /// last, in both directions.
+    #[test]
+    fn set_game_imaging_and_set_game_picker_never_leave_a_stale_picker() {
+        use crate::imaging::{GameImaging, ImageProtocol};
+        let stated = GameImaging { cell_px: (11, 23), protocol: ImageProtocol::Sixel };
+        let mut s = AppState::default();
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        s.set_game_imaging(Some(stated));
+        assert!(s.game_picker().is_none(), "stated imaging means imaging without a picker");
+        assert_eq!(s.game_imaging(), Some(stated));
+
+        s.set_game_picker(Some(crate::render::graphics::kitty_picker(9, 19)));
+        assert_eq!(
+            s.game_imaging(),
+            Some(GameImaging { cell_px: (9, 19), protocol: ImageProtocol::Kitty }),
+            "a picker installed after stated imaging replaces it"
+        );
+
+        s.set_game_imaging(None);
+        assert!(s.game_picker().is_none() && s.game_imaging().is_none());
+    }
 
     #[test]
     fn appstate_history_defaults_empty() {
@@ -6781,7 +7122,7 @@ mod tests {
     fn append_to_last_transcript_line_appends_to_existing_last_line() {
         let mut s = AppState::default();
         s.push_transcript_kind(">", TranscriptKind::Story);
-        s.append_to_last_transcript_line("look");
+        s.append_to_last_transcript_line("look", Default::default());
         assert_eq!(s.transcript.len(), 1);
         assert_eq!(s.transcript[0], ">look");
     }
@@ -6790,7 +7131,7 @@ mod tests {
     fn append_to_last_transcript_line_pushes_new_line_when_empty_and_keeps_arrays_aligned() {
         let mut s = AppState::default();
         assert!(s.transcript.is_empty());
-        s.append_to_last_transcript_line("hi");
+        s.append_to_last_transcript_line("hi", Default::default());
         assert_eq!(s.transcript, vec!["hi".to_string()]);
         assert_eq!(s.transcript.len(), s.transcript_kinds.len());
         assert_eq!(s.transcript.len(), s.transcript_styles.len());
@@ -6808,24 +7149,117 @@ mod tests {
             TranscriptKind::Story,
             &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0, false)],
         );
-        s.append_to_last_transcript_line("look");
+        s.append_to_last_transcript_line("look", Default::default());
         assert_eq!(s.transcript.last().unwrap(), ">look");
         let tail = s.transcript_runs.last().unwrap().last().unwrap();
         assert_eq!((tail.start, tail.end), (1, 5), "run covers the appended 'look'");
         assert_eq!(tail.bg, pack_zcolour(ZColour::True24(0x00FF_FFFF)),
             "echo inherits the prompt's white background (keeps the SQ-0263 band)");
-        assert_eq!(tail.bits, 0, "reverse/bold bits are not carried onto the echo");
+        assert_eq!(tail.bits, 0, "the PROMPT's reverse/bold bits are not carried onto the echo");
+        assert_eq!(tail.glk_style, GLK_STYLE_TYPED_INPUT);
     }
 
     #[test]
-    fn append_to_last_transcript_line_adds_no_run_when_prompt_is_uncoloured() {
+    fn append_to_last_transcript_line_marks_the_command_as_typed_input_on_an_uncoloured_prompt() {
         let mut s = AppState::default();
         s.push_transcript_kind(">", TranscriptKind::Story); // no coloured runs
-        let before = s.transcript_runs.last().map(|r| r.len()).unwrap_or(0);
-        s.append_to_last_transcript_line("look");
+        s.append_to_last_transcript_line("look", Default::default());
         assert_eq!(s.transcript.last().unwrap(), ">look");
-        let after = s.transcript_runs.last().map(|r| r.len()).unwrap_or(0);
-        assert_eq!(before, after, "no coloured trailing run → plain append (theme case unchanged)");
+        assert_eq!(s.transcript_kinds.last(), Some(&TranscriptKind::Story), "the line stays a Story line");
+        let runs = s.transcript_runs.last().unwrap();
+        assert_eq!(runs.len(), 1, "exactly one run: the typed command");
+        let r = runs[0];
+        assert_eq!((r.start, r.end, r.glk_style), (1, 5, GLK_STYLE_TYPED_INPUT));
+        assert_eq!((r.fg, r.bg, r.ink, r.bits), (0, 0, 0, 0), "no prompt colours, no story opinion");
+    }
+
+    // ── SQ-1758: raw engine style vs the prompt on screen ───────────────────
+
+    fn prompt_in(bits: u8, fg: ZColourForTest) -> AppState {
+        let mut s = AppState::default();
+        s.push_transcript_runs(
+            ">",
+            TranscriptKind::Story,
+            &[(1, bits, fg, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0, false)],
+        );
+        s
+    }
+    type ZColourForTest = zvm::screen::ZColour;
+
+    fn raw(bits: u8, ink: u32, vs: bool) -> crate::engine::InputStyle {
+        crate::engine::InputStyle { bits, ink, bits_vs_prompt: vs }
+    }
+
+    #[test]
+    fn a_colour_equal_to_the_prompts_is_no_opinion() {
+        use zvm::screen::ZColour;
+        let red = pack_zcolour(ZColour::Standard(3));
+        let s = prompt_in(0, ZColour::Standard(3));
+        assert_eq!(s.input_style_against_prompt(raw(0, red, true)).ink, 0);
+    }
+
+    #[test]
+    fn a_colour_changed_just_for_the_read_is_kept() {
+        use zvm::screen::ZColour;
+        let green = pack_zcolour(ZColour::Standard(4));
+        let s = prompt_in(0, ZColour::Standard(3));
+        assert_eq!(s.input_style_against_prompt(raw(0, green, true)).ink, green);
+    }
+
+    #[test]
+    fn bold_only_for_input_is_bold_with_the_theme_colour() {
+        use zvm::screen::ZColour;
+        let red = pack_zcolour(ZColour::Standard(3));
+        let s = prompt_in(0, ZColour::Standard(3));
+        let st = s.input_style_against_prompt(raw(0x02, red, true));
+        assert_eq!((st.bits, st.ink), (0x02, 0));
+        // …and bold throughout the page is not an input style.
+        let bold_page = prompt_in(0x02, ZColour::Default);
+        assert_eq!(bold_page.input_style_against_prompt(raw(0x02, 0, true)).bits, 0);
+    }
+
+    #[test]
+    fn glulx_input_bits_always_stand_but_an_ink_equal_to_the_prompt_does_not() {
+        use zvm::screen::ZColour;
+        let black = pack_zcolour(ZColour::True24(0));
+        let s = prompt_in(0x02, ZColour::True24(0));
+        let st = s.input_style_against_prompt(raw(0x02, black, false));
+        assert_eq!((st.bits, st.ink), (0x02, 0));
+    }
+
+    #[test]
+    fn with_nothing_on_screen_to_compare_the_story_has_no_opinion() {
+        use zvm::screen::ZColour;
+        let mut s = AppState::default();
+        s.push_transcript_kind(">", TranscriptKind::Story); // flat banner text: no runs anywhere
+        let red = pack_zcolour(ZColour::Standard(3));
+        let z = s.input_style_against_prompt(raw(0x02, red, true));
+        assert_eq!((z.bits, z.ink), (0, 0), "Z-machine: ink and bits both drop");
+        let g = s.input_style_against_prompt(raw(0x02, red, false));
+        assert_eq!((g.bits, g.ink), (0x02, 0), "Glulx: bits stand, ink drops");
+    }
+
+    #[test]
+    fn an_uncoloured_prompt_line_compares_against_the_prevailing_page_colour() {
+        use zvm::screen::ZColour;
+        let red = pack_zcolour(ZColour::Standard(3));
+        let mut s = AppState::default();
+        s.push_transcript_runs(
+            "You are in a room.",
+            TranscriptKind::Story,
+            &[(18, 0, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default(), 0, false)],
+        );
+        s.push_transcript_kind(">", TranscriptKind::Story); // the prompt line carries no run
+        assert_eq!(s.input_style_against_prompt(raw(0, red, true)).ink, 0);
+    }
+
+    #[test]
+    fn append_to_last_transcript_line_carries_the_stories_own_input_style() {
+        let mut s = AppState::default();
+        s.push_transcript_kind(">", TranscriptKind::Story);
+        s.append_to_last_transcript_line("look", crate::engine::InputStyle { bits: 0x02, ink: 0x0300_FF00, ..Default::default() });
+        let r = s.transcript_runs.last().unwrap()[0];
+        assert_eq!((r.bits, r.ink), (0x02, 0x0300_FF00));
     }
 
     #[test]
@@ -7049,6 +7483,30 @@ mod tests {
     }
 
     #[test]
+    fn transcript_epoch_moves_on_a_rewrite_and_not_on_an_append_or_tail_growth() {
+        // SQ-1715: the epoch is what lets a rewind trust a recorded transcript
+        // length. Appends and growing the prompt line leave it alone (every typed
+        // turn does both); a shorten, an insert above the prompt and a wholesale
+        // replacement move it.
+        let mut s = AppState::default();
+        s.push_transcript("room\n>");
+        let e = s.transcript_epoch;
+        s.append_to_last_transcript_line("look", Default::default());
+        s.push_transcript("reply\n>");
+        s.merge_line_into_previous(s.transcript.len() - 1);
+        assert_eq!(s.transcript_epoch, e, "append / echo / fold do not move the epoch");
+        s.shrink_last_transcript_line(1);
+        assert_eq!(s.transcript_epoch, e, "undoing a tail growth does not either");
+        s.truncate_transcript(s.transcript.len());
+        assert_eq!(s.transcript_epoch, e, "a no-op truncate does not");
+        s.truncate_transcript(1);
+        assert_ne!(s.transcript_epoch, e, "a shorten does");
+        let e = s.transcript_epoch;
+        s.reset_transcript_sidecars();
+        assert_ne!(s.transcript_epoch, e, "a wholesale replacement does");
+    }
+
+    #[test]
     fn truncate_transcript_trims_all_sidecars_and_bumps_gen() {
         // SQ-0407: collapsing a menu reprint truncates the transcript AND every
         // parallel sidecar vec (they must stay length-synced) and invalidates the
@@ -7141,7 +7599,7 @@ mod tests {
         s.push_transcript_runs("ab cd", TranscriptKind::Story,
             &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         assert_eq!(s.transcript.last().unwrap(), "ab cd");
-        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
+        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0, ink: 0 }]);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert_eq!(s.transcript.len(), s.transcript_kinds.len());
     }
@@ -7157,8 +7615,8 @@ mod tests {
         let n = s.transcript.len();
         assert_eq!(s.transcript[n - 2], "A");
         assert_eq!(s.transcript[n - 1], "B");
-        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
-        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
+        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0, ink: 0 }]);
+        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0, ink: 0 }]);
     }
 
     #[test]
@@ -8657,7 +9115,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -8713,7 +9171,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
-            clear_anchor: None,
+            clear_anchor: None, top_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -8757,15 +9215,45 @@ mod tests {
         assert_eq!(hs.transcript.len(), 3);
         assert_eq!(hs.clear_anchor, Some(0));
 
-        // Second menu redraw: must collapse the first reprint, not stack on it.
-        hs.apply_turn(&turn_result("m2a\nm2b", true));
+        // Second menu redraw (same menu, cursor moved): must collapse the first
+        // reprint, not stack on it.
+        hs.apply_turn(&turn_result("m1a\nm1b\nm1c*", true));
         assert_eq!(
             hs.transcript.len(),
-            2,
+            3,
             "second erase_lower collapses the prior reprint back to the anchor"
         );
-        assert_eq!(hs.transcript, vec!["m2a".to_string(), "m2b".to_string()]);
+        assert_eq!(hs.transcript, vec!["m1a".to_string(), "m1b".to_string(), "m1c*".to_string()]);
         assert_eq!(hs.scroll, 0);
+    }
+
+    /// SQ-1789: intro, clear, menu, clear (redraw), menu again, clear, clue. Each
+    /// clear pins the view to the text since it (`top_anchor`), the first clear
+    /// included; the intro stays in scrollback; menu reprints collapse.
+    #[test]
+    fn apply_turn_every_clear_pins_to_the_text_since_it_and_keeps_the_intro_as_scrollback() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        let since = |hs: &HintSession| hs.transcript[hs.top_anchor.unwrap()..].to_vec();
+
+        hs.apply_turn(&turn_result("intro 1\nSample Question", false));
+        assert_eq!(hs.top_anchor, None, "nothing cleared yet");
+
+        hs.apply_turn(&turn_result("menu a\nmenu b", true));
+        assert_eq!(hs.top_anchor, Some(2), "the FIRST clear pins too");
+        assert_eq!(since(&hs), vec!["menu a", "menu b"]);
+        assert_eq!(hs.transcript[0], "intro 1", "the intro is scrollback, not deleted");
+
+        hs.apply_turn(&turn_result("menu a\nmenu b*", true));
+        assert_eq!(hs.transcript.len(), 4, "the redraw collapsed instead of stacking");
+        assert_eq!(hs.top_anchor, Some(2));
+        assert_eq!(hs.clear_anchor, hs.top_anchor);
+        assert_eq!(since(&hs), vec!["menu a", "menu b*"]);
+
+        hs.apply_turn(&turn_result("the clue\nsecond clue line", true));
+        assert_eq!(hs.top_anchor, Some(4), "a different screen is kept as scrollback");
+        assert_eq!(since(&hs), vec!["the clue", "second clue line"]);
+        assert_eq!(hs.transcript.len(), 6);
     }
 
     #[test]

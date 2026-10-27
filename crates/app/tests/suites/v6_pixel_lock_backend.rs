@@ -185,13 +185,13 @@ fn render(
     // The REAL constructors: `Picker::halfblocks()` is what `--image-protocol
     // halfblocks` and every failed capability query leave behind, and its nominal
     // 10x20 is the whole crux of this quest.
-    state.game_picker = Some(if halfblocks {
+    state.set_game_picker(Some(if halfblocks {
         Picker::halfblocks()
     } else {
         let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(KITTY_CELL.0, KITTY_CELL.1));
         p.set_protocol_type(ProtocolType::Kitty);
         p
-    });
+    }));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state.config.v6_pixel_lock = lock;
@@ -406,7 +406,7 @@ fn the_raster_arm_ignores_the_lock_on_a_cell_backend_too() {
         let raster = |lock: bool| {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(Picker::halfblocks());
+            state.set_game_picker(Some(Picker::halfblocks()));
             state.config.v6_render = app::config::V6RenderMode::Raster;
             state.config.v6_pixel_lock = lock;
             state.v6_art_scale = art_scale;

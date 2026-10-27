@@ -168,8 +168,7 @@ enum Draw {
 fn frame(model: &app::engine::ScreenModel, honor: bool, pane: (u16, u16)) -> (String, Vec<Draw>) {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(CELL.0 as u16, CELL.1 as u16)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(CELL.0 as u16, CELL.1 as u16))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, pane.0, pane.1);

@@ -4,7 +4,7 @@
 //! ```text
 //! > light lanturn
 //! I don't know the word "lanturn".
-//! ● this story knows — lantern
+//! ● this game knows — lantern
 //! ```
 //!
 //! This is the first feature to speak through [`crate::assist`]. Guess-the-verb
@@ -75,7 +75,7 @@
 //!    UNVETTED claim built on it alone is worthless noise (SQ-1644). So a
 //!    candidate from this source is marked vetting-mandatory
 //!    ([`Pick::requires_vetting`]) and [`offer_vocabulary`] never shows one
-//!    through the unvetted "this story knows" fallback — only through a
+//!    through the unvetted "this game knows" fallback — only through a
 //!    vetted "try instead", or not at all.
 //! 7. **A running-together of two of the story's own words — and only ever
 //!    shown once vetted, same as source 6.** Every source above answers
@@ -138,7 +138,7 @@
 //! the front door says nothing for `illuminate lamp`; five rooms later, with the
 //! lantern in sight, it says `try instead — light`.
 //!
-//! That is what earns the wording. `this story knows` is a fact about a table;
+//! That is what earns the wording. `this game knows` is a fact about a table;
 //! `try instead` is a recommendation, and would make this feature's own failure
 //! worse if it were made without evidence. With the probe off, unavailable, or
 //! busy with the previous turn's question, the line drops back to the fact.
@@ -283,8 +283,22 @@ impl StoryVocabulary {
     /// gets the lexicon.
     pub fn with_story_text(mut self, text: Option<BTreeSet<String>>) -> StoryVocabulary {
         self.text_words = text.unwrap_or_default();
-        self.spellings = full_spellings(self.words.keys(), self.key_len, &self.text_words);
+        // Below `MIN_SPELLED_KEY` only a NOUN-only entry is spelled: the text
+        // names objects, and a prefix shared with a verb (`dri` for drink,
+        // `rub`) would be spelled out as whatever noun the text happens to hold.
+        let short = self.key_len < MIN_SPELLED_KEY;
+        let keys = self
+            .words
+            .iter()
+            .filter(|(_, r)| !short || (r.noun && !r.verb))
+            .map(|(k, _)| k);
+        self.spellings = full_spellings(keys, self.key_len, &self.text_words);
         self
+    }
+
+    /// Every entry of `words` as the player should see it ([`Self::spell`]).
+    pub fn spell_all(&self, words: Vec<String>) -> Vec<String> {
+        words.iter().map(|w| self.spell(w).to_string()).collect()
     }
 
     /// Every word the story's own static text holds — empty where the engine
@@ -732,7 +746,7 @@ pub struct Pick {
     /// preposition-anchored cousin is exempt from this).
     ///
     /// A pick with this set must never reach the player through the unvetted
-    /// "this story knows" fallback — only through a vetted "try instead", or
+    /// "this game knows" fallback — only through a vetted "try instead", or
     /// not at all. [`offer_vocabulary`] is where that rule is enforced.
     pub requires_vetting: bool,
 }
@@ -747,6 +761,22 @@ const SHORTHANDS: [(&str, &str); 5] =
 fn shorthand_expansion(typed: &str) -> Option<&'static str> {
     SHORTHANDS.iter().find(|(s, _)| *s == typed).map(|&(_, full)| full)
 }
+
+/// The verbs nearly every parser game needs, in the order a player reaches for
+/// them — the curated half of the command band's `VerbTier::Core` (SQ-1554) and the
+/// first tier of verb-position word completion ([`crate::complete`], SQ-1790) —
+/// one list, so the two cannot drift.
+///
+/// Only ever INTERSECTED with a story's grammar: a word here that the story
+/// does not hold contributes nothing, and one it does hold is shown as spelled
+/// here — `examine`, not the `examin` a Version 3 dictionary stores — which the
+/// parser truncates back to the same entry. Two of them reaching one verb
+/// (`talk` and `tell` in a story that files them together) make one row, under
+/// whichever comes first.
+pub const CORE_VERBS: &[&str] = &[
+    "look", "examine", "take", "drop", "inventory", "open", "close", "put", "go", "enter",
+    "wait", "read", "push", "pull", "turn", "give", "talk", "ask", "tell",
+];
 
 /// The most an offer may name. Three, and it is a limit rather than a target:
 /// the whole verb list is useless (Zork I knows hundreds) and a list long enough
@@ -1257,7 +1287,7 @@ impl StoryVocabulary {
     /// Everything reached here is marked [`Candidate::tier`] 4, which
     /// [`offer_picks`](Self::offer_picks) carries into
     /// [`Pick::requires_vetting`]: unlike tier 3, a tier 4 candidate may never
-    /// be shown through the unvetted "this story knows" fallback — see that
+    /// be shown through the unvetted "this game knows" fallback — see that
     /// field's own doc, and [`offer_vocabulary`] for where the rule is kept.
     /// The bare shape this source trades on is the single commonest one in the
     /// medium (nearly every verb accepts *some* object with no preposition at
@@ -1523,7 +1553,7 @@ impl StoryVocabulary {
     ///
     /// A Version 3 dictionary keeps six characters, so it holds `leafle` for the
     /// leaflet and `mailbo` for the mailbox. Both are what the parser matches and
-    /// both would be typed back successfully — and `● this story knows — leafle`
+    /// both would be typed back successfully — and `● this game knows — leafle`
     /// reads as our bug, which is exactly the misattribution the register exists
     /// to prevent.
     ///
@@ -1593,12 +1623,19 @@ impl StoryVocabulary {
 
 // ── Spelling a truncated key out (SQ-1553) ─────────────────────────────────
 
-/// The shortest key worth spelling out. A Z-machine key is six or nine
-/// characters (ZMSD 1.1 §13.3/§13.4) and a Glulx one `DICT_WORD_SIZE`, nine by
-/// default; a Scott Adams database keeps three to five, and at that length a
-/// prefix names no word in particular — `lam` is `lamp`, `lamb` and `lament` —
-/// so those words are the game's own abbreviations and are shown as they are.
+/// The shortest key the shipped lexicon may help spell out. A Z-machine key is
+/// six or nine characters (ZMSD 1.1 §13.3/§13.4) and a Glulx one
+/// `DICT_WORD_SIZE`, nine by default; a Scott Adams database keeps three to
+/// five, and at that length a prefix names no word in particular — `lam` is
+/// `lamp`, `lamb` and `lament` — so the general lexicon says nothing about it.
 const MIN_SPELLED_KEY: usize = 6;
+
+/// The shortest key worth spelling out at all (SQ-1763). Below
+/// [`MIN_SPELLED_KEY`] only the STORY'S OWN text is evidence — a Scott
+/// database whose text says `lamp` and nothing else starting `lam` spells
+/// `lam` out; the same rule's ambiguity check keeps it as stored if the text
+/// also says `lamb`.
+const MIN_TEXT_SPELLED_KEY: usize = 3;
 
 /// Dictionary key → the whole word it was cut from, for every key that can be
 /// spelled out with confidence.
@@ -1633,7 +1670,7 @@ fn full_spellings<'a>(
     text: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    if key_len < MIN_SPELLED_KEY {
+    if key_len < MIN_TEXT_SPELLED_KEY {
         return out;
     }
     let plain = |w: &str| w.bytes().all(|b| b.is_ascii_lowercase());
@@ -1655,7 +1692,11 @@ fn full_spellings<'a>(
         }
         by_key
     };
-    let lexicon: std::collections::HashSet<&str> = verb_synonyms::words().collect();
+    let lexicon: std::collections::HashSet<&str> = if key_len >= MIN_SPELLED_KEY {
+        verb_synonyms::words().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let from_text = reach(&mut text.iter().map(String::as_str));
     let from_lexicon = reach(&mut lexicon.iter().copied());
 
@@ -1944,7 +1985,7 @@ fn build_offer(
 
 /// What the light says about words it has only LOOKED UP: this story's
 /// dictionary holds them, and nothing more is claimed.
-pub const LEAD_DICTIONARY: &str = "this story knows — ";
+pub const LEAD_DICTIONARY: &str = "this game knows — ";
 
 /// What it says about words it has watched WORK, in a copy of this game, from
 /// where the player is standing (SQ-1121).
@@ -2362,7 +2403,7 @@ enum Outcome {
 ///
 /// With `guidance_probe` on, every candidate is tried in a silent copy of the
 /// game (SQ-1121) and only the ones that did something are shown — which is what
-/// lets the line say `try instead` rather than `this story knows`. The count can
+/// lets the line say `try instead` rather than `this game knows`. The count can
 /// now shrink to nothing for that second reason, and then nothing is said and the
 /// word is NOT recorded as answered: the lamp may be in the next room, and the
 /// same suggestion may be right there.
@@ -3278,7 +3319,7 @@ mod tests {
     /// took without a status line, against a baseline the LIVE engine took with
     /// one.
     ///
-    /// The judge answered `None` (the offer fell back to `this story knows`)
+    /// The judge answered `None` (the offer fell back to `this game knows`)
     /// because `refusal_from(0)` was empty: the print called the nonsense
     /// control a move, so its words could not be read as a refusal. Falsify by
     /// folding `WorldPrint`'s three facts back into one hash — the vetting then
@@ -3293,6 +3334,8 @@ mod tests {
             quit: false,
             escaped: false,
             died: false,
+            room_name: None,
+            after: None,
         };
         let run = crate::probe::ProbeRun {
             baseline: crate::probe::WorldPrint::from_parts(Some(7), Some(35), Some(99)),
@@ -3385,14 +3428,20 @@ mod tests {
     }
 
     /// A Scott Adams key of three to five letters is the game's own
-    /// abbreviation, not a fragment of one word — nothing is spelled out.
+    /// abbreviation, so it is spelled out only on the STORY'S text (SQ-1763):
+    /// never from the general lexicon, never for an entry that is also a verb,
+    /// and not at all where the text names two words it could be.
     #[test]
-    fn a_short_key_is_never_spelled_out() {
-        let words: BTreeMap<String, WordRoles> =
-            [("lam".to_string(), roles(false, true))].into_iter().collect();
-        let v = StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 3)
-            .with_story_text(text(&["lamp"]));
-        assert_eq!(v.spell("lam"), "lam");
+    fn a_short_key_is_spelled_from_the_story_text_only() {
+        let one = |verb, noun, t: &[&str]| {
+            let words: BTreeMap<String, WordRoles> =
+                [("lam".to_string(), roles(verb, noun))].into_iter().collect();
+            StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 3).with_story_text(text(t))
+        };
+        assert_eq!(one(false, true, &["lamp"]).spell("lam"), "lamp");
+        assert_eq!(one(false, true, &[]).spell("lam"), "lam", "no lexicon help");
+        assert_eq!(one(true, true, &["lamp"]).spell("lam"), "lam", "a verb entry");
+        assert_eq!(one(false, true, &["lamp", "lamb"]).spell("lam"), "lam", "ambiguous");
     }
 
     /// The offer spells a key the prose never carried out of the story's text,
@@ -3602,7 +3651,7 @@ mod tests {
 
     /// The tier-3 counterpart to the assertion above: a preposition-anchored
     /// shape match is NOT vetting-mandatory, exactly as it was before this
-    /// quest — it may still be shown through the unvetted "this story knows"
+    /// quest — it may still be shown through the unvetted "this game knows"
     /// fallback, which is the behaviour SQ-1642 shipped and this quest must
     /// not disturb.
     #[test]

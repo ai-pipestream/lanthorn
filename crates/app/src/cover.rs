@@ -11,20 +11,48 @@
 //! gallery grid's per-tile resize + protocol encode.
 //! Every failure resolves to `None` — the picker simply shows no cover.
 
+#[cfg(feature = "terminal")]
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "terminal")]
 use std::sync::Arc;
 
+#[cfg(feature = "terminal")]
 use ratatui::buffer::Buffer;
+#[cfg(feature = "terminal")]
 use ratatui::layout::{Rect, Size};
+#[cfg(feature = "terminal")]
 use ratatui_image::picker::Picker;
+#[cfg(feature = "terminal")]
 use ratatui_image::protocol::Protocol;
 
+#[cfg(feature = "terminal")]
 use crate::render::graphics::KittyDeleteQueue;
 
-/// Decode PNG/JPEG/GIF bytes into a `DynamicImage`. `None` on any decode failure.
+/// Widest/tallest image [`decode`] will accept, in pixels (SQ-1728). Far past
+/// any real cover or v6 picture (the v6 window cap is also 8192).
+pub const MAX_IMAGE_DIM: u32 = 8192;
+
+/// Decoder allocation ceiling for [`decode`] (SQ-1728): 256 MiB, which is exactly
+/// the largest legitimate RGBA buffer (8192 x 8192 x 4). The `image` crate's own
+/// default is 512 MiB, twice what any accepted image can need.
+pub const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// Decode PNG/JPEG/GIF bytes into a `DynamicImage`. `None` on any decode failure,
+/// including an image the limits refuse (over [`MAX_IMAGE_DIM`] on either axis, or
+/// needing more than [`MAX_DECODE_ALLOC`]): the limits are checked from the header
+/// before any pixel buffer is allocated. This is the ONE decode entry point for
+/// untrusted image bytes (covers, blorb picts, save-archive blobs).
 pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
-    image::load_from_memory(bytes).ok()
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_IMAGE_DIM);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    reader.decode().ok()
 }
 
 /// Read `path`; if it is a blorb declaring an `Fspc` frontispiece, fetch that
@@ -46,8 +74,9 @@ fn frontispiece_cover(path: &Path) -> Option<(Vec<u8>, image::ImageFormat, image
 }
 
 /// `path`'s cover, by precedence: the story's own `Fspc` frontispiece always
-/// wins; a fetched `<game_dir>/cover.png` (written by the fetch worker,
-/// SQ-0348) is used only when the story has none. `game_dir` is `None` when
+/// wins; a fetched cover (written by the fetch worker, SQ-0348; kept once per
+/// IFDB entry in the shared store since SQ-1723, see [`crate::ifdb_store`]) is
+/// used only when the story has none. `game_dir` is `None` when
 /// no fallback source is available (e.g. the IFDB-precedence check in
 /// `fetch_worker`, which only cares whether a story already has its own
 /// cover). `None` when neither source yields a decodable image.
@@ -70,7 +99,7 @@ fn cover_parts(
     if let Some((bytes, format, img)) = frontispiece_cover(path) {
         return Some((bytes, format, Some(img)));
     }
-    let bytes = std::fs::read(game_dir?.join("cover.png")).ok()?;
+    let bytes = crate::ifdb_store::cover_bytes_for(game_dir?)?;
     let format = image::guess_format(&bytes).ok()?;
     Some((bytes, format, None))
 }
@@ -103,6 +132,7 @@ pub fn load_cover(path: &Path, game_dir: Option<&Path>) -> Option<image::Dynamic
 /// (SQ-0374). 96 MiB holds a full gallery screen of typical (~1 MiB) covers
 /// with headroom for several of the largest ones seen, while capping
 /// worst-case memory to under a third of the old count cap's.
+#[cfg(feature = "terminal")]
 const COVER_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 
 /// How many built tile protocols `CoverState` keeps for the gallery view
@@ -112,6 +142,7 @@ const COVER_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 /// decoded cover's does — a count cap is the right bound for this cache, sized
 /// to a screenful of gallery tiles so scrolling never evicts a still-visible
 /// one.
+#[cfg(feature = "terminal")]
 const TILE_CAP: usize = 128;
 
 /// Selection-scoped cover state: a byte-budgeted LRU map of decoded images (one
@@ -120,6 +151,7 @@ const TILE_CAP: usize = 128;
 /// panel, and a bounded LRU of tile protocols for the cover-gallery grid (many
 /// on screen at once).
 #[derive(Default)]
+#[cfg(feature = "terminal")]
 pub struct CoverState {
     /// The decoded image is behind an `Arc` (SQ-1199) so a gallery tile's
     /// resize + encode can be handed to [`TileEncoder`]'s worker without
@@ -163,6 +195,7 @@ pub struct CoverState {
 /// the font size moved can be recognised as stale and dropped, instead of
 /// landing in the cache fitted to a cell that no longer exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg(feature = "terminal")]
 pub struct TileKey {
     pub path: PathBuf,
     pub cols: u16,
@@ -170,6 +203,7 @@ pub struct TileKey {
     pub cell: (u16, u16),
 }
 
+#[cfg(feature = "terminal")]
 impl TileKey {
     /// The key for `path`'s cover fitted into `area`, as measured against
     /// `picker`'s cell.
@@ -187,6 +221,7 @@ impl TileKey {
 /// One built gallery tile: the geometry it was built for, the raster, and the
 /// kitty image id it was last placed under (`None` off-kitty, or before the
 /// first placement) so an eviction can free the upload (SQ-1190).
+#[cfg(feature = "terminal")]
 struct TileEntry {
     key: TileKey,
     proto: Protocol,
@@ -204,6 +239,7 @@ struct TileEntry {
 /// drawing with. (Kitty image ids come from `rand::random()` inside the crate,
 /// not from any counter the `Picker` owns, so two threads encoding at once
 /// cannot collide over one.)
+#[cfg(feature = "terminal")]
 pub struct TileRequest {
     pub key: TileKey,
     pub img: Arc<image::DynamicImage>,
@@ -212,6 +248,7 @@ pub struct TileRequest {
 
 /// A finished gallery-tile encode: the key it was asked for under, and the
 /// raster (`None` when the encode failed).
+#[cfg(feature = "terminal")]
 pub type TileResponse = (TileKey, Option<Protocol>);
 
 /// Background gallery-tile encoder (SQ-1199), the same shape as [`CoverDecoder`]
@@ -230,6 +267,7 @@ pub type TileResponse = (TileKey, Option<Protocol>);
 /// re-requests nothing — the picker redraws every 16ms while any tile is
 /// pending, which without the dedupe would queue the same encode dozens of
 /// times over.
+#[cfg(feature = "terminal")]
 pub struct TileEncoder {
     req_tx: std::sync::mpsc::Sender<TileRequest>,
     /// Kept only in the worker-less [`Self::detached`] form, where the harness
@@ -248,6 +286,7 @@ pub struct TileEncoder {
     _worker: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "terminal")]
 impl TileEncoder {
     /// Spawn the encode worker. It exits cleanly when the `TileEncoder` is
     /// dropped (dropping `req_tx` makes the worker's `recv()` err).
@@ -373,12 +412,14 @@ impl TileEncoder {
     }
 }
 
+#[cfg(feature = "terminal")]
 impl Default for TileEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "terminal")]
 impl CoverState {
     /// SQ-0988: the terminal's CELL changed size, so every built protocol was
     /// fitted against the wrong aspect ratio. The decoded IMAGES are unaffected —
@@ -728,6 +769,34 @@ pub fn should_request_cover(
 
 #[cfg(all(test, feature = "t-picker"))]
 mod tests {
+    /// A genuine, fully decodable all-black grey PNG of `w` x `h` (compresses to a
+    /// few KB), so only the decoder's limits can refuse it (SQ-1728).
+    fn grey_png(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decode_refuses_oversized_images() {
+        assert!(decode(&grey_png(9000, 9000)).is_none(), "9000x9000 is over the limit");
+        assert!(decode(&grey_png(8193, 1)).is_none(), "one pixel past the width cap");
+        assert!(decode(&grey_png(1, 8193)).is_none(), "one pixel past the height cap");
+        assert!(decode(&grey_png(8192, 1)).is_some(), "the cap itself is allowed");
+    }
+
+    #[test]
+    fn decode_accepts_a_normal_image() {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(640, 400))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let img = decode(&bytes).expect("640x400 decodes");
+        assert_eq!((img.width(), img.height()), (640, 400));
+    }
+
     /// A GIF cover decodes: IFDB and the IFComp archive serve some covers as
     /// GIF, and every one of them was dropped before the decoder was enabled.
     #[test]
@@ -1255,6 +1324,55 @@ mod tests {
         assert_eq!(px, [200, 50, 50], "the story's own Fspc must win over a fetched cover.png");
 
         let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
+    }
+
+    /// SQ-1723: a copy linked to a shared IFDB entry reads that entry's cover
+    /// from the store, in the format IFDB served (here a JPEG, bytes untouched),
+    /// and its own `Fspc` frontispiece still outranks it.
+    #[test]
+    fn a_linked_copy_reads_the_shared_cover_and_its_own_frontispiece_still_wins() {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([60, 60, 60])))
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        let link = |game_dir: &Path| {
+            let meta = crate::story_info::FetchedMeta {
+                scanned_at: "2026-07-16T00:00:00Z".into(),
+                fetch_version: crate::story_info::FETCH_VERSION,
+                source: "ifdb".into(),
+                title: Some("T".into()),
+                author: None, language: None, first_published: None, genre: None, description: None,
+                ifdb_tuid: Some("tuid1".into()),
+                ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, cover: None,
+                not_found: false,
+            };
+            let info = crate::story_info::StoryInfo {
+                format_version: crate::story_info::FORMAT_VERSION,
+                ifid: "X".into(),
+                fetched: Some(meta),
+                probe: None,
+            };
+            crate::story_info::save(game_dir, &info).unwrap();
+        };
+
+        let (story_path, game_dir) = temp_story_and_game_dir("shared-jpeg", &minimal_blorb_no_fspc());
+        link(&game_dir);
+        let cat = game_dir.parent().unwrap();
+        crate::ifdb_store::write_cover(cat, "tuid1", &jpeg).unwrap();
+        let (bytes, format) = cover_bytes(&story_path, Some(&game_dir)).expect("the shared cover");
+        assert_eq!(bytes, jpeg, "the original bytes, not a re-encode");
+        assert_eq!(format, image::ImageFormat::Jpeg);
+        assert!(!game_dir.join("cover.png").exists(), "nothing per copy");
+        let _ = std::fs::remove_dir_all(cat);
+
+        let own = png_bytes_colored([200, 50, 50]);
+        let (story_path, game_dir) = temp_story_and_game_dir("shared-fspc", &blorb_with_fspc(&own));
+        link(&game_dir);
+        let cat = game_dir.parent().unwrap();
+        crate::ifdb_store::write_cover(cat, "tuid1", &jpeg).unwrap();
+        let (bytes, _) = cover_bytes(&story_path, Some(&game_dir)).unwrap();
+        assert_eq!(bytes, own, "the frontispiece outranks the shared cover");
+        let _ = std::fs::remove_dir_all(cat);
     }
 
     /// SQ-1542: a story with no `Fspc` of its own hands back the fetched

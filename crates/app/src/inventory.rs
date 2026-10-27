@@ -60,7 +60,12 @@ pub fn object_words(
     obj: u16,
 ) -> grammar_model::ObjectWords {
     names.and_then(|p| p.of(mem, obj)).unwrap_or_else(|| {
-        grammar_model::ObjectWords::new(u32::from(obj), short_name(mem, obj), Vec::new(), None, None)
+        let bare = grammar_model::ObjectWords::new(u32::from(obj), short_name(mem, obj), Vec::new(), None, None);
+        // An object with no word array (a `parse_name` routine) still has attributes (SQ-1792).
+        match names.and_then(|p| p.holds_of(mem, obj)) {
+            Some(holds) => bare.with_holds(holds),
+            None => bare,
+        }
     })
 }
 

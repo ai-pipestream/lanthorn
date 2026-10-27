@@ -207,6 +207,10 @@ pub struct GlulxSession {
     /// [`settle_after_event`](Self::settle_after_event) or the two restore
     /// paths, and each of those takes this cell.
     object_word_set: std::cell::RefCell<Option<std::sync::Arc<grammar_model::ObjectWordSet>>>,
+    /// Names that a `short_name` FUNCTION computes, run on a throwaway copy of the
+    /// story (SQ-1774) — see [`RunningNames`]. Dropped with the other caches of
+    /// live data ([`drop_world_caches`](Self::drop_world_caches)).
+    running_names: std::cell::RefCell<RunningNames>,
     /// The avatar's object address, derived on first ask each turn and dropped
     /// beside [`object_word_set`](Self::object_word_set) — same lifetime, same
     /// reason, and dropped by the same call so the next cache added here cannot
@@ -230,6 +234,10 @@ pub struct GlulxSession {
     /// The current room, derived from the last Inform `Subheader` heading and
     /// held sticky across heading-less turns (examine/talk/failed-move).
     last_room: Option<LocationInfo>,
+    /// SQ-1751: the text the story printed for the current room — the transcript of the turn
+    /// that last announced or changed it. An unnamed Inform 7 object is a thing in the room
+    /// only if one of its words appears here; see [`Self::room_objects_excluding`].
+    room_text: String,
     /// SQ-1629 Fix 2: the starting room's own description, captured once at construction
     /// (`new_with_store`, immediately after the SAME `take_room_heading` drain that resolves
     /// `last_room` there — see `AppGlk::take_room_description`'s own doc for why it must follow
@@ -260,6 +268,9 @@ pub struct GlulxSession {
     /// right: none of those is a player-typed command, so none of them should
     /// ever be read as one.
     pending_command: Option<String>,
+    /// The story's own input style captured as the last line was submitted — see
+    /// [`Engine::last_input_style`] (SQ-1758).
+    echo_style: crate::engine::InputStyle,
     /// Consecutive silent `look`s that came back with no room heading, capped by
     /// [`NAMING_LOOK_REFUSALS`]: a story that will not name its rooms that way must
     /// stop being asked. Reset by any answer. See [`GlulxSession::silent_look`]
@@ -371,7 +382,7 @@ impl GameStore {
 /// turn, so a session carries its own policy and the hot loop makes no env call.
 /// A caller that knows a long turn is legitimate raises it with
 /// [`GlulxSession::set_turn_budget`]; see that method for why one exists.
-fn default_turn_budget() -> Duration {
+pub(crate) fn default_turn_budget() -> Duration {
     std::env::var("LANTHORN_TURN_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -763,16 +774,19 @@ impl GlulxSession {
             vocab_cache: std::cell::OnceCell::new(),
             room_addrs: std::cell::RefCell::new(std::collections::HashMap::new()),
             object_word_set: std::cell::RefCell::new(None),
+            running_names: std::cell::RefCell::new(RunningNames::default()),
             player_addr: std::cell::RefCell::new(None),
             player_hint: None,
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
+            room_text: String::new(),
             boot_description: None,
             room_lock: crate::glulx_roomlock::RoomLock::new(0, 0),
             player_lock: crate::glulx_playerlock::PlayerLock::new(0),
             pickup_watch: None,
             pending_command: None,
+            echo_style: crate::engine::InputStyle::default(),
             naming_look_refusals: 0,
             saw_buffer_heading: false,
             strip_prompt: true,
@@ -1133,6 +1147,26 @@ impl GlulxSession {
         }
     }
 
+    /// `objs` with every object whose `short_name` is a FUNCTION renamed to what
+    /// that function prints right now (SQ-1774) — the Glulx twin of
+    /// `GameSession::with_running_names`; read its doc. Everything else passes
+    /// through untouched, so a story with no such function pays one property
+    /// read per object. Computed on a throwaway machine, once per object per
+    /// turn ([`RunningNames`]); the live machine is only read.
+    fn with_running_names(&self, mut objs: Vec<grammar_model::ObjectWords>) -> Vec<grammar_model::ObjectWords> {
+        let Some(names) = self.parse_names() else { return objs };
+        let mut cache = self.running_names.borrow_mut();
+        for o in &mut objs {
+            if names.short_name_function(self.machine.mem(), o.id).is_none() {
+                continue;
+            }
+            if let Some(name) = cache.name_of(&self.machine, names, o.id) {
+                o.printed_name = name;
+            }
+        }
+        objs
+    }
+
     /// The reader for the words this story's parser accepts for an object,
     /// derived on first use — see [`parse_names`](Self::parse_names) the field.
     /// `None` is the documented refusal: no verified Inform object list in this
@@ -1266,7 +1300,9 @@ impl GlulxSession {
         compass: gvm::world::Compass,
     ) -> crate::engine::DeclaredExit {
         use crate::engine::DeclaredExit as AppExit;
-        let Some(world) = self.i7_world() else { return AppExit::Unknown };
+        // SQ-1747: a world recovered without a `Map_Storage` knows its rooms and
+        // nothing about their exits; "no entry" there is not "no exit".
+        let Some(world) = self.i7_world().filter(|w| w.has_map()) else { return AppExit::Unknown };
         if !world.is_room(addr) {
             return AppExit::Unknown;
         }
@@ -1623,6 +1659,10 @@ impl GlulxSession {
     /// derived from the tree is dropped at all six sites by construction.
     fn drop_world_caches(&mut self) {
         self.object_word_set.take();
+        // Only the ANSWERS go; the throwaway machine is a copy of ROM plus RAM it re-reads
+        // from the live game before every run, so it outlives the turn (building one costs
+        // 1.6 ms on King of Shreds and Patches, 2.7 ms on Blue Lacuna).
+        self.running_names.get_mut().names.clear();
         self.player_addr.take();
     }
 }
@@ -1691,6 +1731,19 @@ impl GlulxSession {
         (!crate::roomid::is_synthetic_room(handle.into())).then_some(handle)
     }
 
+    /// The game's `style_Input` stylehints for the story window now awaiting a
+    /// line (SQ-1758): colour, reverse, weight and oblique, resolved the way the
+    /// backend resolves every Glk style, so a game that never hinted Input gets
+    /// the Glk convention — bold, no colour — and `weight = 0` really is not bold.
+    fn read_input_style(&mut self) -> crate::engine::InputStyle {
+        use gvm::glk::{GlkStyle, WinType};
+        let Some(win) = self.primary_text_window() else { return crate::engine::InputStyle::default() };
+        let colour = self.machine.window_input_colour(win);
+        let attrs = self.machine.style_attrs(WinType::TextBuffer, GlkStyle::Input);
+        let (bits, fg, _bg) = crate::glk_backend::resolve_glk_colour(GlkStyle::Input, colour, attrs);
+        crate::engine::InputStyle { bits, ink: fg, bits_vs_prompt: false }
+    }
+
     fn appglk(&mut self) -> &mut AppGlk {
         self.machine
             .backend_mut()
@@ -1754,6 +1807,7 @@ impl GlulxSession {
         // and trim_elems_to_len applies the same shortening to the element list so
         // the ordered elems stay consistent with the flat `transcript`.
         let transcript = if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw };
+        let prev_room_id = self.last_room.as_ref().map(|r| r.number);
         let kept = transcript.chars().count();
         let transcript_runs = clamp_runs(raw_runs, kept);
         trim_elems_to_len(&mut elems, kept);
@@ -1868,6 +1922,12 @@ impl GlulxSession {
         // story gave this turn, whichever channel it came from.
         self.check_room_lock_against_story(&ram, movement, story_named.as_deref());
         let location = self.last_room.clone();
+        self.note_room_text(
+            prev_room_id,
+            location.as_ref().map(|l| l.number),
+            story_named.is_some() || description.is_some(),
+            &transcript,
+        );
         let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
         // SQ-1655: before computing this turn's items — a confirmed pickup this turn
         // may just have identified the avatar for the very first time, and that fresh
@@ -1951,7 +2011,7 @@ impl GlulxSession {
 
         let room: Vec<grammar_model::ObjectWords> = match location {
             Some(loc) => self
-                .room_objects_excluding(loc.number, player)
+                .room_children_unfiltered(loc.number, player)
                 .into_iter()
                 .filter(|ow| !is_scenery_or_door(ow.id))
                 .collect(),
@@ -1989,6 +2049,53 @@ impl GlulxSession {
             out.push(ItemObservation { key: ow.id, name, location: ObservedItemLocation::Carried, words: ow.clone() });
         }
         out
+    }
+
+    /// The room's child objects as the story's model gives them, minus the avatar and the
+    /// pronoun-group placeholders — before any use of the room's printed text.
+    fn room_children_unfiltered(
+        &self,
+        room: mapper::graph::RoomId,
+        exclude: Option<u16>,
+    ) -> Vec<crate::engine::ObjectWords> {
+        let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(room)) else {
+            return Vec::new();
+        };
+        // The avatar is structurally a child of the room it stands in, so
+        // without this it appears in every room of every game (SQ-0667). By
+        // handle, never by name: an Inform 7 object prints nothing at all.
+        let skip = exclude.and_then(|h| self.resolve_handle(h.into()));
+        let objs = names
+            .children(self.machine.mem(), addr)
+            .into_iter()
+            .filter(|&c| Some(c) != skip)
+            .filter_map(|c| names.of(self.machine.mem(), c))
+            // SQ-1747: I7's pronoun-group placeholders ("he"/"him", "she"/"her")
+            // sit in the room's child list but are not things in it.
+            .filter(|ow| !ow.is_pronoun_group())
+            .collect::<Vec<_>>();
+        self.with_running_names(objs)
+    }
+
+    /// SQ-1751: keep [`Self::room_text`] current. A turn that names the room, or moves
+    /// to a different one, replaces it with that turn's text; before any room is known the
+    /// text accumulates so the opening room's description is not lost to the prologue turn
+    /// that precedes the lock; otherwise it stands.
+    fn note_room_text(&mut self, prev: Option<u32>, now: Option<u32>, named: bool, transcript: &str) {
+        const CAP: usize = 16 * 1024;
+        if named || (prev.is_some() && prev != now) {
+            self.room_text = transcript.to_string();
+        } else if prev.is_none() {
+            self.room_text.push('\n');
+            self.room_text.push_str(transcript);
+            if self.room_text.len() > CAP {
+                let mut cut = self.room_text.len() - CAP;
+                while !self.room_text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                self.room_text.drain(..cut);
+            }
+        }
     }
 
     /// Words of RAM the room-lock learner scans, from `ramstart`.
@@ -2041,7 +2148,15 @@ impl GlulxSession {
                 // `room_addrs`'s field docs for why `declared_exit` needs a
                 // cache rather than being able to invert the hash itself.
                 self.room_addrs.borrow_mut().insert(id, addr);
-                let name = self.static_room_name(addr).unwrap_or_else(|| name.to_string());
+                // SQ-1747: the static name only stands in for a heading it AGREES
+                // with. Toby's Nose's rooms read `DR`/`EP` from the property the
+                // reader takes for `printed name` while the story prints
+                // "Drawing-Room"; labelling the room `DR` would be worse than the
+                // heading it replaced.
+                let name = self
+                    .static_room_name(addr)
+                    .filter(|s| zvm::location::status_name_matches(name, s))
+                    .unwrap_or_else(|| name.to_string());
                 LocationInfo { number: id, parent: 0, name }
             }
             None => heading_to_room(name),
@@ -2834,6 +2949,7 @@ impl GlulxSession {
     /// than plain Enter — the Glulx counterpart of the Z-machine's
     /// `GameSession::submit_line_with_terminator` (SQ-1613).
     pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u32) -> TurnResult {
+        self.echo_style = self.read_input_style();
         if self.machine.trace_exec() {
             self.machine.clear_executed_pcs();
         }
@@ -3172,6 +3288,22 @@ pub struct GlkLayout {
     pub windows: Vec<GlkWindowRect>,
 }
 
+/// The lower-cased whole words of `text`, once split at every non-alphanumeric and once
+/// keeping hyphens and apostrophes inside a word (`suction-cup`, `player's`), so a stored
+/// hyphenated dictionary word can match and so can its parts (SQ-1751).
+fn room_text_words(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for keep in [&['\''][..], &['\'', '-'][..]] {
+        for w in lower.split(|c: char| !c.is_alphanumeric() && !keep.contains(&c)) {
+            if !w.is_empty() && !out.iter().any(|o| o == w) {
+                out.push(w.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn blank_screen() -> ScreenModel {
     ScreenModel {
         root: WinNode::Blank,
@@ -3183,7 +3315,12 @@ fn blank_screen() -> ScreenModel {
 }
 
 impl Engine for GlulxSession {
+    fn last_input_style(&self) -> crate::engine::InputStyle {
+        self.echo_style
+    }
+
     fn submit(&mut self, command: &str) -> TurnResult {
+        self.echo_style = self.read_input_style();
         // A new command turn re-starts per-turn execution coverage (the `|` gutter
         // + last-turn set); the cumulative `ever_executed` is preserved. Mirrors
         // the Z-machine engine's per-turn clear chokepoint.
@@ -3286,6 +3423,7 @@ impl Engine for GlulxSession {
         let transcript = if transcript_elems.is_empty() { self.take_transcript() } else { String::new() };
         let location = self.current_location();
         let description = self.boot_description.take();
+        self.room_text = transcript.clone();
         let items = self.glulx_item_observations(location.as_ref(), &transcript);
         TurnResult {
             transcript,
@@ -3360,7 +3498,20 @@ impl Engine for GlulxSession {
     }
 
     fn save_state(&self) -> EngineSave {
-        EngineSave::new(GLULX_ENGINE, GLULX_SAVE_FORMAT, self.machine.save_state())
+        // gvm's snapshot carries the window STRUCTURE only; the non-primary
+        // windows' contents ride along as one extra app-side chunk (SQ-1712).
+        let contents = self
+            .machine
+            .backend()
+            .as_any()
+            .downcast_ref::<AppGlk>()
+            .map(AppGlk::capture_contents)
+            .unwrap_or_default();
+        EngineSave::new(
+            GLULX_ENGINE,
+            GLULX_SAVE_FORMAT,
+            crate::glk_contents::append_chunk(self.machine.save_state(), &contents),
+        )
     }
 
     fn restore_state(&mut self, save: &EngineSave) -> Result<(), EngineError> {
@@ -3413,6 +3564,17 @@ impl Engine for GlulxSession {
         // turn first — drop the cached object-word set as `drive_turn` does, or
         // it keeps answering for the session we just left (SQ-1176). The
         // `parse_names` layout survives: same story, same compiler tables.
+        // gvm just closed and reopened every window, blank. Put the non-primary
+        // windows back as of the save BEFORE the Arrange below, so the game's own
+        // repaint lands on top (SQ-1712). A snapshot without the chunk (older,
+        // or a window-less game) leaves them blank, as it always did.
+        // Skipped for a `headless` session (the probe shadow), like the Arrange
+        // below: its screen is never rendered, so replaying the draw ops is waste.
+        if !self.headless {
+            if let Some(contents) = crate::glk_contents::find_chunk(&save.bytes) {
+                self.appglk().reinstate_contents(contents);
+            }
+        }
         self.drop_world_caches();
         // …and the room cache with them (SQ-1284). `last_room` is the room the
         // story last printed a HEADING for — a screen fact, held host-side because
@@ -3507,7 +3669,7 @@ impl Engine for GlulxSession {
         // the `IFhd` identity check with the session still intact.
         if !self.machine.complete_restore_quetzal(bytes) {
             return Err(EngineError::BadSave(
-                "not a Glulx save for this story (or the file is corrupt)".into(),
+                "not a Glulx save for this game (or the file is corrupt)".into(),
             ));
         }
         // The one thing the game's own `@restore` never faces: this arrives
@@ -3757,6 +3919,29 @@ impl Engine for GlulxSession {
     }
 }
 
+/// The per-turn memo behind [`GlulxSession::with_running_names`] (SQ-1774): the
+/// throwaway machine that runs `short_name` functions, built on first need, and
+/// each object's answer so a function runs at most once per object per turn
+/// however many panels ask. `None` in the map means the function ran and
+/// produced nothing usable, which is as much an answer as a name.
+#[derive(Default)]
+struct RunningNames {
+    runner: Option<Option<gvm::objects::NameRunner>>,
+    names: std::collections::HashMap<u32, Option<String>>,
+}
+
+impl RunningNames {
+    fn name_of(&mut self, live: &gvm::Machine, names: &gvm::objects::ParseNames, obj: u32) -> Option<String> {
+        if let Some(hit) = self.names.get(&obj) {
+            return hit.clone();
+        }
+        let runner = self.runner.get_or_insert_with(|| gvm::objects::NameRunner::new(live));
+        let name = runner.as_mut().and_then(|r| r.name_of(live, names, obj));
+        self.names.insert(obj, name.clone());
+        name
+    }
+}
+
 /// Object-tree introspection over an Inform story's own `$70` object list
 /// (SQ-1241).
 ///
@@ -3790,7 +3975,7 @@ impl Introspect for GlulxSession {
         let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(container.into())) else {
             return Vec::new();
         };
-        names.contents(self.machine.mem(), addr)
+        self.with_running_names(names.contents(self.machine.mem(), addr))
     }
 
     fn room_objects(&self, room: mapper::graph::RoomId) -> Vec<crate::engine::ObjectWords> {
@@ -3802,18 +3987,24 @@ impl Introspect for GlulxSession {
         room: mapper::graph::RoomId,
         exclude: Option<u16>,
     ) -> Vec<crate::engine::ObjectWords> {
-        let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(room)) else {
-            return Vec::new();
-        };
-        // The avatar is structurally a child of the room it stands in, so
-        // without this it appears in every room of every game (SQ-0667). By
-        // handle, never by name: an Inform 7 object prints nothing at all.
-        let skip = exclude.and_then(|h| self.resolve_handle(h.into()));
-        names
-            .children(self.machine.mem(), addr)
-            .into_iter()
-            .filter(|&c| Some(c) != skip)
-            .filter_map(|c| names.of(self.machine.mem(), c))
+        let all = self.room_children_unfiltered(room, exclude);
+        // SQ-1751: for the room the player is standing in, an object with no printable name
+        // is a thing in the room only if the story's own text for the room uses one of its
+        // words; the rest (Inform 7's scent, kind and analogy scaffolding) is not shown.
+        // Any other room, or no text yet, is answered as the story's model gives it.
+        let here = self.last_room.as_ref().is_some_and(|r| r.number == room);
+        if !here || self.room_text.trim().is_empty() {
+            return all;
+        }
+        let words = room_text_words(&self.room_text);
+        all.into_iter()
+            .filter_map(|mut ow| {
+                if !ow.printed_name.is_empty() {
+                    return Some(ow);
+                }
+                ow.printed_name = ow.first_word_in(&words)?;
+                Some(ow)
+            })
             .collect()
     }
 
@@ -4071,6 +4262,80 @@ mod tests {
         // Keys with no Glk meaning are skipped.
         assert_eq!(key_to_glk(KeyInput::Insert), None);
         assert_eq!(key_to_glk(KeyInput::Func(13)), None);
+    }
+
+    // ── SQ-1758: the story's own `style_Input` hints ──────────────────────────
+
+    /// A story that sets `(hint, value)` stylehints for buffer `style_Input`
+    /// (wintype 3, style 8), opens a buffer and waits for a line.
+    fn input_hint_image(hints: &[(u32, u32)]) -> Vec<u8> {
+        use E::*;
+        let mut body = enc(0x149, &[Imm(2), Imm(0)]); // setiosys glk
+        for &(hint, value) in hints {
+            // glk_stylehint_set(wintype=3, style=8, hint, value): args pushed last-first.
+            for v in [Imm(value), Imm(hint), Imm(8), Imm(3)] {
+                body.extend(enc(0x40, &[v, Push]));
+            }
+            body.extend(enc(0x130, &[Imm(0xb0), Imm(4), Discard]));
+        }
+        body.extend(open_buffer_prelude());
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 2)
+    }
+
+    fn input_style_after_submit(hints: &[(u32, u32)]) -> crate::engine::InputStyle {
+        let mut sess =
+            GlulxSession::new(input_hint_image(hints), 80, 24, true, false, false, (1.0, 1.0), None, &[]).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Line);
+        let _ = sess.submit("look");
+        sess.last_input_style()
+    }
+
+    const HINT_WEIGHT: u32 = 4;
+    const HINT_OBLIQUE: u32 = 5;
+    const HINT_TEXT_COLOR: u32 = 7;
+    const HINT_REVERSE: u32 = 9;
+
+    #[test]
+    fn a_game_with_no_input_hint_gets_the_glk_default_bold_with_no_colour() {
+        let st = input_style_after_submit(&[]);
+        assert_eq!(st.bits, 0x02, "bold by default, the Glk convention");
+        assert_eq!(st.ink, 0, "no colour opinion: the host's theme colour applies");
+    }
+
+    #[test]
+    fn an_input_colour_hint_is_reported_as_the_stories_ink() {
+        let st = input_style_after_submit(&[(HINT_TEXT_COLOR, 0x00FF_8800)]);
+        assert_eq!(st.ink, crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x00FF_8800)));
+        assert_eq!(st.bits, 0x02, "a colour hint leaves the default weight alone");
+    }
+
+    #[test]
+    fn a_weight_zero_hint_means_not_bold() {
+        let st = input_style_after_submit(&[(HINT_WEIGHT, 0)]);
+        assert_eq!(st.bits, 0, "weight=0 overrides the bold default");
+    }
+
+    #[test]
+    fn oblique_and_reverse_hints_set_their_bits() {
+        let st = input_style_after_submit(&[(HINT_OBLIQUE, 1), (HINT_REVERSE, 1)]);
+        assert_eq!(st.bits, 0x02 | 0x04 | 0x01);
+    }
+
+    #[test]
+    fn the_input_style_is_the_one_in_force_when_the_line_was_submitted() {
+        let mut sess =
+            GlulxSession::new(input_hint_image(&[(HINT_WEIGHT, 0)]), 80, 24, true, false, false, (1.0, 1.0), None, &[])
+                .expect("new");
+        assert_eq!(sess.last_input_style(), crate::engine::InputStyle::default(), "nothing submitted yet");
+        let _ = sess.submit("look");
+        assert_eq!(sess.last_input_style().bits, 0);
     }
 
     #[test]

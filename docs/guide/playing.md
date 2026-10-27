@@ -1,19 +1,22 @@
 # Playing
 
-For anyone with a story open who wants to know what lanthorn adds on top of
+For anyone with a game open who wants to know what lanthorn adds on top of
 typing commands.
 
 ## Typing, and what fills in around it
 
-The prompt is the story's own — type a command and press `Enter`, exactly as
+The prompt is the game's own — type a command and press `Enter`, exactly as
 in any interpreter. What lanthorn adds sits *around* that line and never
 steals it: **Tab** completes from the things actually in front of you first
-(standing in the Living Room, `lan` offers `lantern`), then words the story
-has just used, then its whole dictionary — checked against the story's own
-parser, so you're never offered a word it would refuse. The rest of the
+(standing in the Living Room, `lan` offers `lantern`), then words the game
+has just used and words you've typed before, then its whole dictionary —
+checked against the game's own parser, so you're never offered a word it would
+refuse. The first word of a command gets the common verbs first, so `lo`
+offers `look` before `lobby`. Every match is on offer: keep pressing Tab and
+it walks the lot. The rest of the
 match ghosts in dim text right after the caret; `Tab`/`Shift-Tab` cycle
 candidates, `→` at the end of the line takes the one on offer — and so does a
-click anywhere in the story pane, if you'd rather reach for the mouse.
+click anywhere in the game pane, if you'd rather reach for the mouse.
 
 Type `/` on an empty line and a fuzzy palette opens over every command
 lanthorn knows — the fastest way to find out what's there without
@@ -23,19 +26,24 @@ shell-style. See [keys](../reference/keys.md) and
 
 ## The command panel
 
-Press the `▲` control on the story pane's bottom border (or
+Press the `▲` control on the game pane's bottom border (or
 `/open-command-band`) and a dock opens along the bottom that builds a command
-by pointing instead of typing. It reads the running story's own grammar — every verb it
+by pointing instead of typing. It reads the running game's own grammar — every verb it
 actually accepts, alphabetically — and fills in object columns for what
 you can see and what you're carrying, live, as you play. Click a verb, then
 an object, and the words land on your prompt; **Enter** still sends
 whatever's actually written there, so nothing fires on its own except the
 one-click quick actions.
 
+While the panel is open and there is a command on your prompt, a small `↵` appears just after it; click it to send the line, the same as pressing **Enter**.
+
 Those quick actions draw as a compass rose when the band is wide enough, with
 the map's own portal glyphs — `↑` `◉` `◎` `↓` for up, in, out and down —
 clustered beside it. Each is a single click that submits at once, no `Enter`
-needed. Typing always wins over the band: letters and Backspace go straight
+needed. The compass also reads the map: from the room you are standing in, a
+way you have already walked looks as normal, an exit the map has found but you
+haven't taken stands out in the map's exit colour, and a direction that was
+blocked when tried is dimmed (still clickable, since a door can open later). Typing always wins over the band: letters and Backspace go straight
 to the prompt whether the band is open or not, and the band only claims
 column navigation (`Tab`/`Shift-Tab` to move between columns, `↑`/`↓` to
 highlight a row).
@@ -47,21 +55,21 @@ the way a command panel object does.
 ## The word reveal
 
 Press the `◈` control (or `/reveal-words`) and every word already on screen
-that this story's parser would accept lights up for a few seconds, right
+that this game's parser would accept lights up for a few seconds, right
 over the prose, without moving a line of it. It's the answer to the oldest
 frustration in the genre — a room description names a dozen things and the
 game only implements two — and it's telling you what the *dictionary*
 knows, not a promise that any of it is within reach.
 
 The command panel carries the same idea as a running list: under what's
-actually here, dimmed, sit the nouns the story has *printed* this session —
+actually here, dimmed, sit the nouns the game has *printed* this session —
 things a room describes rather than things it hands you directly. Newest
 first, and it keeps accumulating, so something named forty turns ago is
 still one click away.
 
 ## Reading back
 
-**Left-drag** across the story pane selects transcript text; let go and it
+**Left-drag** across the game pane selects transcript text; let go and it
 lands on your system clipboard, even over SSH — lanthorn copies through the
 terminal's own OSC 52 escape rather than a clipboard library, so it works
 wherever your terminal does. In an illustrated v6 game the two gestures share
@@ -72,7 +80,7 @@ anywhere else.
 `/search-transcript <query>` highlights every match and jumps to the most
 recent; `n`/`N` step through the rest. `/filter-transcript` narrows the view
 to just the game's own output, just lanthorn's, or both. `/export-transcript`
-writes what's on screen out to a text file in the story's own save
+writes what's on screen out to a text file in the game's own save
 directory.
 
 When a turn prints more than fits the pane — a long room description, a
@@ -84,7 +92,7 @@ you've caught up.
 ## Keeping a transcript
 
 Many games have a `SCRIPT` command (`TRANSCRIPT` in some, `UNSCRIPT` or
-`NOSCRIPT` to stop). Type it and the story starts writing everything it
+`NOSCRIPT` to stop). Type it and the game starts writing everything it
 prints — and everything you type — to `script.txt` in the game's own
 folder, alongside its saves. It's plain text: read it, mail it, diff two
 playthroughs, paste a puzzle into a hint request.
@@ -95,7 +103,7 @@ switch from lanthorn's side, and tells you which file it landed in;
 file rather than starting over, so a game played across a week is one
 document.
 
-That's the *story's* transcript, and it's a different thing from
+That's the *game's* transcript, and it's a different thing from
 `/export-transcript`, which writes out the scrollback in front of you —
 lanthorn's own lines and images included.
 
@@ -115,15 +123,15 @@ format other interpreters use, so a script recorded elsewhere replays here.
 ## Hints
 
 `/open-hints` (or **Alt+4**) shows the Journal's **Hints** tab, which runs a
-companion *InvisiClues* file beside the story — its own topic menu on top, the
+companion *InvisiClues* file beside the game — its own topic menu on top, the
 clue text below, driven with the arrow keys and whatever it prompts for once you
 click into it. lanthorn looks first in the game's **documents folder** — drop a
 hint file there and it is this game's hints whatever the file is called, in every
-release and disk image of the game — and then beside the story. You can also fetch
-one for free, from the story picker before you even start playing (see
+release and disk image of the game — and then beside the game. You can also fetch
+one for free, from the game picker before you even start playing (see
 [Getting started](getting-started.md)) or with the tab's **Download hints…**
 button (`/download-hints`) in the game; a game linked to IFDB gets it saved in its
-documents folder, any other beside the story. A hint file in the Documents tab is
+documents folder, any other beside the game. A hint file in the Documents tab is
 listed as a *hint program* and opens in the Hints tab. If several hint files could
 be the game's, the tab lists them and asks you to pick; it remembers your pick. The
 tab and how the keyboard moves in and out of it are described in

@@ -625,6 +625,57 @@ impl Adjectives {
     }
 }
 
+/// Whether an object can hold other things, and how — the facts a host needs
+/// to choose between a verb's "put X **in** Y" and "put X **on** Y" lines.
+///
+/// Every field is an [`Option`] and `None` means *this story cannot say*, never
+/// "no": a wrong `Some(false)` makes a host type "put coin in table" and a wrong
+/// `Some(true)` "put coin on box", both worse than no answer. Where each answer
+/// comes from depends on who compiled the story:
+///
+/// * **Inform 6 and Inform 7, Z-machine and Glulx.** `container`, `supporter`
+///   and `open` are *library attributes*, and the compiler writes every
+///   attribute's name into the story's *Table of Identifier Names*
+///   (`#identifiers_table`, the table behind `print (property)` and
+///   `DebugAttribute`). The attribute numbers are therefore READ from the
+///   story, never assumed from the library's declaration order. A story built
+///   with `$OMIT_SYMBOL_TABLE=1` has no such table and answers `None` for all
+///   three. Each flag is the attribute's live value, so `open` flips when the
+///   game does.
+/// * **Infocom (ZIL).** The compiler leaves no attribute names behind, so
+///   everything is inferred from the object table (`zvm::world`).
+///   `container` is **always `None`**: the one bit that marks "holds things"
+///   is set on tables and altars as well as on boxes, so it cannot say
+///   container-not-surface. `supporter` is always `None`: ZIL has a surface
+///   bit but nothing reliable locates it. `open` is the story's openness bit
+///   where one could be identified (Zork I's mailbox flips it on `open
+///   mailbox`) and `None` where the inference declined.
+/// * **Scott Adams.** No such notion; [`ObjectWords::holds`] is `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct Holds {
+    /// The object can hold things INSIDE it (Inform's `container` attribute).
+    pub container: Option<bool>,
+    /// The object can hold things ON TOP of it (Inform's `supporter`).
+    pub supporter: Option<bool>,
+    /// The object's `open` attribute is set right now. Meaningful for a
+    /// container, but it is the raw bit: a door carries it too, and a
+    /// non-container reports `Some(false)`.
+    pub open: Option<bool>,
+}
+
+impl Holds {
+    /// Build one; `#[non_exhaustive]`, so this is how another crate makes one.
+    pub fn new(container: Option<bool>, supporter: Option<bool>, open: Option<bool>) -> Holds {
+        Holds { container, supporter, open }
+    }
+
+    /// True when the story said nothing at all.
+    pub fn is_unknown(&self) -> bool {
+        self.container.is_none() && self.supporter.is_none() && self.open.is_none()
+    }
+}
+
 /// What an object is, and what it can be **called** — one answer, never two.
 ///
 /// A story tells you two different things about a thing in it. Its *printed*
@@ -691,6 +742,11 @@ pub struct ObjectWords {
     /// adjectives" on Zork Zero and "nouns only" on Zork I with nothing to say
     /// which. See [`Adjectives`].
     pub adjectives: Adjectives,
+    /// Whether this object is a container and/or a supporter, and open or
+    /// not — see [`Holds`] for where each family's answer comes from.
+    /// `None` when the story states nothing about it (every Scott Adams item,
+    /// and any story whose attribute names are not recoverable).
+    pub holds: Option<Holds>,
 }
 
 impl ObjectWords {
@@ -715,7 +771,15 @@ impl ObjectWords {
             property,
             truncated_at,
             adjectives: Adjectives::Unavailable,
+            holds: None,
         }
+    }
+
+    /// The same object, with what the story says about holding things. An
+    /// all-`None` [`Holds`] is stored as `None`: nothing was said.
+    pub fn with_holds(mut self, holds: Holds) -> ObjectWords {
+        self.holds = (!holds.is_unknown()).then_some(holds);
+        self
     }
 
     /// The same object, with its adjectives and the property they came from.
@@ -752,6 +816,45 @@ impl ObjectWords {
             Some(n) => word.chars().take(n).collect(),
             None => word.to_string(),
         }
+    }
+
+    /// True for an Inform 7 pronoun-group object (SQ-1747): a thing with no
+    /// printed name whose parse words carry at least two distinct personal
+    /// pronouns (`he`+`him`, `she`+`her`). I7 compiles "Understand "he" as
+    /// the men" into a placeholder like this so the parser has something to
+    /// resolve `he` to; it is not a thing in the room, and listing it as room
+    /// contents or an item sighting invents one. Two pronouns, not one, so a
+    /// real thing that merely answers to `her` ("her ring") is kept.
+    pub fn is_pronoun_group(&self) -> bool {
+        if !self.printed_name.is_empty() {
+            return false;
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for w in &self.words {
+            if let Some(p) = PRONOUNS.iter().find(|p| p.eq_ignore_ascii_case(w)) {
+                if !seen.contains(p) {
+                    seen.push(p);
+                }
+            }
+        }
+        seen.len() >= 2
+    }
+
+    /// The first of this object's stored words that `text_words` (lower-cased
+    /// whole words of text the player has read) actually uses, spelled as the
+    /// text spells it (SQ-1751). A stored word cut to `truncated_at` characters
+    /// matches a longer printed word that starts with it; a shorter stored word
+    /// must match exactly. `None` when no stored word appears.
+    pub fn first_word_in(&self, text_words: &[String]) -> Option<String> {
+        self.words.iter().find_map(|stored| {
+            text_words
+                .iter()
+                .find(|w| match self.truncated_at {
+                    Some(n) if stored.chars().count() >= n => w.chars().take(n).collect::<String>() == *stored,
+                    _ => *w == stored,
+                })
+                .cloned()
+        })
     }
 
     /// What to SHOW a player for this object, or `None` when the story holds
@@ -863,6 +966,30 @@ pub const ARTICLES: [&str; 4] = ["the", "a", "an", "some"];
 pub const GLUE: [&str; 11] =
     ["of", "on", "in", "at", "to", "with", "from", "for", "by", "under", "over"];
 
+/// Direction words that Inform stories file as OBJECTS (SQ-1748): the compass
+/// objects of the Standard Rules / Inform 6 library (`north`/`n`, `outside`/
+/// `out`, `up`/`u`, ...) carry these in their `name` arrays like any noun, so the
+/// object list answers yes to "would typing `north` name a thing" while the
+/// word is, to a player, a way to go and not a thing. [`ObjectWordSet`] leaves
+/// them out for the reveal's own promise that it never lights a direction.
+///
+/// English, curated by hand like [`GLUE`] (the dictionary has no bit for it):
+/// the eight compass directions with their abbreviations, plus `up`, `down`,
+/// `in`, `out`, `inside` and `outside`. A story with a thing genuinely and only
+/// named one of these loses that one light rather than gaining wrong ones.
+pub const DIRECTIONS: [&str; 24] = [
+    "north", "n", "northeast", "ne", "northwest", "nw", "south", "s", "southeast", "se",
+    "southwest", "sw", "east", "e", "west", "w", "up", "u", "down", "d", "in", "out", "inside",
+    "outside",
+];
+
+/// Personal pronouns, which Inform 7's pronoun-group objects (`man`/`woman`
+/// groups answering to `he him she her`) and the library's `me`/`yourself`
+/// objects store as `name` words (SQ-1748). A pronoun stands for a thing, it
+/// never names one, so [`ObjectWordSet`] leaves them out. English, curated.
+pub const PRONOUNS: [&str; 13] =
+    ["he", "him", "she", "her", "it", "them", "you", "me", "us", "they", "his", "hers", "its"];
+
 /// "Does ANY object answer to this word?" — [`ObjectWords::refers_to`] asked of
 /// a whole story at once, as one membership set.
 ///
@@ -896,7 +1023,8 @@ impl ObjectWordSet {
     /// Fold a story's objects into the set. Nouns and adjectives both count,
     /// exactly as [`ObjectWords::refers_to`] counts them: each stored word is
     /// kept truncated by its own object's rule, verbatim otherwise — except
-    /// the [`ARTICLES`] and the curated [`GLUE`] words, which are dropped
+    /// the [`ARTICLES`], the curated [`GLUE`], [`DIRECTIONS`] and [`PRONOUNS`]
+    /// words, which are dropped
     /// (see each for why and for the sources).
     pub fn build<'a>(objects: impl IntoIterator<Item = &'a ObjectWords>) -> ObjectWordSet {
         let mut keys: Vec<(Option<usize>, HashSet<String>)> = Vec::new();
@@ -911,6 +1039,8 @@ impl ObjectWordSet {
             for w in o.words.iter().chain(o.adjectives.words()) {
                 if ARTICLES.iter().any(|a| a.eq_ignore_ascii_case(w))
                     || GLUE.iter().any(|g| g.eq_ignore_ascii_case(w))
+                    || DIRECTIONS.iter().any(|d| d.eq_ignore_ascii_case(w))
+                    || PRONOUNS.iter().any(|p| p.eq_ignore_ascii_case(w))
                 {
                     continue;
                 }
@@ -945,6 +1075,21 @@ mod tests {
 
     fn noun() -> Slot {
         Slot::one(Token::Noun(NounKind::Noun))
+    }
+
+    #[test]
+    fn holds_is_none_until_a_producer_says_something() {
+        let plain = ObjectWords::new(1, "box".into(), vec!["box".into()], None, None);
+        assert_eq!(plain.holds, None, "a new ObjectWords states nothing");
+        assert!(Holds::default().is_unknown());
+
+        let nothing = plain.clone().with_holds(Holds::new(None, None, None));
+        assert_eq!(nothing.holds, None, "an all-unknown Holds is stored as no answer");
+
+        let known = plain.with_holds(Holds::new(Some(true), None, Some(false)));
+        assert_eq!(known.holds.unwrap().container, Some(true));
+        assert_eq!(known.holds.unwrap().supporter, None, "unknown stays unknown, never false");
+        assert!(!known.holds.unwrap().is_unknown());
     }
 
     #[test]
@@ -1082,6 +1227,27 @@ mod tests {
     }
 
     #[test]
+    fn first_word_in_spells_a_truncated_word_from_the_text_and_wants_whole_words() {
+        let o = ObjectWords {
+            id: 1,
+            printed_name: String::new(),
+            words: vec!["dr-door".into(), "things".into(), "extravaga".into(), "door".into()],
+            property: None,
+            truncated_at: Some(9),
+            adjectives: Adjectives::Unavailable,
+            holds: None,
+        };
+        let w = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(o.first_word_in(&w("an extravagant door")), Some("extravagant".into()));
+        // Stored order wins, not text order.
+        assert_eq!(o.first_word_in(&w("a door and things")), Some("things".into()));
+        // A short stored word is complete: "doors" is not "door".
+        assert_eq!(o.first_word_in(&w("two doors")), None);
+        // A prefix of a truncated word is not the word.
+        assert_eq!(o.first_word_in(&w("extrava")), None);
+    }
+
+    #[test]
     fn an_object_s_words_answer_for_the_dictionary_s_truncated_spelling() {
         let o = ObjectWords {
             id: 102,
@@ -1090,6 +1256,7 @@ mod tests {
             property: Some(18),
             truncated_at: Some(6),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         // Either spelling: what the story holds, and what the player types.
         assert!(o.refers_to("lanter"));
@@ -1126,6 +1293,7 @@ mod tests {
             property: Some(18),
             truncated_at: Some(6),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         // A second rule in the same set, and an adjective list that counts.
         let scott = ObjectWords::new(9, "a jewelled crown".into(), vec!["crown".into()], None, Some(3))
@@ -1183,6 +1351,43 @@ mod tests {
         assert!(set.contains("tavern") && set.contains("back"));
     }
 
+    /// SQ-1748: Inform's compass objects and I7's pronoun-group objects keep
+    /// `north`/`out`/`he`/`him` in their `name` arrays; none of those may be in
+    /// the set, while the same objects' real nouns still are.
+    #[test]
+    fn direction_words_and_pronouns_stay_out_of_the_set() {
+        let objects = [
+            ObjectWords::new(1, String::new(), vec!["north".into(), "direction".into(), "n".into()], Some(1), Some(9)),
+            ObjectWords::new(2, String::new(), vec!["outside".into(), "out".into(), "up".into(), "u".into()], Some(1), Some(9)),
+            ObjectWords::new(
+                3,
+                String::new(),
+                vec!["mangroup".into(), "man".into(), "men".into(), "he".into(), "him".into()],
+                Some(1),
+                Some(9),
+            ),
+            ObjectWords::new(4, String::new(), vec!["north".into(), "door".into()], Some(1), Some(9)),
+        ];
+        let set = ObjectWordSet::build(&objects);
+        for w in DIRECTIONS.iter().chain(PRONOUNS.iter()) {
+            assert!(!set.contains(w), "{w:?} must not be lit");
+        }
+        assert!(set.contains("man") && set.contains("door") && set.contains("direction"));
+        assert!(objects[2].refers_to("he"), "the object itself still answers to its words");
+    }
+
+    #[test]
+    fn a_pronoun_group_is_recognised_and_a_her_ring_is_not() {
+        let group = |words: &[&str]| {
+            ObjectWords::new(1, String::new(), words.iter().map(|w| w.to_string()).collect(), Some(1), Some(9))
+        };
+        assert!(group(&["womangrou", "things", "woman", "women", "her", "she", "ladies"]).is_pronoun_group());
+        assert!(group(&["mangroup", "things", "man", "men", "he", "him"]).is_pronoun_group());
+        assert!(!group(&["ring", "her"]).is_pronoun_group(), "one pronoun is a name word");
+        let named = ObjectWords::new(2, "the men".into(), vec!["he".into(), "him".into()], Some(1), Some(9));
+        assert!(!named.is_pronoun_group(), "an object with a printed name is not a placeholder");
+    }
+
     #[test]
     fn an_empty_printed_name_is_an_answer_and_still_describes() {
         let o = ObjectWords {
@@ -1192,6 +1397,7 @@ mod tests {
             property: Some(1),
             truncated_at: Some(9),
             adjectives: Adjectives::Unavailable,
+            holds: None,
         };
         assert_eq!(o.describe(), "(unnamed) [pig]");
         assert!(o.refers_to("pig"));

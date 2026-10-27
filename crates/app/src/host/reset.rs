@@ -226,7 +226,15 @@ pub fn reset_game(
                 // (`--interpreter-version`), so it is the one the launch pinned.
                 machine_palette,
                 state.config.interpreter_version,
-            );
+            )
+            // SQ-1809: the session's own verdict, reused rather than probed
+            // again — whether a story caches the screen width is a property of
+            // the story, and this is the same story. A forced `status_width`
+            // (or a pinned `virtual_screen_cols`) still wins, as at launch.
+            .with_status_width(match state.config.effective_status_width() {
+                crate::config::StatusWidth::Auto => zvm_session_mut(session).status_width_decided(),
+                forced => forced,
+            });
             // Republish the render's copy for the same reason `v6_art_scale` is
             // republished above: a restart may have landed on a different archive,
             // and the pen's scale rides on that.
@@ -247,7 +255,7 @@ pub fn reset_game(
                 // The host pane, as the launch seeds it (SQ-1061). This was a
                 // bare `None` — the only argument in this call with no comment
                 // above it — so the constructor took neither `set_screen_dims`
-                // nor the `boot_screen_cols` branch, and a v3/v4/v5 story whose
+                // nor the fixed-width decision (SQ-1809), and a v3/v4/v5 story whose
                 // status routine lays itself out once at boot (Zork 1, SQ-0680)
                 // came back laid out for zvm's 80x24 fallback. Nothing re-seeds
                 // it afterwards: `loop_tick::poll_zvm_screen_dims` runs
@@ -306,12 +314,8 @@ pub fn reset_game(
             // 8×16 constant), introducing no rounding of its own.
             let char_px: (f64, f64) = state.glk_cell_px.unwrap_or_else(|| {
                 state
-                    .game_picker
-                    .as_ref()
-                    .map(|p| {
-                        let f = p.font_size();
-                        (f.width as f64, f.height as f64)
-                    })
+                    .game_imaging()
+                    .map(|g| (g.cell_px.0 as f64, g.cell_px.1 as f64))
                     .unwrap_or((8.0, 16.0))
             });
             let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
@@ -329,6 +333,7 @@ pub fn reset_game(
                 crate::styles::read_per_game_borderless(game_dir),
                 state.garglk_overlay.as_ref(),
                 state.glk_design.as_ref(),
+                state.config.borderless_windows,
             );
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
@@ -356,7 +361,7 @@ pub fn reset_game(
                 *session
                     .as_any_mut()
                     .downcast_mut::<GlulxSession>()
-                    .expect("restart re-runs the same Glulx story") = new_session;
+                    .expect("restart re-runs the same Glulx game") = new_session;
                 // SQ-1703 P3: the fresh session boots in cell mode; stretch
                 // design mode is told again, as at launch.
                 crate::host::screen::apply_glk_design(session, state, game_dir);
@@ -378,7 +383,7 @@ pub fn reset_game(
                 &bytes,
                 game_dir,
                 resolve_pict_blorb(story_path, state.config.images),
-                state.game_picker.as_ref(),
+                state.game_imaging(),
                 state.config.scott_picture_resolution_override,
             );
             crate::scott_session::ScottSession::new_with_options(
@@ -394,7 +399,7 @@ pub fn reset_game(
                 *session
                     .as_any_mut()
                     .downcast_mut::<crate::scott_session::ScottSession>()
-                    .expect("restart re-runs the same Scott story") = new_session;
+                    .expect("restart re-runs the same Scott game") = new_session;
             })
         }
         Err(e) => Err(format!("{e}")),
@@ -429,7 +434,9 @@ pub fn reset_game(
             state.suggestion_idx = 0;
             state.suggestion_active = false;
             state.transcript.clear();
+            state.bump_transcript_epoch();
             state.clear_anchor = None;
+            state.pending_clear = false;
             state.top_anchor = None;
             state.transcript_kinds.clear();
             state.transcript_runs.clear();
@@ -452,16 +459,19 @@ pub fn reset_game(
                 // always comes back with mapping enabled, and a restart is the
                 // same story, so the same "no grammar → no map" decision boot
                 // made must be made again. See `host::boot`'s call for why.
-                if crate::engine_helpers::zmachine_story_has_no_grammar(&*session) {
+                if crate::engine_helpers::zmachine_story_is_menu_driven_v6(&*session) {
                     mapper.disable_mapping();
                 }
             }
             // Glulx returns ordered elements (text + any startup images); the
             // Z-machine returns empty and uses the flat string path.
             let banner_elems = session.take_transcript_elems();
+            // The restart banner is the seed's corroboration (SQ-1743), as at boot.
+            let mut seed_evidence = String::new();
             if banner_elems.is_empty() {
                 let banner = session.take_transcript();
                 state.push_transcript(&banner);
+                seed_evidence = banner;
             } else {
                 crate::state::apply_transcript_elems(state, &banner_elems);
             }
@@ -476,7 +486,7 @@ pub fn reset_game(
                 // (SQ-1625: rather than add `description: None` as one more explicit line to
                 // this literal, use the helper that exists for exactly this "location only"
                 // seed shape — see its own doc).
-                let seed_result = TurnResult::observation(snap);
+                let seed_result = TurnResult::observation_of(&*session, snap, seed_evidence);
                 apply_turn(mapper, "", &seed_result, &mut state.death_watch);
                 let rid = snap_number as mapper::graph::RoomId;
                 state.select_room(Some(rid));

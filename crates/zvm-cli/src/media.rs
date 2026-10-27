@@ -558,7 +558,7 @@ mod tests {
         let mut lines = ["9\n".to_string(), "other\n".to_string()].into_iter();
         let i = choose(&cands, None, true, |s| said.push_str(s), || lines.next());
         assert_eq!(i, Ok(1));
-        assert!(said.contains("no story 9 on this disk"), "told what was wrong:\n{said}");
+        assert!(said.contains("no game 9 on this disk"), "told what was wrong:\n{said}");
     }
 
     /// The requirement that makes this scriptable at all: no terminal means no

@@ -1,8 +1,10 @@
 //! Who is playing, and where their files live (SQ-1676).
 //!
 //! One install can serve several players. What every player shares is the
-//! **catalogue**: per-story `info.json`, `cover.png`, the IFDB link state and the
-//! Glulx learned-address files, all under `<user_dir>/saves/<story-key>.save/`.
+//! **catalogue**: each story's IFDB link state (`info.json`) and the Glulx
+//! learned-address files, under `<user_dir>/saves/<story-key>.save/`, and the
+//! fetched IFDB records and covers, once per IFDB entry, in
+//! `<user_dir>/saves/ifdb/<tuid>.json` / `<tuid>.<ext>` (see [`crate::ifdb_store`]).
 //! What is per-player is everything else a story folder holds (saves, aux data,
 //! exports, per-game sidecars) and the layered `config.toml` / `style.toml`.
 //!
@@ -15,6 +17,8 @@
 //! tell whether it is about to write a save or a cover.
 
 use std::path::{Path, PathBuf};
+
+use crate::user_dirs::UserDirs;
 
 /// The longest player name accepted (ttyd's `TTYD_USER` caps a user at 29).
 pub const MAX_PLAYER_NAME: usize = 29;
@@ -81,6 +85,20 @@ impl DataRoots {
         player: Option<&str>,
         documents: &DocumentsSettings,
     ) -> Self {
+        Self::resolve_in(&UserDirs::single(user_dir), data_dir, player, documents)
+    }
+
+    /// [`DataRoots::resolve`] from the three roots (SQ-1722): the saves, `users/`
+    /// and `documents/` hang off `dirs.data()`, and the cache is `dirs.cache()`
+    /// (which is `<user_dir>/cache` only in the single-folder layouts). The same
+    /// three-flag rule otherwise.
+    pub fn resolve_in(
+        dirs: &UserDirs,
+        data_dir: Option<&Path>,
+        player: Option<&str>,
+        documents: &DocumentsSettings,
+    ) -> Self {
+        let user_dir = dirs.data();
         let catalogue = data_dir.map(Path::to_path_buf).unwrap_or_else(|| user_dir.join("saves"));
         let player = match player {
             Some(name) => player_root(user_dir, name).join("saves"),
@@ -91,7 +109,7 @@ impl DataRoots {
             catalogue,
             player,
             documents: docs,
-            cache: user_dir.join("cache"),
+            cache: dirs.cache().to_path_buf(),
             create_documents: documents.auto_create,
         }
     }
@@ -216,6 +234,34 @@ mod tests {
         assert_eq!(r.player(), Path::new("/u/users/bob/saves"));
         let r = DataRoots::resolve(u, Some(Path::new("/d")), None, &DocumentsSettings::default());
         assert_eq!((r.catalogue(), r.player()), (Path::new("/d"), Path::new("/d")));
+    }
+
+    /// SQ-1722: with split roots the saves, users and documents hang off the DATA
+    /// root and the cache is the cache root; `--data-dir` and `--player` keep the
+    /// meaning `resolve` documents.
+    #[test]
+    fn three_roots_split_data_from_cache() {
+        let dirs = UserDirs::new("/cfg", "/data", "/cache", "/logs");
+        let s = DocumentsSettings::default();
+        let r = DataRoots::resolve_in(&dirs, None, None, &s);
+        assert_eq!((r.catalogue(), r.player()), (Path::new("/data/saves"), Path::new("/data/saves")));
+        assert_eq!((r.documents(), r.cache()), (Path::new("/data/documents"), Path::new("/cache")));
+        let r = DataRoots::resolve_in(&dirs, Some(Path::new("/d")), Some("bob"), &s);
+        assert_eq!(r.catalogue(), Path::new("/d"));
+        assert_eq!(r.player(), Path::new("/data/users/bob/saves"));
+        assert_eq!(r.cache(), Path::new("/cache"));
+    }
+
+    #[test]
+    fn resolve_is_the_single_folder_case_of_resolve_in() {
+        let s = DocumentsSettings::default();
+        for (data, player) in [(None, None), (Some(Path::new("/d")), Some("bob"))] {
+            assert_eq!(
+                DataRoots::resolve(Path::new("/u"), data, player, &s),
+                DataRoots::resolve_in(&UserDirs::single("/u"), data, player, &s)
+            );
+        }
+        assert_eq!(DataRoots::resolve(Path::new("/u"), None, None, &s).cache(), Path::new("/u/cache"));
     }
 
     #[test]

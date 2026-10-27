@@ -5,6 +5,7 @@ use clap::Parser;
 use serde::{Deserialize, Deserializer};
 
 use crate::anim::Easing;
+use crate::user_dirs::UserDirs;
 
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
@@ -234,16 +235,17 @@ fn parse_interpreter_version(s: &str) -> Result<u8, String> {
     term_width = cli_host::HELP_WIDTH
 )]
 pub struct Cli {
-    /// Path to a story file (.z3/.z5/.z8 etc.) or a directory to browse. When
+    /// Path to a game file (.z3/.z5/.z8 etc.) or a directory to browse. When
     /// omitted, falls back to the `default_story_dir` config setting.
     ///
     /// An `http://` or `https://` URL works here too: lanthorn downloads it,
-    /// opens it exactly as it would the same file on disk — story files, Blorbs,
+    /// opens it exactly as it would the same file on disk — game files, Blorbs,
     /// release disk images and ZIPs alike — and then offers to keep it in your
     /// library.
     pub story: Option<PathBuf>,
 
-    /// Override the lanthorn home directory (default: ~/.lanthorn)
+    /// Keep everything (config, saves, documents, cache) in this one folder, instead
+    /// of the platform's standard folders or an existing ~/.lanthorn
     #[arg(long, value_name = "PATH")]
     pub user_dir: Option<PathBuf>,
 
@@ -255,7 +257,7 @@ pub struct Cli {
     /// Play as a named player (also read from the LANTHORN_PLAYER environment
     /// variable; the flag wins). Each player keeps their own saves, settings and
     /// per-game sidecars under `<user-dir>/users/<name>/`, layered over the
-    /// shared config.toml and style.toml, while story info and covers stay
+    /// shared config.toml and style.toml, while game info and covers stay
     /// shared. Absent or empty means the default player (the classic layout).
     /// 1-29 characters from A-Z a-z 0-9 . _ - (no leading dot). Lanthorn never
     /// checks WHO you are: put a login or a picker in front of it.
@@ -277,7 +279,7 @@ pub struct Cli {
 
     /// Sound for this run (bleeps + sampled audio); with it off the border still
     /// flashes as the accessibility cue. Overrides the config's `enable_sound`
-    /// in both directions, so `--sound on` plays a story whose config persisted
+    /// in both directions, so `--sound on` plays a game whose config persisted
     /// `enable_sound = false`.
     //
     // SQ-1082: which is the whole point of the rename. Spelled `--no-sound`, this
@@ -308,17 +310,17 @@ pub struct Cli {
     pub images: Option<OnOff>,
 
     /// Honour the colours the GAME asks for: `set_colour` / true-colour output on
-    /// the Z-machine, Glk stylehints on Glulx. `off` tells the story the
+    /// the Z-machine, Glk stylehints on Glulx. `off` tells the game the
     /// interpreter has none at all (ZMSD §8.3.2) and lets the theme paint
     /// everything.
     ///
     /// Overrides the config's `honor_game_colours` in both directions, and
-    /// outranks a `garglk.ini` beside the story or this game's own sidecar — an
+    /// outranks a `garglk.ini` beside the game or this game's own sidecar — an
     /// instruction for the launch you typed it on, exactly as `--interpreter` is.
     /// Never written back to config.toml; `/set-game-colours` still overrides it
     /// mid-game.
     ///
-    /// A different question from `--colour`: this one is whether the story's own
+    /// A different question from `--colour`: this one is whether the game's own
     /// requests are obeyed, that one is what DEFAULT resolves to.
     #[arg(long = "game-colours", alias = "game-colors", value_enum, value_name = "ON|OFF")]
     pub game_colours: Option<OnOff>,
@@ -380,8 +382,8 @@ pub struct Cli {
     #[arg(long = "font-check", value_enum, value_name = "ON|OFF")]
     pub font_check: Option<OnOff>,
 
-    /// Where the story pane's DEFAULT page and ink come from — the pair reported
-    /// to the story in header `$2C`/`$2D` (SQ-1082).
+    /// Where the game pane's DEFAULT page and ink come from — the pair reported
+    /// to the game in header `$2C`/`$2D` (SQ-1082).
     ///
     /// Three sources. lanthorn already consults them machine-first, falling
     /// through to the theme and then to the terminal; naming one pins it instead
@@ -399,10 +401,10 @@ pub struct Cli {
     #[arg(long = "colour", alias = "color", value_enum, value_name = "SOURCE")]
     pub colour: Option<ColourSource>,
 
-    /// Interpreter number to advertise in the story header (0x1E).
+    /// Interpreter number to advertise in the game header (0x1E).
     ///
     /// Games branch on it: Beyond Zork picks character graphics over colour on
-    /// IBM PC, and several v6 story files were built for one specific machine.
+    /// IBM PC, and several v6 game files were built for one specific machine.
     /// The numbers are ZMSD §11.1.3's table, which `--machines` prints in full
     /// — along with the page and ink each one reports, the palette its colours
     /// resolve through, and the screen its own interpreter drew.
@@ -415,7 +417,7 @@ pub struct Cli {
     #[arg(long = "interpreter", value_name = "N")]
     pub interpreter_number: Option<u8>,
 
-    /// Interpreter VERSION to advertise in the story header (0x1F).
+    /// Interpreter VERSION to advertise in the game header (0x1F).
     ///
     /// A number (`8`) or a single character (`A`, taken as its ASCII code).
     /// Both spellings are accepted because games render this byte both ways:
@@ -425,18 +427,18 @@ pub struct Cli {
     /// nothing is written back. lanthorn's default is `A` (65), which has no
     /// provenance, and the original Amiga wrote 8: on release 295 of Shogun
     /// the credits read "Amiga Interpreter version 6.65" here against the
-    /// real machine's "6.8". Whether any story BRANCHES on the byte rather
+    /// real machine's "6.8". Whether any game BRANCHES on the byte rather
     /// than merely printing it is unknown, and this is how to find out
     /// (SQ-0885).
     #[arg(long = "interpreter-version", value_name = "V",
           value_parser = parse_interpreter_version)]
     pub interpreter_version: Option<u8>,
 
-    /// Native Infocom picture archive to draw this story's art from.
+    /// Native Infocom picture archive to draw this game's art from.
     ///
     /// The path is taken as given if absolute, else resolved beside the STORY
     /// — which is where these archives sit. Naming one is an instruction, not
-    /// a hint: it beats a Blorb next to the story and the `Pic.data` an Amiga
+    /// a hint: it beats a Blorb next to the game and the `Pic.data` an Amiga
     /// `.adf` carries, and it OUTRANKS the `pictures` key in the game's own
     /// config.toml. A file that is absent or will not decode says so and
     /// falls back to the Blorb; it never fails quietly.
@@ -446,7 +448,7 @@ pub struct Cli {
     /// Amiga. So `--pictures zork0.mg1` beside `stories/zork0.z6` draws the MCGA
     /// rendition and reports an IBM PC.
     ///
-    /// Requires a story on the command line: the flag names art FOR a story,
+    /// Requires a game on the command line: the flag names art FOR a game,
     /// so it has no referent when lanthorn opens a library. Pick a rendition
     /// from the browser with Shift-Enter instead.
     ///
@@ -457,12 +459,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", requires = "story")]
     pub pictures: Option<PathBuf>,
 
-    /// Which story to open, on a volume or a library that holds several.
+    /// Which game to open, on a volume or a library that holds several.
     ///
     /// A 1-based position in the list the browser would have shown, or enough
-    /// of a name to pick out one story — matched case-insensitively against
+    /// of a name to pick out one game — matched case-insensitively against
     /// both the name the medium stores it under and the title the browser
-    /// prints. A name that fits two stories is refused with the list rather
+    /// prints. A name that fits two games is refused with the list rather
     /// than guessed at, and one that fits none never falls back to booting
     /// something else.
     ///
@@ -475,9 +477,9 @@ pub struct Cli {
     /// game on one but the first (SQ-1078). `zvm-cli --story` spells it and
     /// matches it the same way.
     ///
-    /// Requires a story on the command line, like --pictures: the flag names
-    /// a story ON something, so it has no referent when lanthorn opens the
-    /// default library. Naming one story goes straight into it and exits when
+    /// Requires a game on the command line, like --pictures: the flag names
+    /// a game ON something, so it has no referent when lanthorn opens the
+    /// default library. Naming one game goes straight into it and exits when
     /// the game does — no browser on the way in, none on the way out.
     #[arg(long = "story", value_name = "N|NAME", requires = "story")]
     pub story_pick: Option<String>,
@@ -485,21 +487,21 @@ pub struct Cli {
     /// Fetch IFDB metadata and cover art for the library, then exit.
     ///
     /// The browser's `r` (missing) or `f` (all) pass, run without a terminal:
-    /// the stories under the directory, sub-folders included, get their
+    /// the games under the directory, sub-folders included, get their
     /// sidecar and cover written where the browser writes them, with one
-    /// printed line per story as it completes. A library on a server gets
+    /// printed line per game as it completes. A library on a server gets
     /// its sidecars built this way, with no one at the picker.
     ///
-    /// `missing` skips a story whose sidecar is current; `all` refetches them
+    /// `missing` skips a game whose sidecar is current; `all` refetches them
     /// all. Exits 0 when nothing failed to fetch.
     #[arg(long, value_enum, value_name = "MISSING|ALL")]
     pub fetch: Option<FetchMode>,
 
-    /// Import curated metadata for stories from a TSV file, then exit.
+    /// Import curated metadata for games from a TSV file, then exit.
     ///
-    /// For stories the IFDB pass could not identify by IFID, or that IFDB has
+    /// For games the IFDB pass could not identify by IFID, or that IFDB has
     /// no cover for. A header row names the columns (any order): `path`, and
-    /// then `ifdb_tuid` (the story is fetched from IFDB by that id), or
+    /// then `ifdb_tuid` (the game is fetched from IFDB by that id), or
     /// `title`, `author`, `year`, `genre`, `language`, `description` (written
     /// as a curated record), and `cover_url` (downloaded as the cover). One
     /// printed line per row; exits 0 unless a row failed.
@@ -525,7 +527,7 @@ pub struct Cli {
     /// about a session already running and have nothing to mean here. Outranks
     /// both `v6_pixel_lock` in config.toml and this game's own sidecar, for the
     /// reason `--interpreter` does: a flag is an instruction for the launch you
-    /// typed it on, and a file beside the story is not.
+    /// typed it on, and a file beside the game is not.
     ///
     /// Inert on the half-blocks backend, which has no device pixels to land on;
     /// `/dump-terminal` says so when it is.
@@ -537,17 +539,26 @@ pub struct Cli {
     /// What every interpreter number carries — the page and ink it reports in
     /// `$2C`/`$2D`, the palette those colour numbers resolve through, the §8.3
     /// screen rules, and the screen its own interpreter drew — followed by the
-    /// rows a story's VERSION moves, because a machine is not a screen: Infocom
+    /// rows a game's VERSION moves, because a machine is not a screen: Infocom
     /// shipped two IBM interpreters and they disagree about white.
     ///
     /// The table `--interpreter` selects a row of, so you can pick a number
     /// knowing what it does. Answered before anything else, exactly as `--help`
-    /// is: it describes the program rather than a story, so it needs none.
+    /// is: it describes the program rather than a game, so it needs none.
     #[arg(long)]
     pub machines: bool,
 
+    /// Move an existing ~/.lanthorn folder into the platform's standard folders
+    /// (config, data and cache), then exit. Lists every move and asks first.
+    #[arg(long)]
+    pub migrate_user_dir: bool,
+
+    /// With --migrate-user-dir: do not ask for confirmation.
+    #[arg(long, requires = "migrate_user_dir")]
+    pub yes: bool,
+
     /// Debug trace sections to enable from boot: comma list of screen,map,hostio,v6
-    /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
+    /// (or `all`/`none`). Output goes to <logs>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
     pub trace: Option<String>,
 
@@ -664,6 +675,47 @@ impl ColourSource {
             "terminal" => Some(ColourSource::Terminal),
             "theme" => Some(ColourSource::Theme),
             "machine" => Some(ColourSource::Machine),
+            _ => None,
+        }
+    }
+}
+
+/// What width a Version 4+ Z-machine story is told, `status_width` in
+/// `config.toml` and the per-game sidecar (SQ-1809).
+///
+/// A story caches whatever width it is told at boot (Infocom's own v4/v5 games
+/// lay their status line out once) or re-reads it as it plays (Inform's library).
+/// `Auto` finds out by playing a throwaway copy before the real boot
+/// ([`zvm::width_probe`]); the other two force the answer for a misjudged title.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum StatusWidth {
+    /// Probe the story before booting it: a story that re-reads the width is
+    /// told the pane's, one that does not is told 80 for the whole session.
+    #[default]
+    Auto,
+    /// Always told 80 columns, whatever the pane does.
+    Fixed,
+    /// Always told the pane's width, and told again whenever it changes.
+    Pane,
+}
+
+impl StatusWidth {
+    /// The `status_width` token for this mode — one spelling for the file and
+    /// the sidecar.
+    pub fn key(self) -> &'static str {
+        match self {
+            StatusWidth::Auto => "auto",
+            StatusWidth::Fixed => "fixed",
+            StatusWidth::Pane => "pane",
+        }
+    }
+
+    /// The mode a `status_width` token names, or `None` for anything else.
+    pub fn from_key(token: &str) -> Option<StatusWidth> {
+        match token {
+            "auto" => Some(StatusWidth::Auto),
+            "fixed" => Some(StatusWidth::Fixed),
+            "pane" => Some(StatusWidth::Pane),
             _ => None,
         }
     }
@@ -977,6 +1029,7 @@ fn default_honor_game_colours() -> bool { true }
 fn default_period_look() -> bool { true }
 fn default_system_colours() -> bool { false }
 fn default_acceleration() -> bool { true }
+fn default_story_scrollbar_gutter() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
 fn default_enable_sound() -> bool { true }
 fn default_volume() -> u8 { 100 }
@@ -994,12 +1047,13 @@ where
 /// Fallback for [`Config::config_file`] when a `Config` is built without [`resolve`]
 /// (tests, `Config::default()`): the default home's config.toml.
 fn default_config_file() -> PathBuf {
-    default_user_dir().join("config.toml")
+    UserDirs::detect_or_temp(None).config().join("config.toml")
 }
 
+/// The data root a bare `Config::default()` starts with: the platform's (or the
+/// legacy `~/.lanthorn`), see [`UserDirs`].
 fn default_user_dir() -> PathBuf {
-    let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join(".lanthorn")
+    UserDirs::detect_or_temp(None).data().to_path_buf()
 }
 
 fn default_true() -> bool { true }
@@ -1314,6 +1368,14 @@ where
     Ok(crate::glk_cfg::GlkFitMode::from_key(&s).unwrap_or_default())
 }
 
+fn deserialize_status_width<'de, D>(d: D) -> Result<StatusWidth, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(StatusWidth::from_key(&s).unwrap_or_default())
+}
+
 fn deserialize_v6_render<'de, D>(d: D) -> Result<V6RenderMode, D::Error>
 where
     D: Deserializer<'de>,
@@ -1415,6 +1477,7 @@ pub mod keys {
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
     pub const GUIDANCE: &str = "guidance";
     pub const RETURN_PROBE: &str = "return_probe";
+    pub const SCAN_EXITS: &str = "scan_exits";
     pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
     pub const SYSTEM_COLOURS: &str = "system_colours";
@@ -1688,6 +1751,21 @@ pub struct Config {
     /// belongs.
     #[serde(default = "default_true")]
     pub return_probe: bool,
+    /// Scan each room's exits in a silent copy of the game, the first time you are in it
+    /// (SQ-1773). Default true.
+    ///
+    /// Typed on the same shadow as [`return_probe`](Self::return_probe) and answering a
+    /// different question: not "what is the way back" but "which ways out does the game have
+    /// from here". The copy is asked each direction from the moment you arrived and the map
+    /// keeps only which ones worked -- never the room beyond, never its name -- so an unwalked
+    /// exit reads as a real exit instead of one of ten maybes. Off, the map's unexplored exits
+    /// are every direction you have not typed, as before.
+    ///
+    /// **Independent of `return_probe`**: both ride the shadow seam, which is armed whatever
+    /// either says, and each is switched by its own key. Needs an engine that supports probes;
+    /// where there is none the setting does nothing.
+    #[serde(default = "default_true")]
+    pub scan_exits: bool,
     /// Keep [`adult_words`](Self::adult_words) out of any panel that ENUMERATES
     /// a story's vocabulary unprompted (SQ-1122). Default true.
     ///
@@ -1789,7 +1867,14 @@ pub struct Config {
     /// `crate::render::graphics::v6_pixel_lock_applies` for the measurement.
     #[serde(default)]
     pub v6_pixel_lock: bool,
-    /// Which of the player's own boot media under `~/.lanthorn/` answers first
+    /// Your own default for Glulx borderless windows (SQ-1740): `true` abuts the
+    /// Glk windows, `false` keeps their borders. Unset (the default) means "no
+    /// user default" and is never written. It sits BELOW a per-game
+    /// `borderless_windows`, garglk.ini and the story's `.cfg` design — see
+    /// `glk_cfg::resolve_borderless`.
+    #[serde(default)]
+    pub borderless_windows: Option<bool>,
+    /// Which of the player's own boot media in the data folder answers first
     /// when several carry the machine's system typeface (SQ-1037, SQ-1053).
     ///
     /// **Media, not only disks**: an Amiga Kickstart ROM (`*.rom`) is read here
@@ -1882,6 +1967,12 @@ pub struct Config {
     /// the upper window will be drawn centred inside the pane. (SQ-0532/A-F1)
     #[serde(default)]
     pub virtual_screen_cols: Option<u16>,
+    /// What width a v4+ Z-machine story is told: `"auto"` (default, probe the
+    /// story), `"fixed"` (always 80 columns) or `"pane"` (always the pane's
+    /// width). A pinned `virtual_screen_cols` wins over all three. A per-game
+    /// `status_width` in the sidecar wins over this (SQ-1809).
+    #[serde(default, deserialize_with = "deserialize_status_width")]
+    pub status_width: StatusWidth,
     /// OVERRIDE for the screen height (in lines) reported in header byte $20.
     /// Unset (the default) follows the story pane — see `virtual_screen_cols`.
     #[serde(default)]
@@ -1968,6 +2059,19 @@ pub struct Config {
     /// persisted, and not part of the file's schema.
     #[serde(skip, default = "default_config_file")]
     pub config_file: PathBuf,
+    /// Where `style.toml` lives (SQ-1722). `None` means the same folder as
+    /// [`Config::user_dir`] (a `Config` built by hand, as the tests do). Set by
+    /// [`resolve`]; never persisted. Read it through [`Config::config_root`].
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
+    /// Where regenerable files live (SQ-1722); `None` means `<user_dir>/cache`.
+    /// Never persisted. Read it through [`Config::cache_root`].
+    #[serde(skip)]
+    pub cache_dir: Option<PathBuf>,
+    /// Where log files go (SQ-1726); `None` means [`Config::user_dir`] itself.
+    /// Never persisted. Read it through [`Config::logs_root`].
+    #[serde(skip)]
+    pub logs_dir: Option<PathBuf>,
     /// The named player this run belongs to (SQ-1676); `None` is the default
     /// player. When set, [`Config::config_file`] is that player's own bare-lines
     /// `users/<name>/config.toml`, layered over the shared one.
@@ -2102,6 +2206,13 @@ pub struct Config {
     /// --accel off CLI flag); intentionally not persisted or user-facing.
     #[serde(skip, default = "default_acceleration")]
     pub acceleration: bool,
+    /// Whether the story pane reserves one column for the transcript scrollbar
+    /// when [`crate::render::screen::story_screen_dims`] tells a v4+ Z-machine
+    /// story how wide its screen is (SQ-1750). Runtime-only, host-set: the TUI
+    /// keeps its scrollbar column (default `true`); a host that draws no
+    /// scrollbar column sets `false` and the story gets the full pane width.
+    #[serde(skip, default = "default_story_scrollbar_gutter")]
+    pub story_scrollbar_gutter: bool,
     /// Cover-art image protocol. Runtime-only (set from --image-protocol);
     /// not persisted or user-facing.
     #[serde(skip, default = "default_image_protocol")]
@@ -2116,6 +2227,38 @@ pub struct Config {
 }
 
 impl Config {
+    /// The `status_width` mode a boot acts on (SQ-1809): the configured one, except
+    /// that a pinned `virtual_screen_cols` is explicit intent and wins over all
+    /// three modes, so it counts as `Pane` (the pin is what the story is told).
+    pub fn effective_status_width(&self) -> StatusWidth {
+        if self.virtual_screen_cols.is_some() {
+            StatusWidth::Pane
+        } else {
+            self.status_width
+        }
+    }
+
+    /// The folder `style.toml` (and the shared `config.toml`) live in (SQ-1722):
+    /// the config root, or [`Config::user_dir`] for a `Config` built without one.
+    pub fn config_root(&self) -> &std::path::Path {
+        self.config_dir.as_deref().unwrap_or(&self.user_dir)
+    }
+
+    /// The folder for regenerable files: the cache root, or `<user_dir>/cache`.
+    pub fn cache_root(&self) -> PathBuf {
+        self.cache_dir.clone().unwrap_or_else(|| self.user_dir.join("cache"))
+    }
+
+    /// The folder for log files: the logs root, or [`Config::user_dir`].
+    pub fn logs_root(&self) -> &std::path::Path {
+        self.logs_dir.as_deref().unwrap_or(&self.user_dir)
+    }
+
+    /// This run's four roots as one value, ready for `DataRoots::resolve_in`.
+    pub fn user_dirs(&self) -> UserDirs {
+        UserDirs::new(self.config_root(), &self.user_dir, self.cache_root(), self.logs_root())
+    }
+
     /// The configured documents root (SQ-1679), read from the SHARED config only.
     /// The folder is shared by every player, so a named player's own file cannot
     /// move it: that player's `Config` holds the shared one in `inherited`, and
@@ -2406,6 +2549,7 @@ impl Default for Config {
             guidance: true,
             guidance_probe: true,
             return_probe: true,
+            scan_exits: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::EveryRoom,
@@ -2418,6 +2562,7 @@ impl Default for Config {
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: false,
             v6_pixel_lock: false,
+            borderless_windows: None,
             system_font_disk: String::new(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -2430,6 +2575,7 @@ impl Default for Config {
             show_status_bar: true,
             search: SearchConfig::default(),
             virtual_screen_cols: None,
+            status_width: StatusWidth::Auto,
             virtual_screen_rows: None,
             split_ratio: default_split_ratio(),
             command_band: CommandBandConfig::default(),
@@ -2441,6 +2587,9 @@ impl Default for Config {
             period_look: default_period_look(),
             honor_timed_input: default_honor_timed_input(),
             config_file: default_config_file(),
+            config_dir: None,
+            cache_dir: None,
+            logs_dir: None,
             player: None,
             player_dir: None,
             inherited: None,
@@ -2459,6 +2608,7 @@ impl Default for Config {
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
+            story_scrollbar_gutter: default_story_scrollbar_gutter(),
             image_protocol: default_image_protocol(),
             images: default_images(),
             trace: crate::trace::TraceSections::default(),
@@ -2481,7 +2631,7 @@ impl Default for Config {
 pub fn config_path(cli: &Cli) -> std::path::PathBuf {
     match &cli.config {
         Some(p) => p.clone(),
-        None => cli.user_dir.clone().unwrap_or_else(default_user_dir).join("config.toml"),
+        None => UserDirs::detect_or_temp(cli.user_dir.as_deref()).config().join("config.toml"),
     }
 }
 
@@ -2509,7 +2659,8 @@ pub fn resolve(cli: &Cli) -> Config {
     // An invalid name is rejected at startup before this runs; a host that never
     // validated simply gets the default player here.
     let player = crate::data_roots::select_player_from_env(cli.player.as_deref()).ok().flatten();
-    let mut cfg = resolve_config_layers(config_path, cli.user_dir.clone(), player.as_deref());
+    let dirs = UserDirs::detect_or_temp(cli.user_dir.as_deref());
+    let mut cfg = resolve_config_layers(config_path, &dirs, cli.user_dir.is_some(), player.as_deref());
 
     // CLI overrides beat the file — and every one of them that lands on a key
     // `write_config_at` persists is PINNED as it lands, so a later settings save
@@ -2518,7 +2669,7 @@ pub fn resolve(cli: &Cli) -> Config {
     // `--trace` and `--pictures` need no pin: their fields are `#[serde(skip)]`
     // and never written at all.
     //
-    // (The `--user-dir` override itself is handled inside `resolve_config_file`,
+    // (The `--user-dir` override itself is handled inside `resolve_config_layers`,
     // shared with `resolve_at` — see its doc comment.)
     //
     // SQ-1082: every switch below is `Option<OnOff>`, and the `Option` is the
@@ -2637,10 +2788,6 @@ pub fn resolve(cli: &Cli) -> Config {
 /// other CLI flag (`--sound`, `--v6-render`, `--colour`, …) is layered on top
 /// by `resolve` itself, after this returns, because those have no meaning
 /// outside an actual command-line launch.
-fn resolve_config_file(config_path: PathBuf, user_dir_override: Option<PathBuf>) -> Config {
-    resolve_config_layers(config_path, user_dir_override, None)
-}
-
 /// Overlay `over` onto `base`: tables merge key by key (so a player's partial
 /// `[keymap]` adds to the shared one), anything else is replaced.
 fn overlay_toml(base: &mut toml::Table, over: toml::Table) {
@@ -2654,7 +2801,10 @@ fn overlay_toml(base: &mut toml::Table, over: toml::Table) {
     }
 }
 
-/// [`resolve_config_file`] for a launch that may name a player (SQ-1676).
+/// The layering behind [`resolve`], [`resolve_at`] and [`resolve_with_dirs`], for a
+/// launch that may name a player (SQ-1676). `dirs` are the three roots;
+/// `pinned` says they were given explicitly (`--user-dir`, or a host), which pins
+/// the data root against a later settings save.
 ///
 /// The layers, lowest first: defaults, the shared `config_path`, then the named
 /// player's `<user_dir>/users/<name>/config.toml` (bare lines, never seeded, so
@@ -2663,17 +2813,25 @@ fn overlay_toml(base: &mut toml::Table, over: toml::Table) {
 /// is the shared config alone, so [`write_config_at`] stores only what differs.
 fn resolve_config_layers(
     config_path: PathBuf,
-    user_dir_override: Option<PathBuf>,
+    dirs: &UserDirs,
+    pinned: bool,
     player: Option<&str>,
 ) -> Config {
-    // Start from defaults.
-    let mut cfg = Config { config_file: config_path.clone(), ..Config::default() };
+    // Start from defaults, on the roots the caller resolved.
+    let mut cfg = Config {
+        config_file: config_path.clone(),
+        user_dir: dirs.data().to_path_buf(),
+        config_dir: Some(dirs.config().to_path_buf()),
+        cache_dir: Some(dirs.cache().to_path_buf()),
+        logs_dir: Some(dirs.logs().to_path_buf()),
+        ..Config::default()
+    };
 
     let mut text = std::fs::read_to_string(&config_path).ok();
     let mut layer_error: Option<String> = None;
     let mut baseline: Option<Box<Config>> = None;
     if let Some(name) = player {
-        let shared = resolve_config_layers(config_path.clone(), user_dir_override.clone(), None);
+        let shared = resolve_config_layers(config_path.clone(), dirs, pinned, None);
         // The player root hangs off the user dir the shared layer resolved to.
         let root = crate::data_roots::player_root(&shared.user_dir, name);
         let player_file = root.join("config.toml");
@@ -2742,6 +2900,7 @@ fn resolve_config_layers(
             cfg.guidance = from_file.guidance;
             cfg.guidance_probe = from_file.guidance_probe;
             cfg.return_probe = from_file.return_probe;
+            cfg.scan_exits = from_file.scan_exits;
             cfg.hide_adult_words = from_file.hide_adult_words;
             cfg.adult_words = from_file.adult_words;
             cfg.background_tidy = from_file.background_tidy;
@@ -2754,6 +2913,7 @@ fn resolve_config_layers(
             cfg.glk_pixel_scale = from_file.glk_pixel_scale;
             cfg.v6_arrow_keys = from_file.v6_arrow_keys;
             cfg.v6_pixel_lock = from_file.v6_pixel_lock;
+            cfg.borderless_windows = from_file.borderless_windows;
             cfg.system_font_disk = from_file.system_font_disk;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
@@ -2774,6 +2934,7 @@ fn resolve_config_layers(
             cfg.volume = from_file.volume;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
+            cfg.status_width = from_file.status_width;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
             cfg.split_ratio = from_file.split_ratio;
             cfg.command_band = from_file.command_band;
@@ -2791,9 +2952,9 @@ fn resolve_config_layers(
     // not the same thing as the `user_dir` key (that moves the data only). With
     // `--config` naming a different file, writing it back would pin this run's
     // temporary root into the user's real config.
-    if let Some(dir) = user_dir_override {
-        cfg.user_dir = dir.clone();
-        cfg.one_run.pin(keys::USER_DIR, dir.to_string_lossy().into_owned());
+    if pinned {
+        cfg.user_dir = dirs.data().to_path_buf();
+        cfg.one_run.pin(keys::USER_DIR, dirs.data().to_string_lossy().into_owned());
     }
 
     cfg
@@ -2806,7 +2967,25 @@ fn resolve_config_layers(
 /// CLI-flag-shaped overrides (sound, v6-render, colour, …) applies them the way
 /// `resolve` does, on top of what this returns.
 pub fn resolve_at(user_dir: &std::path::Path) -> Config {
-    resolve_config_file(user_dir.join("config.toml"), Some(user_dir.to_path_buf()))
+    resolve_config_layers(user_dir.join("config.toml"), &UserDirs::single(user_dir), true, None)
+}
+
+/// [`resolve_at`] for a host that supplies all three roots itself (SQ-1722): a
+/// mobile container, a store build with its own sync. `config.toml` is read from
+/// `dirs.config()`, the data root is `dirs.data()` and regenerable files go to
+/// `dirs.cache()`. A host that wants the platform defaults the TUI uses passes
+/// [`UserDirs::detect`]'s answer, and then shares config and saves with it.
+pub fn resolve_with_dirs(dirs: &UserDirs) -> Config {
+    resolve_config_layers(dirs.config().join("config.toml"), dirs, true, None)
+}
+
+/// [`resolve_with_dirs`] for one named player; see [`resolve_at_for`].
+pub fn resolve_with_dirs_for(dirs: &UserDirs, player: Option<&str>) -> Result<Config, String> {
+    if let Some(name) = player {
+        crate::data_roots::validate_player_name(name)
+            .map_err(|e| format!("invalid player name {name:?}: {e}"))?;
+    }
+    Ok(resolve_config_layers(dirs.config().join("config.toml"), dirs, true, player))
 }
 
 /// [`resolve_at`] for one named player (SQ-1678), with no environment read: the
@@ -2824,7 +3003,7 @@ pub fn resolve_at_for(user_dir: &std::path::Path, player: Option<&str>) -> Resul
         crate::data_roots::validate_player_name(name)
             .map_err(|e| format!("invalid player name {name:?}: {e}"))?;
     }
-    Ok(resolve_config_layers(user_dir.join("config.toml"), Some(user_dir.to_path_buf()), player))
+    Ok(resolve_config_layers(user_dir.join("config.toml"), &UserDirs::single(user_dir), true, player))
 }
 
 // ── Write helpers ─────────────────────────────────────────────────────────────
@@ -3041,6 +3220,8 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
     doc.put("v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
     doc.put("v6_pixel_lock", cfg.v6_pixel_lock.into(), cfg.v6_pixel_lock == def.v6_pixel_lock);
+    // Absent means "no user default" (SQ-1740): written only when the player set one.
+    doc.put_or_remove("borderless_windows", cfg.borderless_windows.map(Into::into), def.borderless_windows.map(Into::into));
     doc.put(
         "system_font_disk",
         cfg.system_font_disk.as_str().into(),
@@ -3052,6 +3233,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
     doc.put("return_probe", cfg.return_probe.into(), cfg.return_probe == def.return_probe);
+    doc.put("scan_exits", cfg.scan_exits.into(), cfg.scan_exits == def.scan_exits);
     doc.put("hide_adult_words", cfg.hide_adult_words.into(), cfg.hide_adult_words == def.hide_adult_words);
     // The LIST is the one setting lanthorn seeds LIVE rather than commented
     // (SQ-1122), so `put`'s "always update a key the file already has" half keeps
@@ -3105,6 +3287,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
     // this session's terminal into a permanent override. (SQ-0532/A-F1)
     doc.put_or_remove("virtual_screen_cols", cfg.virtual_screen_cols.map(|n| i64::from(n).into()), def.virtual_screen_cols.map(|n| i64::from(n).into()));
+    doc.put("status_width", cfg.status_width.key().into(), cfg.status_width == def.status_width);
     doc.put_or_remove("virtual_screen_rows", cfg.virtual_screen_rows.map(|n| i64::from(n).into()), def.virtual_screen_rows.map(|n| i64::from(n).into()));
     doc.put("split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
     doc.put(
@@ -3430,6 +3613,27 @@ mod tests {
         assert!(!config_has_style_sections("style = \"s.toml\"\n"));
     }
 
+    /// SQ-1740: the user's own borderless default is absent by default, parses
+    /// from `config.toml`, and is written only when set.
+    #[test]
+    fn borderless_windows_user_default_parses_and_writes_only_when_set() {
+        assert_eq!(Config::default().borderless_windows, None);
+        let cfg: Config = toml::from_str("borderless_windows = true").unwrap();
+        assert_eq!(cfg.borderless_windows, Some(true));
+
+        let dir = crate::scratch_dir("borderless-user-default");
+        write_config(&dir, &Config::default()).unwrap();
+        let unset = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+        assert!(!unset.lines().any(|l| l.trim_start().starts_with("borderless_windows")));
+        let mut set = Config::default();
+        set.borderless_windows = Some(false);
+        write_config(&dir, &set).unwrap();
+        let written = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = written.parse().unwrap();
+        assert_eq!(doc["borderless_windows"].as_bool(), Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn virtual_screen_defaults_to_following_the_pane() {
         let cfg = Config::default();
@@ -3749,6 +3953,8 @@ mod tests {
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -3770,10 +3976,10 @@ mod tests {
     }
 
     #[test]
-    fn default_config_has_lanthorn_dir() {
+    fn default_config_uses_the_detected_data_root() {
         let cfg = Config::default();
-        // The default user_dir must end with ".lanthorn".
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
+        // The default user_dir is the detected data root (legacy ~/.lanthorn, else the platform folder).
+        assert_eq!(cfg.user_dir, UserDirs::detect_or_temp(None).data());
     }
 
     #[test]
@@ -3787,7 +3993,7 @@ mod tests {
     fn unspecified_fields_fall_back_to_defaults() {
         // An empty TOML file should give us the same user_dir as Config::default().
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
+        assert_eq!(cfg.user_dir, UserDirs::detect_or_temp(None).data());
     }
 
     #[test]
@@ -3842,6 +4048,8 @@ mod tests {
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -3879,6 +4087,8 @@ mod tests {
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -3887,7 +4097,7 @@ mod tests {
             font_check: None,
         };
         let cfg = resolve(&cli);
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
+        assert_eq!(cfg.user_dir, UserDirs::detect_or_temp(None).data());
     }
 
     #[test]
@@ -3916,6 +4126,8 @@ mod tests {
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -3953,6 +4165,8 @@ mod tests {
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -3988,6 +4202,61 @@ mod tests {
         assert_eq!(format!("{via_resolve_at:?}"), format!("{via_cli:?}"));
         assert_eq!(via_resolve_at.user_dir, dir);
         assert!(via_resolve_at.auto_load, "no file means defaults, and auto_load defaults true");
+    }
+
+    /// SQ-1722: a host that supplies all three roots reads `config.toml` from the
+    /// config root, keeps its data in the data root, and the three stay apart.
+    #[test]
+    fn resolve_with_dirs_reads_the_config_root_and_keeps_three_roots() {
+        let base = crate::scratch_dir("resolve-with-dirs");
+        let dirs = UserDirs::new(base.join("cfg"), base.join("data"), base.join("cache"), base.join("logs"));
+        std::fs::create_dir_all(dirs.config()).unwrap();
+        std::fs::write(dirs.config().join("config.toml"), "volume = 33\n").unwrap();
+        // A file in the DATA root must not be mistaken for the config.
+        std::fs::create_dir_all(dirs.data()).unwrap();
+        std::fs::write(dirs.data().join("config.toml"), "volume = 99\n").unwrap();
+
+        let cfg = resolve_with_dirs(&dirs);
+        assert_eq!(cfg.volume, 33);
+        assert_eq!(cfg.config_file, dirs.config().join("config.toml"));
+        assert_eq!(cfg.user_dir, dirs.data());
+        assert_eq!(cfg.config_root(), dirs.config());
+        assert_eq!(cfg.cache_root(), dirs.cache());
+        assert_eq!(cfg.user_dirs(), dirs);
+        // The data root is pinned for the run, so a settings save cannot bake the
+        // host's folder into the config file.
+        write_config_file(&cfg).unwrap();
+        let written = std::fs::read_to_string(dirs.config().join("config.toml")).unwrap();
+        assert!(!written.contains(&*base.join("data").to_string_lossy()), "{written}");
+
+        let roots = crate::data_roots::DataRoots::resolve_in(&cfg.user_dirs(), None, None, &cfg.shared_documents_settings());
+        assert_eq!(roots.catalogue(), dirs.data().join("saves"));
+        assert_eq!(roots.cache(), dirs.cache());
+
+        let bob = resolve_with_dirs_for(&dirs, Some("bob")).unwrap();
+        assert_eq!(bob.player_dir, Some(crate::data_roots::player_root(dirs.data(), "bob")));
+        assert!(resolve_with_dirs_for(&dirs, Some("../x")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `--user-dir X` is the single-folder layout: config, saves/ and cache/ in X.
+    #[test]
+    fn user_dir_flag_is_the_single_folder_layout() {
+        let dir = crate::scratch_dir("user-dir-single");
+        let cfg = resolve(&cli_with_only_user_dir(&dir));
+        assert_eq!(cfg.config_root(), dir);
+        assert_eq!(cfg.user_dir, dir);
+        assert_eq!(cfg.cache_root(), dir.join("cache"));
+        assert_eq!(cfg.config_file, dir.join("config.toml"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-built `Config` (no roots resolved) keeps everything beside `user_dir`.
+    #[test]
+    fn a_config_without_resolved_roots_falls_back_to_user_dir() {
+        let cfg = Config { user_dir: PathBuf::from("/u"), ..Config::default() };
+        assert_eq!(cfg.config_root(), std::path::Path::new("/u"));
+        assert_eq!(cfg.cache_root(), PathBuf::from("/u/cache"));
     }
 
     #[test]
@@ -4299,6 +4568,7 @@ use_defaults = false
             guidance: true,
             guidance_probe: true,
             return_probe: true,
+            scan_exits: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::OnOverlap,
@@ -4311,6 +4581,7 @@ use_defaults = false
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             v6_pixel_lock: false,
+            borderless_windows: None,
             system_font_disk: "Workbench 1.3".into(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -4325,6 +4596,9 @@ use_defaults = false
             period_look: true,
             honor_timed_input: true,
             config_file: default_config_file(),
+            config_dir: None,
+            cache_dir: None,
+            logs_dir: None,
             player: None,
             player_dir: None,
             inherited: None,
@@ -4344,6 +4618,7 @@ use_defaults = false
             volume: 100,
             search: SearchConfig::default(),
             virtual_screen_cols: None,
+            status_width: StatusWidth::Auto,
             virtual_screen_rows: None,
             split_ratio: 70,
             command_band: CommandBandConfig::default(),
@@ -4352,6 +4627,7 @@ use_defaults = false
             text_margin_y: 0,
             animation: AnimationConfig::default(),
             acceleration: true,
+            story_scrollbar_gutter: true,
             image_protocol: ImageProtocol::Auto,
             images: true,
             trace: crate::trace::TraceSections::default(),
@@ -4716,6 +4992,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -4751,6 +5029,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -4803,6 +5083,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -4905,6 +5187,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -4942,6 +5226,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -4980,6 +5266,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5053,6 +5341,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5119,6 +5409,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5173,6 +5465,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5411,6 +5705,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5476,6 +5772,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,
@@ -5539,6 +5837,8 @@ use_defaults = false
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
+            migrate_user_dir: false,
+            yes: false,
             trace: None,
             debug: false,
             fresh_start: false,

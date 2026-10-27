@@ -744,7 +744,7 @@ impl InterpreterSource {
             InterpreterSource::Explicit => "set here",
             InterpreterSource::Artwork => "from the artwork",
             InterpreterSource::DiskImage => "from the disk image",
-            InterpreterSource::Default => "default for this story",
+            InterpreterSource::Default => "default for this game",
         }
     }
 }

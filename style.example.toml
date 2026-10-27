@@ -18,7 +18,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # text    = { fg = "foreground" }                     # body ink on the page (scheme foreground)
 # chrome  = { fg = "foreground", bg = "background" }  # ink on a UI surface: bars, panels, upper window
 # line    = { fg = "palette:6" }                      # lines, frames, rules, dividers (scheme cyan slot)
-# accent  = { fg = "palette:4" }                      # highlights: links, selection, current room, badges (scheme blue slot)
+# accent  = { fg = "palette:6" }                      # highlights: links, selection, current room, badges
 # muted   = { fg = "palette:8" }                      # dim / secondary text (scheme bright-black slot)
 # alert   = { fg = "palette:3" }                      # warnings and errors (scheme yellow slot)
 # heading = { fg = "foreground", bold = true }        # titles and headers (bold)
@@ -26,7 +26,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # ═══ TEXT — foreground colour + emphasis (these selectors have no surface of their own) ═══
 
 # ── Elements: app text + host surfaces (status/help bars, upper window,
-# story browser). Every line already equals its default.
+# game browser). Every line already equals its default.
 [elements]
 # transcript = { parent = "text" }
 # status_bar = { parent = "chrome", reversed = true }
@@ -41,10 +41,10 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # scrollbar_track = { parent = "muted" }
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
-# badge_icons = "plain"   # plain | nerdfont   (the story-list badges below; each key overrides one)
-# badge_save = "S"   # story-list badge: the story has a save
-# badge_hint = "H"   # story-list badge: hints are installed
-# badge_hint_available = "h"   # story-list badge: hints exist but aren't downloaded
+# badge_icons = "plain"   # plain | nerdfont   (the game-list badges below; each key overrides one)
+# badge_save = "S"   # game-list badge: the game has a save
+# badge_hint = "H"   # game-list badge: hints are installed
+# badge_hint_available = "h"   # game-list badge: hints exist but aren't downloaded
 # hyperlink = { parent = "accent", underline = true }
 # story_info_label = { parent = "muted" }
 # suggestion = { parent = "muted" }
@@ -126,6 +126,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # warning_marker = { parent = "alert" }
 # input_text = { parent = "text" }
 # input_prompt = { parent = "text" }
+# input_submit = { parent = "text" }
 # upper_window_border = { parent = "line" }   # frame round a game's status/upper window; none by default — style = "single" (or double | thick | rounded, or per-side style_top/bottom/left/right) boxes it
 # scott_room_panel = { parent = "accent", reversed = true }
 # palette_query = { parent = "text" }
@@ -143,12 +144,18 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # documents_spoiler = { parent = "alert", italic = true }
 # documents_title_match = { parent = "accent", bold = true }
 # documents_preview = { parent = "muted" }
+# documents_web_page = { parent = "accent" }
+# documents_obsolete = { parent = "alert" }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }
 # "command_panel.column_header" = { parent = "muted" }
 # "command_panel.column_header:active" = { parent = "accent", bold = true }
 # "command_panel.quick" = { parent = "text" }
 # "command_panel.quick:hover" = { parent = "command_panel.quick", reversed = true }
+# "command_panel.quick:explored" = { parent = "command_panel.quick" }
+# "command_panel.quick:exit" = { parent = "map.matrix.cell:exit", bold = true }
+# "command_panel.quick:blocked" = { parent = "map.matrix.cell:frontier", dim = true }
+# "command_panel.quick:untried" = { parent = "command_panel.quick" }
 # "command_panel.group_label" = { parent = "heading" }
 # "command_panel.item:seen" = { parent = "muted" }
 # file_browser_cwd = { parent = "alert" }
@@ -208,6 +215,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # "matrix.cell:path" = { parent = "accent", bold = true, underline = true }
 # "matrix.cell:frontier" = { parent = "muted" }
 # "matrix.cell:random" = { parent = "alert" }
+# "matrix.cell:exit" = { parent = "accent" }
 # "matrix.footnote" = { parent = "muted" }
 # "edge:oneway" = { parent = "map.connector" }
 # "edge:asym" = { parent = "map.connector" }
@@ -251,8 +259,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 
 # ═══ SURFACES — bordered boxes: a background + frame + the text drawn on them ═══
 
-# ── Panel: the tiled panes (story/map/verb/debug frames) — background,
-# border, title, tabs. Story/Glk windows use [glk.*], not this section.
+# ── Panel: the tiled panes (game/map/verb/debug frames) — background,
+# border, title, tabs. Game/Glk windows use [glk.*], not this section.
 [panel]
 # background = {}
 # border = { parent = "line", style = "single" }   # style: none | single | double | thick | rounded
@@ -296,7 +304,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # background = { parent = "dialog.list_selected", bold = false }
 # border = { parent = "line", style = "none" }   # style: none | single | double | thick | rounded
 
-# ── Story-line styling rules: recolour whole transcript lines matching a ────
+# ── Game-line styling rules: recolour whole transcript lines matching a ────
 # ── regex. Rules are tried in order; the first match wins. ──────────────────
 # [[transcript.rule]]
 # match = "^>.*"                 # your echoed command lines → magenta bold

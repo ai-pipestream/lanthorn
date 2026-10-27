@@ -691,7 +691,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::AtariDos2) => "Atari 8-bit floppy",
             Some(DiskImage::AppleDos33) => "Apple DOS 3.3 floppy",
             Some(DiskImage::AtariXex) => "Atari 8-bit loadable binary",
-            None => "story file",
+            None => "game file",
         },
         m.release,
         m.serial
@@ -1612,8 +1612,7 @@ fn render_hybrid(
 ) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker =
-        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.set_game_picker(Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18))));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);

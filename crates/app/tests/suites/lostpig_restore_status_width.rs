@@ -1,51 +1,50 @@
-//! SQ-1604: the SQ-0681 restore-width floor (`GameSession::boot_screen_cols`)
-//! is a permanent pin — it holds a restored save's screen width for the rest
-//! of the session even for a story that recomputes its status-line layout
-//! from header byte `$21` (screen width, ZMSD §11.1) EVERY turn, for which
-//! the pin protects nothing once the story has repainted once more.
+//! SQ-1604, SQ-1778, SQ-1808, reworked for SQ-1809: a Save State moved between
+//! pane widths keeps the status line whole and on one row.
 //!
-//! Zork 1 r52 (`zork1_restore_status_width.rs`) is the specimen that pin must
-//! never let go of: it computes its field columns ONCE at boot and never
-//! reads `$21` again, so nothing ever tells the host it is safe to release
-//! the floor, and it must stay raised for the rest of the session.
+//! The history: a restore swaps in memory laid out for the SAVING session's
+//! width, and a story that computed its status columns once (Zork 1 r52) needs
+//! that width kept while one that lays the line out afresh from `$21` (Lost Pig,
+//! Inform 7) must be allowed to follow the pane. SQ-0681 floored the width,
+//! SQ-1604 and SQ-1778 released the floor by asking the story at the first command
+//! after the restore. SQ-1809 asks the story once, BEFORE its boot, by playing a
+//! throwaway copy ([`zvm::width_probe`]):
 //!
-//! Lost Pig (`LostPig.z8`, Inform 7) is the other specimen: it lays its
-//! status line out fresh from `$21` every turn, so the floor's protection is
-//! needed only until the very next turn — and this suite is where that
-//! release is pinned. `zvm::cpu::exec::Machine::take_header_width_read`
-//! (SQ-1604) is the new instrumentation that tells the two apart: it fires
-//! only from the game's own `loadb`/`loadw` of header byte `$21`, never from
-//! the interpreter's internal reads.
+//!   - Lost Pig re-reads `$21`: it is told the pane, and a restore needs no floor
+//!     because it relays out from the width it reads next turn;
+//!   - Hitchhiker's Guide r31 and Zork 1 cache it: they are told 80, always, so a
+//!     restore into any pane restores under the width they were laid out for.
 //!
-//! **Falsified**: this suite's `a_restore_floor_releases_once_the_story_reads_21_itself`
-//! reproduces the permanently-clipped-width symptom against the pre-fix code
-//! (reverting `note_restored_screen_cols`/`drain_turn`'s SQ-1604 addition makes
-//! it fail with `boot_screen_cols` still pinned at the wide value after the
-//! healing turn) and passes with the fix.
+//! The intent these cases keep from the earlier ones is the player's: **restore,
+//! make a move, and the status line is whole and on one row** (CLAUDE.md's
+//! "perturb before asserting" — the frame right after a restore is never the
+//! evidence). They are written against Lost Pig's real status line, whose text a
+//! fresh session at the restoring width is the oracle for.
 //!
 //! Uses the same lightweight save/restore shape as `zork1_restore_status_width.rs`
-//! (`Engine::save_state`/`restore_state` + `app::session::restore_screen`)
-//! rather than the full `host::persist` archive path, since only the VM
-//! snapshot and the screen it carries matter here.
+//! (`Engine::save_state`/`restore_state` + `app::session::restore_screen`) rather
+//! than the full `host::persist` archive path, since only the VM snapshot and the
+//! screen it carries matter here.
 //!
-//! Gitignored fixture: skips vacuously when absent.
+//! Gitignored fixture (`stories/`) for HHG; Lost Pig is a fetched fixture.
 
 use app::engine::Engine;
+use app::machine_boot::MachineBoot;
 use app::session::{GameSession, InputKind};
 
 use crate::fixture_paths::fixture_path;
 
-/// Boot `LostPig.z8` at `cols` columns and tap through to the first line
-/// prompt, mirroring `lostpig_room_and_inventory.rs`'s `boot_lostpig`.
-fn boot_lostpig(cols: u16) -> Option<GameSession> {
-    let path = fixture_path("LostPig.z8");
+/// Boot `name` at `cols` columns through the real door (so the probe decides what
+/// it is told) and tap through to the first line prompt.
+fn boot_story(name: &str, cols: u16) -> Option<GameSession> {
+    let path = fixture_path(name);
     let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        eprintln!("SKIP: story missing at {}", path.display());
         return None;
     };
-    let mut session =
-        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, cols)))
-            .expect("LostPig.z8 should load and boot without a ZError");
+    let mut session = GameSession::new_for_machine(
+        bytes, true, false, false, Vec::new(), Some((25, cols)), None, &MachineBoot::bare(),
+    )
+    .unwrap_or_else(|e| panic!("{name} should load and boot: {e:?}"));
     let mut n = 0;
     while session.pending_input() == InputKind::Char && n < 10 {
         let _ = session.submit_char(13);
@@ -55,103 +54,108 @@ fn boot_lostpig(cols: u16) -> Option<GameSession> {
     Some(session)
 }
 
-#[test]
-fn a_restore_floor_releases_once_the_story_reads_21_itself() {
-    const WIDE: u16 = 120;
-    const NARROW: u16 = 60;
-
-    // Capture a Save State from a session booted (and played one turn) wide.
-    let Some(mut wide) = boot_lostpig(WIDE) else {
-        eprintln!("SKIP: gitignored story missing");
-        return;
-    };
-    assert_eq!(wide.boot_screen_cols, WIDE, "the capture session booted at its own pane");
-    let r = wide.submit("look");
-    assert!(r.fault.is_none() && !r.quit, "\"look\" faulted/quit: {:?}", r.fault);
-    let save = Engine::save_state(&wide);
-    let screen = wide.machine.screen.clone();
-
-    // A fresh, narrower session — the SQ-0680 pre-boot pane seed, honestly
-    // reporting $21 for a session that never restored anything.
-    let Some(mut narrow) = boot_lostpig(NARROW) else {
-        eprintln!("SKIP: gitignored story missing");
-        return;
-    };
-    assert_eq!(narrow.boot_screen_cols, NARROW, "this session booted at the narrow pane");
-    assert_eq!(
-        narrow.machine.mem.read_byte(0x21),
-        NARROW as u8,
-        "before any restore, $21 answers this session's own narrow boot width"
-    );
-
-    // Restore the wide Save State into it.
-    Engine::restore_state(&mut narrow, &save).expect("the Save State restores");
-    app::session::restore_screen(&mut narrow, screen);
-
-    // SQ-0681's own protection engages exactly as it always has: the floor is
-    // raised to the restored (wide) game's own frame of reference. This is
-    // NOT a regression — it is the correct starting state SQ-1604 builds on.
-    assert_eq!(
-        narrow.boot_screen_cols, WIDE,
-        "the SQ-0681 floor raises to the restored game's own width immediately after restore"
-    );
-
-    // Perturb: play the turn(s) after the restore — CLAUDE.md's convention,
-    // and also the mechanism itself: a restore never executes Z-code, so
-    // `take_header_width_read` cannot have fired yet, and the release can
-    // only happen once the story's own bytecode runs and re-reads $21.
-    for cmd in ["", "look"] {
-        let r = narrow.submit(cmd);
-        assert!(r.fault.is_none() && !r.quit, "{cmd:?} faulted/quit: {:?}", r.fault);
-        if narrow.boot_screen_cols == NARROW {
-            break;
-        }
-    }
-
-    // The floor has released: Lost Pig's own `loadb`/`loadw` of $21 while
-    // laying its status line out this turn reported the read, and the
-    // pre-restore floor came back.
-    assert_eq!(
-        narrow.boot_screen_cols, NARROW,
-        "by the turn after its first redraw, the floor must release back to \
-         this session's own width once the story reads $21 itself"
-    );
+/// Declare `pane_w` as the TUI's poll does, then play `cmd`.
+fn play(s: &mut GameSession, pane_w: u16, cmd: &str) {
+    let state = app::state::AppState::default();
+    app::host::screen::sync_zvm_screen_dims(s, &state, (pane_w, 25));
+    let r = s.submit(cmd);
+    assert!(r.fault.is_none() && !r.quit, "{cmd:?} faulted/quit: {:?}", r.fault);
 }
 
-/// Negative control, in the same spirit as `zork1_restore_status_width.rs`'s
-/// permanently-pinned case: a restore into a WIDER session never raises
-/// `pre_restore_screen_cols` at all (the `max` in `note_restored_screen_cols`
-/// is a no-op), so there is nothing to release and the floor simply keeps
-/// reporting this session's own (already wider) boot width throughout.
+/// The upper window as text, one entry per row.
+fn upper_rows(s: &GameSession) -> Vec<String> {
+    let u = &s.machine.screen.upper;
+    (1..=u.rows).map(|r| (1..=u.cols).map(|c| u.cell(r, c).ch).collect()).collect()
+}
+
+/// The width a session following the pane is declared at pane width `pane_w`.
+fn declared_cols(pane_w: u16) -> u16 {
+    let state = app::state::AppState::default();
+    app::render::screen::story_screen_dims(ratatui::layout::Rect::new(0, 0, pane_w, 25), &state)
+        .expect("a pane")
+        .1
+}
+
+/// Lost Pig lays its status line out afresh from the width it is told. A Save
+/// State moved to a different pane — narrower OR wider — has, after the next move,
+/// the same whole one-row line a fresh session at that pane draws.
 #[test]
-fn restoring_a_narrower_save_into_a_wider_session_has_nothing_to_release() {
-    const WIDE: u16 = 120;
-    const NARROW: u16 = 60;
+fn a_save_moved_between_pane_widths_keeps_the_status_line_whole() {
+    for (from, to) in [(120u16, 60u16), (60, 120), (100, 45)] {
+        let Some(mut saver) = boot_story("LostPig.z8", from) else { return };
+        assert_eq!(saver.fixed_cols(), None, "Lost Pig re-reads $21, so it follows the pane");
+        play(&mut saver, from, "look");
+        let save = Engine::save_state(&saver);
+        let screen = saver.machine.screen.clone();
 
-    let Some(mut narrow) = boot_lostpig(NARROW) else {
-        eprintln!("SKIP: gitignored story missing");
-        return;
-    };
-    let r = narrow.submit("look");
-    assert!(r.fault.is_none() && !r.quit);
-    let save = Engine::save_state(&narrow);
-    let screen = narrow.machine.screen.clone();
+        let mut other = boot_story("LostPig.z8", to).expect("present");
+        Engine::restore_state(&mut other, &save).expect("the Save State restores");
+        app::session::restore_screen(&mut other, screen);
 
-    let Some(mut wide) = boot_lostpig(WIDE) else {
-        eprintln!("SKIP: gitignored story missing");
-        return;
-    };
-    assert_eq!(wide.boot_screen_cols, WIDE);
-    Engine::restore_state(&mut wide, &save).expect("the Save State restores");
-    app::session::restore_screen(&mut wide, screen);
-    assert_eq!(wide.boot_screen_cols, WIDE, "restoring a narrower save never lowers the floor");
+        // The oracle: a fresh session at the restoring width, same moves.
+        let mut fresh = boot_story("LostPig.z8", to).expect("present");
 
-    for cmd in ["", "look", "look"] {
-        let r = wide.submit(cmd);
-        assert!(r.fault.is_none() && !r.quit, "{cmd:?} faulted/quit: {:?}", r.fault);
+        // Perturb: play after the restore, twice, as the poller would.
+        for cmd in ["look", "look"] {
+            play(&mut other, to, cmd);
+            play(&mut fresh, to, cmd);
+        }
+        let ctx = format!("{from} -> {to}");
+        assert_eq!(other.fixed_cols(), None, "a restore fixes nothing for an adapting story ({ctx})");
+        assert_eq!(other.machine.mem.read_byte(0x21) as u16, declared_cols(to), "$21 follows the pane ({ctx})");
+        let rows = upper_rows(&other);
+        assert_eq!(rows.len(), 1, "one status row, no stray wrap ({ctx}): {rows:?}");
+        assert!(!rows[0].trim().is_empty(), "the status line is drawn ({ctx})");
+        assert_eq!(rows, upper_rows(&fresh), "the same whole line a fresh session draws ({ctx})");
     }
-    assert_eq!(
-        wide.boot_screen_cols, WIDE,
-        "with nothing to release, the floor keeps reporting this session's own width"
-    );
+}
+
+/// Negative control: a save restored into a session that is ALREADY at its own
+/// width, with nothing to adapt, is simply undisturbed by the whole mechanism.
+#[test]
+fn restoring_into_the_same_width_changes_nothing() {
+    let Some(mut a) = boot_story("LostPig.z8", 80) else { return };
+    play(&mut a, 80, "look");
+    let save = Engine::save_state(&a);
+    let screen = a.machine.screen.clone();
+    let before = upper_rows(&a);
+
+    let mut b = boot_story("LostPig.z8", 80).expect("present");
+    Engine::restore_state(&mut b, &save).expect("the Save State restores");
+    app::session::restore_screen(&mut b, screen);
+    play(&mut b, 80, "look");
+    assert_eq!(b.fixed_cols(), None);
+    assert_eq!(upper_rows(&b), before, "same pane, same line");
+}
+
+/// SQ-1808: Hitchhiker's Guide r31 (Solid Gold) bakes its status layout at the
+/// width it booted with. Restored into a narrower session, its status write ran
+/// one cell past the right edge and window 1 then WRAPPED, growing a stray second
+/// row holding one reverse-video space (zvm now clips window 1 at the right margin
+/// as well). With SQ-1809 the story is told 80 at both boots, so a save made in a
+/// 48-column pane and restored in a 45-column one is restored under the very width
+/// it was laid out for.
+///
+/// Gitignored fixture (`stories/`): skips vacuously when absent.
+#[test]
+fn a_baked_status_layout_restored_narrower_keeps_one_row() {
+    const SAVED: u16 = 48;
+    const NARROW: u16 = 45;
+    let Some(mut saver) = boot_story("hitchhiker-invclues-r31-s871119.z5", SAVED) else { return };
+    assert_eq!(saver.fixed_cols(), Some(80), "HHG caches the width, so it is told 80 in a 48-column pane");
+    play(&mut saver, SAVED, "look");
+    assert_eq!(saver.machine.screen.upper.rows, 1, "the saved game has a one-row status bar");
+    let save = Engine::save_state(&saver);
+    let screen = saver.machine.screen.clone();
+
+    let mut narrow = boot_story("hitchhiker-invclues-r31-s871119.z5", NARROW).expect("present");
+    Engine::restore_state(&mut narrow, &save).expect("the Save State restores");
+    app::session::restore_screen(&mut narrow, screen);
+    assert_eq!(narrow.fixed_cols(), Some(80), "the told width is the same 80 on both sides");
+
+    for cmd in ["look", "look"] {
+        play(&mut narrow, NARROW, cmd);
+        assert_eq!(narrow.machine.screen.upper.rows, 1, "no stray second status row after {cmd:?}");
+        assert_eq!(narrow.machine.mem.read_byte(0x21), 80, "$21 stays 80 in a {NARROW}-column pane");
+    }
 }

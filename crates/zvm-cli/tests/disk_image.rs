@@ -1064,9 +1064,9 @@ fn a_real_compilation_disc_names_its_games_from_the_table() {
     // is on this disc twice, so the ambiguity is real and is reported rather
     // than guessed at; `beyond zork` picks out one game and two files.
     let err = stderr_of(&run(&image, &["--story", "ballyhoo"], ""));
-    assert!(err.contains("matches more than one story"), "two copies, two answers:\n{err}");
+    assert!(err.contains("matches more than one game"), "two copies, two answers:\n{err}");
     let err = stderr_of(&run(&image, &["--story", "coconut of quendor"], ""));
-    assert!(err.contains("matches more than one story"), "the subtitle matches too:\n{err}");
+    assert!(err.contains("matches more than one game"), "the subtitle matches too:\n{err}");
 }
 
 /// *Masterpieces* carries *Ballyhoo* three times — `MAC/BALLYHOO`,

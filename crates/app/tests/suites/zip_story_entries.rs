@@ -297,7 +297,7 @@ fn a_name_that_matches_nothing_in_the_zip_refuses_and_calls_it_an_archive() {
 
     let err = app::story_pick::pick(Some(&source), &zip, &app::data_roots::DataRoots::single(&data), "trinity")
         .expect_err("a miss refuses rather than opening the first entry");
-    assert!(err.starts_with("no story on this archive is named 'trinity':"), "{err}");
+    assert!(err.starts_with("no game on this archive is named 'trinity':"), "{err}");
     assert!(err.contains("beacon"), "the menu rides along with the refusal: {err}");
 
     for d in [dir, data] {

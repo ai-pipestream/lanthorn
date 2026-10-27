@@ -671,7 +671,16 @@ know which side you're on).
   clips the word rows it has no room for; resize the band taller to see them
   all.
 - **Tab autocomplete** from **the things that are actually in front of you**,
-  then the words the story has just been using, then its whole dictionary —
+  then the words the story has just been using and the player has typed, then
+  its whole dictionary (SQ-1790: at the FIRST word of a command — line start, or
+  after `.`, `,` or `then` — the common verbs, `vocab::CORE_VERBS` plus the
+  compass, `x` and `again`, lead, then words typed in earlier commands; within a
+  tier shorter words come first, so `lo` offers `look` before `lobby`. There is
+  no cap: Tab cycles every match, and the ranking is
+  `complete::completion_candidates`, the one function the TUI and hosts share —
+  hosts pass their command history as `history` and may cut the list with
+  `completion_candidates_limited(.., Some(n))`. Slash-command names stay capped
+  at six) —
   every one of them checked against that dictionary, through the story's own
   tokeniser, so what you are offered is what the parser will accept and nothing
   else. The first tier is the one that fixes what ages these games worst: the
@@ -1280,7 +1289,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   version" — which is often the only way to tell the candidates apart, since a
   game may well list several files under the *same* filename. A file the
   library directory already holds is marked `✓ … · already downloaded` (you can
-  still download it again; it lands beside the original under a new name). The
+  still download it again; it lands beside the original under a new name). The A game the library holds in *any* subfolder is spotted by IFID (or IFDB id) — read off the story files themselves, so it works before the library's own IFDB details are fetched — and the chooser opens with one `Already in your library: <path>` line (`(+N more)` when there are several); the walk runs on the search worker, never the UI thread (`library_match`). Each download row is also marked `✓ in <folder>/` (`(+N more)` for several) when a file of that name sits in a subfolder (SQ-1757): `ResolvedGame::option_held`, from directory listings only, in the same single `library_dirs` walk; the IFID check reuses the picker's finished index (`SearchWorker::with_library_index`, shared `LibraryIndex`) so only a resolve that beats the index falls back to reading story files. The
   file lands in the current library directory, the list refreshes,
   and the cursor jumps to your new story with a "Downloaded …" note. Only
   files lanthorn can actually open are offered (`.z3`–`.z8`, `.ulx`,

@@ -170,11 +170,96 @@ jobs:
       # than reading as "no match".
       - name: No audio device library in the dependency tree
         run: |
-          cargo tree -p lanthorn --locked --no-default-features -e normal --target all --prefix none > tree.txt
+          cargo tree -p lanthorn --locked --no-default-features --features terminal -e normal --target all --prefix none > tree.txt
           if grep -E '^(alsa-sys|alsa|cpal|rodio) ' tree.txt; then
-            echo "::error::lanthorn --no-default-features still depends on an audio device library"
+            echo "::error::lanthorn without --features playback still depends on an audio device library"
             exit 1
           fi
 
-      - name: cargo build --no-default-features
-        run: cargo build -p lanthorn --locked --no-default-features
+      # SQ-1804: `--no-default-features` also drops `terminal` now, and the
+      # binary requires it — so this keeps building the TUI (terminal graphics
+      # on, sound output off) as it always did.
+      - name: cargo build --no-default-features --features terminal
+        run: cargo build -p lanthorn --locked --no-default-features --features terminal
+
+  # SQ-1804: `app` without terminal graphics — what a non-terminal embedding host
+  # (a GUI app, including its Android and iOS builds) depends on:
+  # `default-features = false, features = ["mod-music"]`. ratatui-image is behind
+  # the `terminal` feature because its kitty shared-memory path enables rustix's
+  # `shm`, which rustix's libc backend cannot provide on Android; this job is what
+  # keeps that true. The Android and iOS legs only `cargo check` the library: they
+  # prove it COMPILES for the target, which is the thing that regressed.
+  no-terminal:
+    name: library without terminal graphics (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux host
+            os: ubuntu-latest
+            target: ''
+          - name: android aarch64
+            os: ubuntu-latest
+            target: aarch64-linux-android
+          - name: ios aarch64
+            os: macos-latest
+            target: aarch64-apple-ios
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same reason as the `test` job's step: a runner has 3-4 cores and the
+      # config file's cap is for a developer's 12-core machine.
+      - name: Un-cap build jobs for the runner
+        shell: bash
+        run: |
+          n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+          case "$n" in ''|*[!0-9]*) echo "core count unavailable; leaving jobs capped" ;;
+                       *) echo "CARGO_BUILD_JOBS=$n" >> "$GITHUB_ENV" ;; esac
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add the target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      # `ring` (rustls, via ureq) and `zstd-sys` (zip) compile C in their build
+      # scripts, so the Android leg needs the NDK's clang as the C compiler. The
+      # ubuntu runners ship an NDK and export its root as ANDROID_NDK_LATEST_HOME;
+      # the per-API clang wrappers live in
+      # toolchains/llvm/prebuilt/linux-x86_64/bin/ as
+      # `aarch64-linux-android<API>-clang`. API 24 is Android 7.0.
+      - name: Point the C toolchain at the Android NDK
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ls "$bin/aarch64-linux-android24-clang"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: no-terminal-${{ matrix.name }}
+
+      # Written to a file first so a failing `cargo tree` fails this step rather
+      # than reading as "no match". `--target all` so a platform-specific edge
+      # cannot hide. No ALSA headers are installed on this runner either, so the
+      # audio-device libraries cannot creep back in unnoticed.
+      - name: No terminal graphics or audio device library in the dependency tree
+        if: matrix.target == ''
+        run: |
+          cargo tree -p lanthorn --locked --no-default-features --features mod-music -e normal --target all --prefix none > tree.txt
+          if grep -E '^(ratatui-image|alsa-sys|alsa|cpal|rodio|oboe) ' tree.txt; then
+            echo "::error::lanthorn --no-default-features --features mod-music still depends on terminal graphics or an audio device library"
+            exit 1
+          fi
+
+      - name: cargo check the library
+        shell: bash
+        run: |
+          target=""
+          if [ -n "${{ matrix.target }}" ]; then target="--target ${{ matrix.target }}"; fi
+          cargo check -p lanthorn --locked --lib --no-default-features --features mod-music $target

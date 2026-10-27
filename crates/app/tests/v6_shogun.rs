@@ -41,3 +41,14 @@ mod v6_shogun_title_header;
 
 #[path = "suites/v6_screen_palette.rs"]
 mod v6_screen_palette;
+
+#[path = "suites/sq1817_shogun_title_rows.rs"]
+mod sq1817_shogun_title_rows;
+#[path = "suites/sq1822_shogun_boot_menu.rs"]
+mod sq1822_shogun_boot_menu;
+#[path = "suites/sq1824_shogun_slide_clear.rs"]
+mod sq1824_shogun_slide_clear;
+#[path = "suites/sq1825_shogun_status_bar_rows.rs"]
+mod sq1825_shogun_status_bar_rows;
+#[path = "suites/sq1826_shogun_title_art.rs"]
+mod sq1826_shogun_title_art;

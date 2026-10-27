@@ -99,13 +99,18 @@ const STARTUP: &[Row] = &[
     ex(
         "user_dir",
         "\"~/.lanthorn\"",
-        &["Root directory for lanthorn data (maps/, saves/, style.toml).", "Default: ~/.lanthorn."],
+        &[
+            "Root directory for lanthorn data (saves/, users/, documents/).",
+            "Default: your platform's data folder (macOS and Linux ~/.local/share/lanthorn,",
+            "Windows %APPDATA%\\lanthorn), or ~/.lanthorn if that holds settings or saves",
+            "(if both hold files, lanthorn asks). config.toml and style.toml stay in the config folder.",
+        ],
     ),
     ex(
         "default_story_dir",
         "\"~/games/if\"",
         &[
-            "Directory (or single story file) opened when lanthorn is launched with",
+            "Directory (or single game file) opened when lanthorn is launched with",
             "no path argument. Unset by default, so a path is required.",
         ],
     ),
@@ -123,7 +128,7 @@ const STARTUP: &[Row] = &[
         "true",
         &[
             "Create each linked game's documents folder automatically (default false:",
-            "the story info panel offers a button, or make the folder by hand; an",
+            "the game info panel offers a button, or make the folder by hand; an",
             "existing folder is always found).",
             "Shared by every player: read from this file only.",
         ],
@@ -133,7 +138,7 @@ const STARTUP: &[Row] = &[
         "\"style.toml\"",
         &[
             "Style-file pointer: a built-in name or a file path. Unset uses",
-            "<user_dir>/style.toml when present, else the built-in theme.",
+            "style.toml in the config folder when present, else the built-in theme.",
         ],
     ),
     d("watch_style", "false", &["Watch the resolved style file and live-reload it on change."]),
@@ -197,7 +202,7 @@ const INTERFACE: &[Row] = &[
         "command_bar",
         "false",
         &[
-            "Type into a persistent command bar instead of the inline story prompt.",
+            "Type into a persistent command bar instead of the inline game prompt.",
             "(Unrelated to the [command_panel] section further down, which is the",
             "point-and-click phrase builder.)",
         ],
@@ -241,21 +246,39 @@ const INTERFACE: &[Row] = &[
             "",
             "On by default: it runs your game a few extra turns in private after",
             "every move that opens a gap, and never touches your screen or saves.",
-            "The footprint on the STORY pane's bottom border switches it — beside",
+            "The footprint on the GAME pane's bottom border switches it — beside",
             "the map toggle, since the search keeps running with the map hidden —",
             "and \"/set-return-probe\" persists it per-game.",
+        ],
+    ),
+    d(
+        "scan_exits",
+        "true",
+        &[
+            "The first time you stand in a room, ask a silent throwaway copy of the",
+            "game which ways lead out of it, and let the map show the real exits you",
+            "have not walked yet (the \"»\" marks in the matrix and the room card),",
+            "including ones the room description never mentions. Only the direction",
+            "is kept: the map never shows, names or creates the room on the far side",
+            "until you walk there yourself. A way the game refused is asked again on",
+            "a later visit, since a door may have opened. Off, every direction you",
+            "have not typed counts as unexplored, as before.",
+            "",
+            "On by default; it runs your game a few extra turns in private, never",
+            "touches your screen or saves, and waits behind the searches your own",
+            "moves need. Independent of return_probe.",
         ],
     ),
     d(
         "hide_adult_words",
         "true",
         &[
-            "Keep the words below out of any panel that ENUMERATES a story's",
+            "Keep the words below out of any panel that ENUMERATES a game's",
             "vocabulary unprompted — the command panel's VERB column and its like.",
             "Infocom's dictionaries are saltier than their prose, and a panel puts",
             "the whole lot in front of anyone who opens it.",
             "",
-            "DISPLAY ONLY. The story still knows every word: typing one parses",
+            "DISPLAY ONLY. The game still knows every word: typing one parses",
             "exactly as it always did, and Lanthorn's Guiding Light still offers it",
             "when you reach for it. False shows the full column and keeps the list.",
         ],
@@ -275,7 +298,7 @@ const INTERFACE: &[Row] = &[
             "the real verbs `rap` and `who`.",
         ],
     ),
-    d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
+    d("show_status_bar", "true", &["Show the status/score bar across the top of the game pane."]),
     d(
         "show_room_numbers",
         "false",
@@ -285,7 +308,7 @@ const INTERFACE: &[Row] = &[
         "grab_zone_cells",
         "2",
         &[
-            "How many cells wide the draggable pane boundaries are: the story/map",
+            "How many cells wide the draggable pane boundaries are: the game/map",
             "splitter and the inventory/room panel top edges. Raise it for touch —",
             "e.g. the Docker web image on a tablet, where a finger cannot land on",
             "so narrow a target. The command panel's own top edge is unaffected and",
@@ -293,7 +316,7 @@ const INTERFACE: &[Row] = &[
             "column headers. Clamped to 1-6.",
         ],
     ),
-    d("split_ratio", "50", &["The story pane's share of the story/Journal split, as a percentage."]),
+    d("split_ratio", "50", &["The game pane's share of the game/Journal split, as a percentage."]),
     d(
         "text_margin_x",
         "0",
@@ -332,21 +355,21 @@ const INTERPRETER: &[Row] = &[
         "false",
         &[
             "Advertise a named machine's own default page and ink ($2C/$2D) even",
-            "when the story did not come off its original media. Automatic off a",
+            "when the game did not come off its original media. Automatic off a",
             "release disk — that is what the disk means — so this is only for a",
-            "machine you named yourself with interpreter_number, on a story that",
+            "machine you named yourself with interpreter_number, on a game that",
             "did not come off one. It cannot conjure a machine where none was named,",
-            "so an ordinary story file always gets your terminal's own colours.",
+            "so an ordinary game file always gets your terminal's own colours.",
         ],
     ),
     d(
         "period_look",
         "true",
         &[
-            "Paint a v1-v4 story the way its own machine's interpreter did: that",
+            "Paint a v1-v4 game the way its own machine's interpreter did: that",
             "machine's page and ink, its status band, and the shape and colour of",
             "its cursor. Measured off emulator captures of the release disks, so it",
-            "applies only when the story came off one (or you named --interpreter).",
+            "applies only when the game came off one (or you named --interpreter).",
             "Narrower than honor_game_colours, which takes this with it when off.",
             "A colour you set yourself in style.toml always wins.",
         ],
@@ -362,7 +385,7 @@ const INTERPRETER: &[Row] = &[
         &[
             "Interpreter number advertised in header byte 0x1E. Games branch on it:",
             "Beyond Zork picks character graphics over colour on IBM PC, and several v6",
-            "story files were built for one specific machine. ZMSD §11.1.3's values:",
+            "game files were built for one specific machine. ZMSD §11.1.3's values:",
             "",
             "   1  DECSystem-20      7  Commodore 128",
             "   2  Apple IIe         8  Commodore 64",
@@ -380,7 +403,7 @@ const INTERPRETER: &[Row] = &[
         "20250811",
         &[
             "Pin the seed every engine's random-number generator starts from, so a",
-            "story replays exactly: the same shuffles, the same dice, the same dungeon.",
+            "game replays exactly: the same shuffles, the same dice, the same dungeon.",
             "Unset (default) draws a fresh seed from the system at every launch, which",
             "is what makes a randomised game like Kerkerkruip a different game twice.",
             "lanthorn prints the seed it used on the console as it starts — copy that",
@@ -408,16 +431,27 @@ const INTERPRETER: &[Row] = &[
             "fixed canvas, which lanthorn scales into the pane already.",
         ],
     ),
+    ex(
+        "borderless_windows",
+        "false",
+        &[
+            "Your default for Glulx Glk window borders: true abuts the windows with no",
+            "borders, false keeps them. Unset (default) leaves each game to its own",
+            "garglk.ini or .cfg design, else bordered. Applies to Glulx games only.",
+            "A game's own garglk.ini or .cfg design still wins over this; a per-game",
+            "config.toml setting beats everything.",
+        ],
+    ),
     d(
         "v6_render",
         "\"hybrid\"",
         &[
             "How v6 graphical games (Zork Zero, Arthur, Journey, Shogun) are drawn:",
-            "  \"hybrid\"   — crisp terminal story inside a scaled pixel frame (default)",
+            "  \"hybrid\"   — crisp terminal game inside a scaled pixel frame (default)",
             "  \"raster\"   — the whole pane as one pixel image, letterboxed",
             "  \"extended\" — the same pixel image, but pinned to a whole magnification",
             "               and grown DOWNWARD: the pane's surplus height becomes extra",
-            "               story rows in the game's own bitmap typeface instead of",
+            "               game rows in the game's own bitmap typeface instead of",
             "               empty letterbox. The game is told nothing — its own screen",
             "               keeps the layout it always had, at the top of a taller frame.",
         ],
@@ -427,11 +461,11 @@ const INTERPRETER: &[Row] = &[
         "true",
         &[
             "Lay out a Glulx game at the design size its Windows Glk .cfg file asks for.",
-            "A few games (Photopia, Narcolepsy) ship a <story>.cfg beside the story",
+            "A few games (Photopia, Narcolepsy) ship a <story>.cfg beside the game",
             "with WindowWidth and WindowHeight; lanthorn then lays the game out at",
             "that pixel size and fits the whole frame to your pane. Set false to keep",
             "the ordinary cell layout. Games without such a .cfg are unaffected.",
-            "A per-game config.toml beside the story can override this.",
+            "A per-game config.toml beside the game can override this.",
         ],
     ),
     d(
@@ -466,9 +500,9 @@ const INTERPRETER: &[Row] = &[
         "v6_arrow_keys",
         "false",
         &[
-            "Forward arrow keys to a v6 story as ZSCII 129-132, for a game that binds",
+            "Forward arrow keys to a v6 game as ZSCII 129-132, for a game that binds",
             "them to movement. Off by default, so arrows keep driving scrollback and",
-            "map panning the way they do in every other story. v1-5 and Glulx always",
+            "map panning the way they do in every other game. v1-5 and Glulx always",
             "get them, and so do v6 menus and \"press any key\" screens either way.",
         ],
     ),
@@ -476,7 +510,7 @@ const INTERPRETER: &[Row] = &[
         "system_font_disk",
         "\"\"",
         &[
-            "Which of your own boot media under ~/.lanthorn/ answers first when",
+            "Which of your own boot media in the lanthorn data folder answers first when",
             "several carry the machine's system typeface. A case-insensitive piece of",
             "the file's name — \"6.0.8\" picks the System 6.0.8 startup disk out",
             "of a folder holding System 6 and 7 — and empty means no preference.",
@@ -485,7 +519,7 @@ const INTERPRETER: &[Row] = &[
             "being asked for falls through to the others rather than losing it; with",
             "no preference the pool is ordered by filename.",
             "Drop a Mac OS System disk or an Amiga Kickstart ROM (*.rom) in",
-            "~/.lanthorn/ and a Version 6 game off that machine's own",
+            "the data folder and a Version 6 game off that machine's own",
             "media is drawn with the face the machine really used — Geneva on a",
             "Macintosh, which lives in the System file and on no Infocom disk, and",
             "topaz 8 on an Amiga, which lives in Kickstart and on no floppy at all.",
@@ -507,7 +541,7 @@ const INTERPRETER: &[Row] = &[
             "rendition (Blorb, Amiga, MCGA) goes 0.5x, 1x, 1.5x, 2x…, while the",
             "standard Macintosh's mono plate and the 640-wide EGA/CGA ones go 1x, 2x,",
             "3x… The screen is centred in the pane and the margin around it carries the",
-            "story's own page, as it already does.",
+            "game's own page, as it already does.",
             "The cost is screen area — the picture stops at the rung below the pane",
             "rather than filling it. A pane too small for even the smallest step falls",
             "back to free scaling.",
@@ -533,11 +567,21 @@ const INTERPRETER: &[Row] = &[
         "80",
         &[
             "Override the screen size reported to the Z-machine in header bytes $21/$20.",
-            "Unset (default) follows the story pane, which is what ZMSD §8.4 asks for.",
+            "Unset (default) follows the game pane, which is what ZMSD §8.4 asks for.",
             "Set both only to pin a fixed virtual screen.",
         ],
     ),
     ex("virtual_screen_rows", "24", &["The height half of the same override; set it alongside the width."]),
+    d(
+        "status_width",
+        "\"auto\"",
+        &[
+            "What width a v4+ Z-machine game is told: \"auto\" plays a throwaway copy",
+            "first and tells a game that lays its status line out once (older Infocom)",
+            "80 columns for the whole session, and one that re-reads the width the",
+            "pane's; \"fixed\" is always 80; \"pane\" is always the pane's.",
+        ],
+    ),
 ];
 
 const SOUND: &[Row] = &[
@@ -563,7 +607,7 @@ const ANIMATION: &[Row] = &[
         "follow_ms",
         "200",
         &[
-            "How long the story pane eases toward new output arriving at the",
+            "How long the game pane eases toward new output arriving at the",
             "bottom, in milliseconds. 0 is instant. Only applies while you were",
             "already following the bottom - scrolled into history, nothing",
             "drags your view back. Any keypress or mouse action ends an",
@@ -574,8 +618,8 @@ const ANIMATION: &[Row] = &[
         "scrollbar_hide_ms",
         "1500",
         &[
-            "How long the STORY PANE's scrollbar stays up after you scroll it,",
-            "in milliseconds. 0 keeps it up permanently. Only the story pane",
+            "How long the GAME PANE's scrollbar stays up after you scroll it,",
+            "in milliseconds. 0 keeps it up permanently. Only the game pane",
             "auto-hides - a modal's bar is reserved out of its content width, so",
             "hiding it there would reflow the list.",
         ],
@@ -598,12 +642,12 @@ const COMMAND_BAND: &[Row] = &[
             "key.",
         ],
     ),
-    d("auto_open", "false", &["Open the command panel as soon as the story starts."]),
+    d("auto_open", "false", &["Open the command panel as soon as the game starts."]),
     ex(
         "verbs",
         "[ { word = \"unlock\", arity = \"pair\", prep = \"with\" }, { word = \"polish\", arity = \"object\" } ]",
         &[
-            "REPLACE the whole VERB column, including the running story's own",
+            "REPLACE the whole VERB column, including the running game's own",
             "grammar - which is where the column comes from when this is unset,",
             "and normally where you want it to come from. Each entry declares the",
             "verb's shape, which decides the columns offered after it is picked:",
@@ -615,7 +659,7 @@ const COMMAND_BAND: &[Row] = &[
             "",
             "`prep` is the preposition a pair verb joins its objects with, and is",
             "shown as that column's header. A column filled from this key labels",
-            "itself \"VERB - yours\"; unset it to get the story's own verbs back.",
+            "itself \"VERB - yours\"; unset it to get the game's own verbs back.",
         ],
     ),
     ex(
@@ -623,7 +667,7 @@ const COMMAND_BAND: &[Row] = &[
         "[ { word = \"xyzzy\", arity = \"solo\" } ]",
         &[
             "ADDITIVE form of the same shape: layered on whichever table is in force -",
-            "usually the story's own grammar, so this patches a real verb list.",
+            "usually the game's own grammar, so this patches a real verb list.",
             "An entry whose word is already there re-shapes it instead of duplicating,",
             "so this is also how you fix one verb's shape.",
         ],
@@ -637,7 +681,7 @@ const COMMAND_BAND: &[Row] = &[
             "The value",
             "shown is the built-in row; unset the key to keep it. Picking one SENDS",
             "it AT ONCE - no Enter, unlike every other pick in the band (which",
-            "composes onto the story input line and waits for Enter, same as",
+            "composes onto the game input line and waits for Enter, same as",
             "typing). These words are also left out of the VERB column, since",
             "showing them twice would be redundant.",
         ],
@@ -687,8 +731,8 @@ const TRAILER: &str = r#"
 # [keymap.anim]
 # "ctrl+t" = "animate-tidy"
 #
-# The story browser (the screen you get when lanthorn is pointed at a directory)
-# has its own context. Only its own commands work there — it runs before a story
+# The game browser (the screen you get when lanthorn is pointed at a directory)
+# has its own context. Only its own commands work there — it runs before a game
 # is loaded, so nothing that acts on a running game has anything to act on.
 #
 # [keymap.browser]
@@ -728,7 +772,7 @@ pub fn commented_template() -> String {
     out.push_str("#\n");
     out.push_str("# PER-GAME overrides live in a second, separate config.toml inside that game's\n");
     out.push_str("# own save directory. It holds whatever a per-game control or a `set-*` command\n");
-    out.push_str("# can change for one story rather than for all of them, which today is:\n");
+    out.push_str("# can change for one game rather than for all of them, which today is:\n");
     out.push_str("#\n");
     // Derived from `PerGameConfig::KEYS`, never retyped: this sentence used to
     // name three keys in prose and had been wrong for two releases, because a
@@ -745,7 +789,7 @@ pub fn commented_template() -> String {
     out.push_str("# the keys that differ, bare and uncommented, and is deleted once nothing is\n");
     out.push_str("# overridden. An absent key there means \"inherit whatever this file says\", so\n");
     out.push_str("# do NOT paste this template into a game directory — every line you uncommented\n");
-    out.push_str("# would become a per-game override pinning that value for that story.\n");
+    out.push_str("# would become a per-game override pinning that value for that game.\n");
     out.push_str("#\n# `version` below is the schema stamp — lanthorn manages it; leave it alone.\n");
     out.push_str("# It is also the anchor that keeps settings lanthorn writes for you (from the\n");
     out.push_str("# settings screen, say) together at the top rather than scattered.\n");

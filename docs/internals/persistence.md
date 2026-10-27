@@ -112,21 +112,20 @@ with nothing to reinstate — that interchange route is untouched.
 bar out ONCE, from header byte $21 as it stood at boot, and thereafter only
 re-cursors to the field columns it computed back then; declaring a narrower
 screen later makes those moves illegal (ZMSD §8.7.2.3) and the digits land on the
-room name. The app therefore floors the declared width at the width the running
-story was laid out for (`GameSession::boot_screen_cols`, SQ-0679/0680) — and a
-restore replaces the running story with one *another* session booted, at its own
-width. Every restore that brings a screen with it (`restore_screen`, so: host
-Save State resume, auto-resume at launch, and the in-game `@restore` of a
-`.lanthorn`) raises that floor to the restored upper window's grid width, which
-is the saved session's own frame of reference; the floor only ever grows, so
-restoring a narrow save into a wide session changes nothing.
-`reconcile_restored_screen_size` applies the same floor, so the restored grid
-follows a *wider* pane and holds its own width in a narrower one, where the pane
-simply clips the right of the bar. A bare `.qzl`/`.sav` carries no screen and,
-per Quetzal, no usable header dimensions either, so its layout width is
-unknowable: that path assumes the conventional 80 columns
-(`note_bare_quetzal_width`) — wrong at worst by a clipped bar, versus a garbled
-one for assuming this session's width.
+room name. Since SQ-1809 the app finds out *before the boot*, by playing a throwaway copy of
+the story (`zvm::width_probe`), whether it caches the width, and a caching story
+is told 80 columns for the whole session (`GameSession::fixed_cols`) whatever the
+pane does — so a save made by any such session restores under the width it was
+laid out for, and the display path narrows or centres the 80-column grid. The
+verdict is a property of the story, not the terminal, so it is **not** in the
+archive: every restore follows a boot of the same story, which already decided.
+The one case that needs more is a save laid out *wider* than 80 (an older build
+told a caching story the pane): `restore_screen` raises the told width to
+`max(80, the restored upper window's grid width)` for the session, and
+`reconcile_restored_screen_size` applies the told width. A story that follows
+the pane has nothing baked: its restored grid is refit to the host pane both
+ways and it relays out on the next move. A bare `.qzl`/`.sav` carries no screen
+and no usable header dimensions, and needs no guess: it changes nothing.
 
 **Every engine, the same deal (SQ-0556).** `@save` behaves identically wherever you
 meet it: it writes a `.lanthorn`, the archive shows up in the saves manager, and it
@@ -326,6 +325,56 @@ that game side by side:
     config.toml         # per-game non-style overrides (honor/borders/map panel)
 ```
 
+The app's fetched IFDB data is the exception to "everything for that game side
+by side" (SQ-1723). A game's record and cover are kept **once per IFDB entry**,
+flat, in the shared catalogue, not in each copy's directory:
+
+```
+<catalogue>/ifdb/<tuid>.json     the fetched record
+<catalogue>/ifdb/<tuid>.<ext>    the fetched cover, in the bytes IFDB served
+                                 (.png, .jpg, ...; the extension is its real format)
+```
+
+`app/src/ifdb_store.rs` is the only place those paths are spelled. A copy's own
+`<story-key>.save/info.json` keeps only its **link state**: the tuid it is linked
+to, or, when there is no tuid to share under (an authoritative not-found, a
+curated row), the record itself; plus the probe block. So two copies of one game
+(different story keys) show one record and cover, a refresh through either is
+seen by both, and relinking one copy ("wrong game", a hand-set IFDB page) changes
+only that copy's link. The store is in the **catalogue**, so every player sees it
+(SQ-1676). A blorb's own frontispiece still outranks a fetched cover. A copy with
+no tuid keeps any cover of its own as `cover.png`.
+
+**One-story fetches link the rest** (SQ-1787). A whole-library order links listed
+copies as it goes (`Outcome::Linked`, SQ-1786), but a single-story fetch (`f`) used
+to leave other copies of the game unlinked until a library refresh.
+`fetch_worker::link_listed_copies(roots, targets, tuid)` links every target whose
+IFID the stored entry lists (uniquely) and that has no link yet, with no request,
+and returns the targets it linked; `link_listed_copies_after` is the same call
+keyed off a worker `Outcome` (only `Fetched`/`Linked` link anything). The TUI's `f`
+and an embedding host's one-story refresh both call it.
+
+**Scott copies link by their mapped id** (SQ-1791). A Scott database's computed IFID
+(`SCOTT-<hash>`) is never listed by IFDB, so the IFID map cannot link it. Its identity
+for linking is the TUID `picker::scott_tuid` maps its filename stem to (the zip or disk
+entry's stem, via `fetch_worker::scott_stem_tuid`, shared with `scott_ifdb_id`). A target
+whose scanned IFID starts `SCOTT-` is known to be Scott, so no file is opened to decide.
+`link_from_store` and `link_listed_copies` treat that TUID like a listed IFID, under the
+same rules (unforced: current record only; forced: only a TUID fetched this run).
+Glulx stories with no embedded UUID (`GLULX-<hash>`) are not covered.
+
+`story_info::load`/`save` keep returning one assembled `StoryInfo`, so callers
+and embedding hosts are unchanged. **Adoption:** a copy whose `info.json` still
+holds its own record (every build before SQ-1723) is read as before, and the first
+`load` (or cover read, or fetch) *moves* the record and its `cover.png` into the
+store under the copy's tuid; nothing is refetched. If the store already holds that
+entry, the newer fetch wins and the copy's files are removed. "Newer" is decided
+by the record's own `scanned_at`; if either does not parse, or they are equal, by
+file modification time; on a tie the store's record stays. A startup sweep
+(`ifdb_store::adopt_catalogue`, background thread, SQ-1724) adopts every copy in the
+catalogue the same way, IFID mismatches and unscanned stories included. `save` never replaces a
+stored record with a strictly older `scanned_at`.
+
 `<story-key>` has **two rules**, because one disk image is no longer one game
 (SQ-0850):
 
@@ -369,8 +418,10 @@ file `Zork1.z5` (SQ-0294).
 differently per host, and every host accepts `--data-dir <path>` to override
 it:
 
-- **app** — `~/.lanthorn/saves` (i.e. `<user_dir>/saves`; follows
-  `--user-dir` unless `--data-dir` is also given).
+- **app** — `<data root>/saves` (`<user_dir>/saves`): the platform's data
+  folder, or `~/.lanthorn/saves` for a legacy home — see
+  [`user-dirs.md`](user-dirs.md); follows `--user-dir` unless `--data-dir` is
+  also given.
 - **`zvm-cli` / `gvm-cli`** — the story file's own directory (so a story run
   from `~/games/zork1.z5` gets `~/games/zork1.z5/...`).
 

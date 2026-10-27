@@ -88,7 +88,7 @@ pub fn draw_browser_keys(
     let st = DialogStyle::from_colors(cs);
     let buttons = &[DialogButton { id: ButtonId::Done, label: "Done" }];
     let spec = DialogSpec {
-        title: "Story browser keys (Esc: close)",
+        title: "Game browser keys (Esc: close)",
         placement: Placement::Centered { w, h },
         buttons,
         show_close: true,
@@ -128,7 +128,7 @@ mod tests {
         let move_row = rows.iter().find(|(k, _)| k.contains('↑')).expect("a movement row");
         assert!(move_row.0.contains('k') && move_row.0.contains('↓'), "{move_row:?}");
         // The new gestures are in it, spelled the way the footer spells them.
-        assert!(rows.iter().any(|(k, d)| k == "Space" && d.contains("per-story menu")), "{rows:?}");
+        assert!(rows.iter().any(|(k, d)| k == "Space" && d.contains("per-game menu")), "{rows:?}");
         assert!(rows.iter().any(|(k, _)| k == "?"), "{rows:?}");
         assert!(rows.iter().any(|(k, _)| k == "Tab/i"), "Tab leads the info row: {rows:?}");
         assert!(rows.iter().any(|(k, _)| k == "o/Shift+Enter"), "o leads launch options: {rows:?}");
@@ -149,8 +149,8 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Story browser keys"), "{text}");
-        assert!(text.contains("launch the selected story"), "{text}");
+        assert!(text.contains("Game browser keys"), "{text}");
+        assert!(text.contains("launch the selected game"), "{text}");
         assert!(text.contains("Done"), "{text}");
 
         let tiny = Rect::new(0, 0, 20, 4);

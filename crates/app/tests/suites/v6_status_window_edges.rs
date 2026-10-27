@@ -134,7 +134,7 @@ fn render(model: &app::engine::ScreenModel, honor: bool, cols: u16, rows: u16) -
     let mut picker =
         ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, cols, rows);

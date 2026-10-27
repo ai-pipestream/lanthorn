@@ -188,7 +188,7 @@ fn hybrid_buffer(model: &app::engine::ScreenModel, state: &app::state::AppState,
 fn render_state(mode: app::config::V6RenderMode, honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.set_game_picker(Some(ratatui_image::picker::Picker::halfblocks()));
     state.config.v6_render = mode;
     state.config.honor_game_colours = honor;
     state

@@ -556,7 +556,7 @@ fn scout(
     if want_bands {
         let mut st = app::state::AppState::default();
         st.colors = app::colors::ColorScheme::terminal_default();
-        st.game_picker = Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1));
+        st.set_game_picker(Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1)));
         st.config.v6_render = app::config::V6RenderMode::Hybrid;
         st.config.honor_game_colours = honor_colours;
         let mut buf = ratatui::buffer::Buffer::empty(pane);

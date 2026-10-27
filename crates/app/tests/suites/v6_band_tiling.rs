@@ -58,7 +58,7 @@ fn state_for(honor: bool, proto: ratatui_image::picker::ProtocolType) -> app::st
     state.colors = app::colors::ColorScheme::terminal_default();
     let mut picker = kitty_picker(CELL.0, CELL.1);
     picker.set_protocol_type(proto);
-    state.game_picker = Some(picker);
+    state.set_game_picker(Some(picker));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state
