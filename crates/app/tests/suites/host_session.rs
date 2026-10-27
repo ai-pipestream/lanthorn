@@ -282,6 +282,11 @@ fn a_reset_clears_the_game_the_map_and_the_counters() {
     let _ = command(&mut b, "south");
     b.state.turns = 1;
     assert!(b.mapper.graph.rooms().count() >= 2, "premise: the walk mapped two rooms");
+    b.state.recall_mode = true;
+    b.state.recall_pending_id = Some(42);
+    b.state.recall_last_query = Some("where was the alley".into());
+    b.state.search_query = b.state.recall_last_query.clone();
+    b.state.search_matches = vec![0];
 
     app::host::reset::reset_game(
         &mut *b.session,
@@ -295,10 +300,30 @@ fn a_reset_clears_the_game_the_map_and_the_counters() {
     );
     assert_eq!(here(&b), start, "back at the start");
     assert_eq!(b.state.turns, 0);
+    assert!(!b.state.recall_mode);
+    assert!(b.state.recall_pending_id.is_none());
+    assert!(b.state.recall_last_query.is_none());
+    assert!(b.state.search_query.is_none() && b.state.search_matches.is_empty());
     assert_eq!(b.mapper.graph.rooms().count(), 1, "the map holds only the start room");
     let text = b.state.transcript.join("\n");
     assert!(text.contains("Spider And Web"), "the transcript is the fresh banner: {text}");
     assert!(!text.contains("Mouth of Alley"), "and nothing from before the reset");
+    // A second restart can recreate the exact same opening text. It must still
+    // cancel recall and forget the old query rather than trusting text equality.
+    let opening = b.state.transcript.clone();
+    b.state.recall_mode = true;
+    b.state.recall_pending_id = Some(43);
+    b.state.recall_last_query = Some("old timeline".into());
+    b.state.search_query = b.state.recall_last_query.clone();
+    app::host::reset::reset_game(
+        &mut *b.session, &mut b.mapper, &mut b.state,
+        &b.story_bytes, &b.story_path, &b.game_dir, None,
+        app::host::reset::ResetOptions { clear_map: true, delete_data: false },
+    );
+    assert_eq!(b.state.transcript, opening);
+    assert!(!b.state.recall_mode);
+    assert!(b.state.recall_pending_id.is_none());
+    assert!(b.state.recall_last_query.is_none());
     let _ = command(&mut b, "south");
     assert_eq!(here(&b).as_deref(), Some("Mouth of Alley"), "and the game plays on from there");
     let _ = std::fs::remove_dir_all(&home);

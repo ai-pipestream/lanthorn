@@ -17,6 +17,69 @@ use app::tidy::{apply_tidy_result, cleanup_overlaps_layer_silent, tidy_layer_sil
 use app::render::map::SOUND_PULSE_MS;
 use app::state::{AppState, TidyJob, TidyKind, TidyAnim, TranscriptKind};
 
+/// Poll the background recall worker during idle passes as well as keystrokes.
+/// A changed transcript is re-queried so ranked line positions never point at
+/// text from an earlier restore or a rewritten live screen.
+pub(crate) fn poll_recall(state: &mut AppState, panes: &crate::PaneRects) -> bool {
+    if !state.recall_mode {
+        return false;
+    }
+    if !state.recall_scope_current() {
+        let Some(query) = state.search_query.clone() else {
+            state.clear_search();
+            return true;
+        };
+        match state.begin_recall(&query) {
+            Ok(()) => state.set_status("recall: transcript changed; updating results in background"),
+            Err(err) => state.set_status(format!("recall: could not refresh: {err}")),
+        }
+        return true;
+    }
+    let Some(reply) = state.recall_worker.poll() else {
+        return false;
+    };
+    if state.recall_pending_id != Some(reply.request_id)
+        || state.search_query.as_deref() != Some(reply.query.as_str())
+    {
+        return false;
+    }
+    if !reply.matches_state(state) {
+        let query = reply.query;
+        match state.begin_recall(&query) {
+            Ok(()) => state.set_status("recall: transcript changed; updating results in background"),
+            Err(err) => state.set_status(format!("recall: could not refresh: {err}")),
+        }
+        return true;
+    }
+    let Some(matches) = reply.visible_matches(state) else {
+        state.clear_search();
+        state.set_status("recall: transcript changed; try the query again");
+        return true;
+    };
+    let result_count = matches.len();
+    let reason = match &reply.status {
+        app::recall::RecallStatus::KeywordOnly { reason } => Some(reason.chars().take(100).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>()),
+        _ => None,
+    };
+    state.recall_keyword_only_reason = reason.clone();
+    state.recall_empty = matches!(reply.status, app::recall::RecallStatus::Empty);
+    state.recall_excerpts = reply.hits.into_iter().map(|hit| hit.excerpt).collect();
+    state.search_matches = matches;
+    state.search_idx = 0;
+    state.recall_preview_scroll = 0;
+    state.recall_pending_id = None;
+    if result_count > 0 {
+        state.transcript_scroll = crate::scroll_for_recall_match(state, panes, state.search_matches[0]);
+        state.set_status(state.recall_selected_status());
+    } else {
+        state.set_status("recall: no passages found in what you have seen");
+    }
+    if let Some(reason) = reason {
+        state.set_status(format!("recall: semantic search unavailable; word search used: {reason}"));
+    }
+    true
+}
+
 /// Style watch: drain events, debounce, then reload. Returns `true` if a reload
 /// happened (colours/status changed → repaint).
 pub(crate) fn poll_style_watch(

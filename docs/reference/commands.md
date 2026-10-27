@@ -53,6 +53,7 @@ Every slash command, grouped the way `/help` groups them. Type any of these afte
 | View | `resize-panes` | enter interactive pane-resize mode |
 | View | `reset-pane-size` | reset all pane sizes to their defaults |
 | Transcript | `search-transcript [query]` | search the transcript; no query repeats the last search |
+| Transcript | `recall [query]` | find passages you have seen using word and meaning search; no query repeats the last recall |
 | Transcript | `filter-transcript story|meta|both` | filter the transcript by category |
 | Transcript | `export-transcript [file]` | export the visible transcript once; default path when omitted (launch with --transcript-file for a live, appending stream instead) |
 | Style | `open-settings` | open the global settings screen |

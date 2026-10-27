@@ -13,8 +13,8 @@
 //! it slash parsing, `/help` grouping + `help <command>` detail, and Tab
 //! autocomplete — there is no second place to register it, so a command can
 //! never be missing from `/help`. (Bump the count in the registry
-//! well-formedness test when you do.) Names are verb-noun kebab-case; `quit`
-//! and `help` are the only one-word exceptions. Directional behavior is
+//! well-formedness test when you do.) Names are generally verb-noun kebab-case;
+//! a few short player verbs, including `recall`, are deliberate exceptions. Directional behavior is
 //! expressed by arguments bound to keys, not by separate commands (e.g.
 //! `pan-map <dx> <dy>`), so prefer a parametric command over per-direction
 //! variants.
@@ -67,6 +67,8 @@ pub enum SlashOutcome {
     QuitToLibrary,
     /// Search the transcript; `None` repeats the last search.
     Search(Option<String>),
+    /// Search passages the player has seen; `None` repeats the last recall.
+    Recall(Option<String>),
     /// Filter the transcript by category.
     Filter(TranscriptFilterArg),
     /// Export the visible transcript; `None` uses the default path.
@@ -584,6 +586,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "search-transcript", category: Category::Transcript, context: Context::Global,
         usage: "search-transcript [query]", description: "search the transcript; no query repeats the last search",
         dispatch: |a| if a.is_empty() { SlashOutcome::Search(None) } else { SlashOutcome::Search(Some(a.join(" "))) } },
+    CommandSpec { name: "recall", category: Category::Transcript, context: Context::Global,
+        usage: "recall [query]", description: "find passages you have seen using word and meaning search; no query repeats the last recall",
+        dispatch: |a| if a.is_empty() { SlashOutcome::Recall(None) } else { SlashOutcome::Recall(Some(a.join(" "))) } },
     CommandSpec { name: "filter-transcript", category: Category::Transcript, context: Context::Global,
         usage: "filter-transcript story|meta|both", description: "filter the transcript by category",
         dispatch: |a| match a.first().copied() {
@@ -896,8 +901,11 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
         };
     }
 
-    // search-transcript: preserve internal whitespace in the query.
-    if t0 == "search-transcript" {
+    // Preserve internal whitespace in both transcript search query forms.
+    if t0 == "recall" && ctx == Context::Browser {
+        return SlashOutcome::Error("recall is not available in the story browser".to_string());
+    }
+    if matches!(t0, "search-transcript" | "recall") {
         // Slice from where the token actually STARTS, not from byte 0: the body may
         // carry leading whitespace (a custom prefix typed with a space after it, or a
         // key bound to a command string with one). Measuring from 0 both mangled the
@@ -905,8 +913,12 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
         // the middle of a char and panicked. (SQ-0654)
         let t0_at = body.len() - body.trim_start().len(); // the first token starts after the leading whitespace
         let remainder = body[t0_at + t0.len()..].trim_start().trim_end();
-        return if remainder.is_empty() { SlashOutcome::Search(None) }
-               else { SlashOutcome::Search(Some(remainder.to_string())) };
+        return match (t0, remainder.is_empty()) {
+            ("recall", true) => SlashOutcome::Recall(None),
+            ("recall", false) => SlashOutcome::Recall(Some(remainder.to_string())),
+            (_, true) => SlashOutcome::Search(None),
+            (_, false) => SlashOutcome::Search(Some(remainder.to_string())),
+        };
     }
 
     let Some(spec) = find_command(t0) else {
@@ -1148,6 +1160,10 @@ mod tests {
         assert!(matches!(parse("search-transcript twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
         assert!(matches!(parse("search-transcript a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
         assert!(matches!(parse("search-transcript", '/'), SlashOutcome::Search(None)));
+        assert!(matches!(parse("recall brass key", '/'), SlashOutcome::Recall(Some(q)) if q == "brass key"));
+        assert!(matches!(parse(" recall the  brass key ", '/'), SlashOutcome::Recall(Some(q)) if q == "the  brass key"));
+        assert!(matches!(parse("recall", '/'), SlashOutcome::Recall(None)));
+        assert!(matches!(parse("recall   ", '/'), SlashOutcome::Recall(None)));
         assert!(matches!(parse("filter-transcript meta", '/'), SlashOutcome::Filter(TranscriptFilterArg::Meta)));
         assert!(matches!(parse("filter-transcript both", '/'), SlashOutcome::Filter(TranscriptFilterArg::Both)));
         assert!(matches!(parse("filter-transcript nope", '/'), SlashOutcome::Error(_)));
@@ -1224,7 +1240,7 @@ mod tests {
         }
         // Verb-noun lint: every name contains '-' except the whitelist.
         for c in COMMANDS {
-            if c.name == "quit" || c.name == "help" || c.name == "volume" || c.name == "trace" || c.name == "debug" { continue; }
+            if c.name == "quit" || c.name == "help" || c.name == "volume" || c.name == "trace" || c.name == "debug" || c.name == "recall" { continue; }
             assert!(c.name.contains('-'), "non-verb-noun command name: {}", c.name);
         }
         // Spot-check representative commands exist with the right category.
@@ -1293,7 +1309,9 @@ mod tests {
         // `create-documents-folder` a second command both worlds share.
         // SQ-1707 added `set-glk-fit`: stretch/aspect fit for design-size Glulx games.
         // SQ-1795 added `report-bug`: the bug report's facts, summarised and saved.
-        assert_eq!(COMMANDS.len(), 102,"registry must match the spec's Full command table");
+        // Local recall added `recall`: find passages you have seen by word and
+        // meaning search over the observed transcript.
+        assert_eq!(COMMANDS.len(), 103, "registry must match the spec's Full command table");
     }
 
     /// SQ-1237 unified the panel vocabulary — `command band` became `command

@@ -27,6 +27,14 @@ goes into the README in place, at its normal destination, marked with the
 visible tag `*Next release:*`. `release.yml` refuses to cut a release
 while any such tag, or this Unreleased section, still exists.*
 
+### Added
+
+- `/recall <query>` searches the observed transcript with keyword and local
+  semantic matching, showing original passages in a scrollable results panel.
+  Its small embedding model downloads on first use and is cached for offline
+  searches. Indexing runs in the background; unavailable models produce clearly
+  labelled keyword-only results.
+
 ## v0.9.9 — 2026-10-25
 
 ### Highlights

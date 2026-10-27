@@ -7695,6 +7695,8 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // of the transcript — cleared, nothing printed since — reads as an EMPTY
     // screen on both, rather than as an absent anchor that bottom-sticks the
     // erased scrollback (SQ-0748).
+    // `scroll` is already `effective_transcript_scroll()`, clamped, so a recall
+    // that asks for a line above the pin still moves the window.
     let (start, end) = crate::render::transcript::anchored_window_bounds(total, anchor_row, budget, scroll);
     let visible_len = end - start;
     let lines = wrapped[start..end].to_vec();

@@ -124,6 +124,11 @@ pub(crate) fn draw_all(
 
     // ── Richer non-dialog modals — z-ordered, not (yet) on the Overlay trait ──
 
+    // Recall uses the same graphics-free modal route as the other dialogs.
+    // Place it below higher-priority dialogs (save/file prompts, etc.).
+    state.recall_panel_area.set(dialog_area);
+    app::render::recall_panel::draw_recall_panel(state, dialog_area, buf);
+
     // ── Hotkey dialog overlay — drawn over everything ─────────────────────
     if state.overlays.hotkey_dialog {
         out.dialog = draw_hotkey_dialog(state, dialog_area, buf);
