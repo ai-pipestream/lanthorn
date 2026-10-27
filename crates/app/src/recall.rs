@@ -896,10 +896,10 @@ mod tests {
         assert!(!state.config.command_bar);
         state.push_transcript("A small chamber.\n>");
         state.record_command("unlock door with key");
-        state.append_to_last_transcript_line("unlock door with key");
+        state.append_to_last_transcript_line("unlock door with key", Default::default());
         state.push_transcript("The key does not fit. The door remains locked.\n>");
         state.record_command("north");
-        state.append_to_last_transcript_line("north");
+        state.append_to_last_transcript_line("north", Default::default());
         state.push_transcript("A courtyard with a fountain.");
         assert!(state
             .transcript_kinds
@@ -1270,7 +1270,7 @@ mod tests {
         let mut inline = AppState::default();
         inline.record_command("ask librarian about password");
         inline.push_transcript(">");
-        inline.append_to_last_transcript_line("ask librarian about password");
+        inline.append_to_last_transcript_line("ask librarian about password", Default::default());
         inline.push_transcript(response);
         let a = RecallSnapshot::from_state(&explicit).passages().remove(0);
         let b = RecallSnapshot::from_state(&inline).passages().remove(0);
@@ -1775,7 +1775,7 @@ mod tests {
                     if inline {
                         state.record_command(command);
                         state.push_transcript(">");
-                        state.append_to_last_transcript_line(command);
+                        state.append_to_last_transcript_line(command, Default::default());
                     } else {
                         state.push_transcript_kind(&format!("> {command}"), Input);
                     }
@@ -1869,7 +1869,7 @@ mod tests {
         for (command, response) in [("open mailbox", mailbox), ("read leaflet", leaflet)] {
             state.record_command(command);
             state.push_transcript(">");
-            state.append_to_last_transcript_line(command);
+            state.append_to_last_transcript_line(command, Default::default());
             state.push_transcript(response);
         }
         let query = "what was written on the paper";
