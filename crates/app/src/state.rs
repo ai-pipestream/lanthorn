@@ -3777,10 +3777,39 @@ pub struct AppState {
 
     /// The active search query, if any. `None` means no search is active.
     pub search_query: Option<String>,
+    /// The literal search to repeat if recall temporarily occupies the search
+    /// controls. Recall never becomes `/search-transcript`'s previous query.
+    pub search_last_literal_query: Option<String>,
     /// Positions (0-based) within the visible-index list of lines that match the query.
     pub search_matches: Vec<usize>,
     /// Index into `search_matches` of the current match.
     pub search_idx: usize,
+    /// True while the search controls are showing ranked recall passages.
+    /// The renderer uses this to mark the selected passage without requiring
+    /// literal query words to appear in a semantic match.
+    pub recall_mode: bool,
+    /// A recall is pending while its worker loads/indexes the model and ranks.
+    pub recall_pending_id: Option<u64>,
+    /// Last recall query, kept after Esc for bare `/recall`.
+    pub recall_last_query: Option<String>,
+    /// Excerpts in exactly the same rank order as `search_matches`.
+    pub recall_excerpts: Vec<String>,
+    /// First visible row of the selected recall excerpt's preview panel.
+    pub recall_preview_scroll: usize,
+    /// The exact area used to paint the recall panel in the latest frame.
+    /// Kept outside pane layout because graphics can reduce the dialog area.
+    pub recall_panel_area: std::cell::Cell<ratatui::layout::Rect>,
+    /// Kept while navigating so a model failure remains visible after the
+    /// first result notification has expired.
+    pub recall_keyword_only_reason: Option<String>,
+    /// The worker had no searchable passage or query; no model ran.
+    pub recall_empty: bool,
+    /// Cheap guard against a result landing after transcript edits or appends.
+    pub recall_scope_edits: u64,
+    pub recall_scope_len: usize,
+    pub recall_scope_game_dir: std::path::PathBuf,
+    /// Lazily starts the model worker on the first recall request.
+    pub recall_worker: crate::recall::RecallWorker,
 
     // ── Dialog focus state ────────────────────────────────────────────────────
 
@@ -4208,8 +4237,21 @@ impl Default for AppState {
             current_room_name: None,
             show_status_bar: true,
             search_query: None,
+            search_last_literal_query: None,
             search_matches: Vec::new(),
             search_idx: 0,
+            recall_mode: false,
+            recall_pending_id: None,
+            recall_last_query: None,
+            recall_excerpts: Vec::new(),
+            recall_preview_scroll: 0,
+            recall_panel_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
+            recall_keyword_only_reason: None,
+            recall_empty: false,
+            recall_scope_edits: 0,
+            recall_scope_len: 0,
+            recall_scope_game_dir: std::path::PathBuf::new(),
+            recall_worker: crate::recall::RecallWorker::default(),
             char_mode: false,
             event_wait: false,
             input_deadline: None,
@@ -4894,6 +4936,12 @@ impl AppState {
     /// doing so hid a half-typed command with no sign it was still buffered, and
     /// Enter would then run something the player could not see.
     pub fn any_modal_overlay_open(&self) -> bool {
+        self.recall_mode || self.any_modal_overlay_open_except_recall()
+    }
+
+    /// The ordinary dialogs stay above recall if one is opened while a
+    /// background query is still running.
+    pub fn any_modal_overlay_open_except_recall(&self) -> bool {
         self.overlays.saves.is_some()
             || self.overlays.file_browser.is_some()
             || self.overlays.file_picker.is_some()
@@ -5067,6 +5115,7 @@ impl AppState {
     /// not run" is only half an answer.
     pub fn open_modal_overlays(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
+        if self.recall_mode { v.push("recall"); }
         if self.overlays.saves.is_some() { v.push("saves"); }
         if self.overlays.file_browser.is_some() { v.push("file_browser"); }
         if self.overlays.file_picker.is_some() { v.push("file_picker"); }
@@ -6435,6 +6484,10 @@ impl AppState {
     /// before the load, now indexing a different, shorter transcript).
     pub fn reset_transcript_sidecars(&mut self) {
         self.bump_transcript_epoch();
+        // A restore or restart replaces the source of recall's ranked line
+        // positions. Drop both the in-flight request and the prior query.
+        self.clear_search();
+        self.recall_last_query = None;
         self.touch_transcript(TranscriptEdit::Rewrote);
         self.transcript_styles = vec![None; self.transcript.len()];
         self.transcript_images = vec![None; self.transcript.len()];
@@ -6659,6 +6712,7 @@ impl AppState {
     /// whether matches were found (so the status line can show "no matches").
     /// Returns the number of matches.
     pub fn run_search(&mut self, query: &str, start_backward: bool) -> usize {
+        self.clear_search();
         let query_lower = query.to_lowercase();
         let visible = self.visible_transcript_indices();
         self.search_matches = visible
@@ -6672,6 +6726,7 @@ impl AppState {
         let count = self.search_matches.len();
         self.search_idx = if start_backward && count > 0 { count - 1 } else { 0 };
         self.search_query = Some(query.to_string());
+        self.search_last_literal_query = Some(query.to_string());
         count
     }
 
@@ -6690,15 +6745,150 @@ impl AppState {
         } else {
             self.search_idx = self.search_idx.checked_sub(1).unwrap_or(count - 1);
         }
+        if self.recall_mode {
+            self.set_status(self.recall_selected_status());
+            self.recall_preview_scroll = 0;
+        }
         Some(self.search_matches[self.search_idx])
+    }
+
+    /// Queue a ranked recall over the player-visible transcript. Submitting only
+    /// copies the observed passages; model loading, indexing and ranking run in
+    /// the worker. The request ID prevents an older query from replacing a newer
+    /// one when replies arrive out of order.
+    pub fn begin_recall(&mut self, query: &str) -> Result<(), String> {
+        let query = query.trim();
+        let literal_query = if self.recall_mode {
+            self.search_last_literal_query.clone()
+        } else {
+            self.search_query.clone().or_else(|| self.search_last_literal_query.clone())
+        };
+        self.clear_search();
+        self.search_last_literal_query = literal_query;
+        let snapshot = crate::recall::RecallSnapshot::from_state(self);
+        let request_id = self.recall_worker.submit(snapshot, query)?;
+        self.recall_last_query = Some(query.to_string());
+        self.recall_mode = true;
+        self.search_query = Some(query.to_string());
+        self.recall_pending_id = Some(request_id);
+        self.recall_scope_edits = self.transcript_edits;
+        self.recall_scope_len = self.transcript.len();
+        self.recall_scope_game_dir = self.game_dir.clone();
+        Ok(())
+    }
+
+    /// A cheap invalidation check for a pending or displayed recall. The worker
+    /// also checks its exact snapshot before results are accepted.
+    pub fn recall_scope_current(&mut self) -> bool {
+        if self.recall_scope_game_dir != self.game_dir
+            || self.recall_scope_edits != self.transcript_edits
+            || self.recall_scope_len > self.transcript.len()
+        {
+            return false;
+        }
+        // A Meta/Warning/Assist append cannot change the observed passages or
+        // move an existing visible position. In particular, a slash-command
+        // notice must not restart a model download already in progress.
+        let added = self.recall_scope_len..self.transcript.len();
+        if added.clone().any(|i| matches!(self.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story), TranscriptKind::Story | TranscriptKind::Input)) {
+            return false;
+        }
+        self.recall_scope_len = self.transcript.len();
+        true
+    }
+
+    /// Scroll to a ranked passage using the renderer's current wrapped rows.
+    /// Returns None until the first transcript frame has built its wrap cache.
+    pub fn recall_scroll_for_match(&self, visible_pos: usize, viewport: usize) -> Option<u16> {
+        let wrap = self.transcript_wrap.borrow();
+        let cache = wrap.as_ref()?;
+        if cache.key.content.len != self.transcript.len()
+            || cache.starts.len() != self.visible_transcript_indices().len()
+        {
+            return None;
+        }
+        scroll_for_wrapped_recall(&cache.starts, cache.rows.len(), visible_pos, viewport, cache.anchor_row)
+    }
+
+    /// The selected result remains the game's original text, with enough
+    /// context in `recall_excerpts` to explain why it ranked.
+    pub fn recall_selected_status(&self) -> String {
+        let count = self.search_matches.len();
+        if count == 0 {
+            return "recall: no passages found in what you have seen".to_string();
+        }
+        let excerpt = self.recall_excerpts.get(self.search_idx).map(String::as_str).unwrap_or("");
+        let mode = if self.recall_keyword_only_reason.is_some() { "word search only" } else { "hybrid" };
+        format!("recall [{}/{}] ({mode}): {}", self.search_idx + 1, count, one_line_status(excerpt, 120))
+    }
+
+    /// Return from the text preview to the source in a pixel-rendered game.
+    /// The modal uses terminal rows, while raster play uses the native prose
+    /// box. Rebuild that cache before translating the selected source line.
+    pub fn close_recall(&mut self) {
+        if self.recall_mode && self.config.v6_render != crate::config::V6RenderMode::Hybrid {
+            let raw_line = self.search_matches.get(self.search_idx)
+                .and_then(|&pos| self.visible_transcript_indices().get(pos).copied());
+            let width = self.raster_wrap.borrow().as_ref().map(|cache| cache.key.shape.width);
+            if let (Some(raw_line), Some(width), Some(metrics)) = (raw_line, width, self.v6_raster_metrics.get()) {
+                crate::render::wrap_cache::raster_wrap_refresh(self, width);
+                let scroll = {
+                    let wrap = self.raster_wrap.borrow();
+                    let cache = wrap.as_ref().expect("refreshed above");
+                    // Raster windowing pins on top_anchor. clear_anchor can move on a
+                    // preserving clear without moving that pin.
+                    let anchor = crate::render::transcript::anchor_row_at(&cache.starts, cache.rows.len(), self.top_anchor);
+                    scroll_for_wrapped_recall(&cache.starts, cache.rows.len(), raw_line, metrics.viewport_rows as usize, anchor)
+                };
+                if let Some(scroll) = scroll {
+                    self.transcript_scroll = scroll;
+                    self.scroll_anim = None;
+                }
+            }
+        }
+        self.clear_search();
     }
 
     /// Clear all search state: query, matches, and index.
     pub fn clear_search(&mut self) {
+        if self.recall_mode || self.recall_pending_id.is_some() {
+            self.recall_worker.cancel();
+        } else {
+            self.search_last_literal_query = None;
+        }
         self.search_query = None;
         self.search_matches.clear();
         self.search_idx = 0;
+        self.recall_mode = false;
+        self.recall_pending_id = None;
+        self.recall_excerpts.clear();
+        self.recall_preview_scroll = 0;
+        self.recall_keyword_only_reason = None;
+        self.recall_empty = false;
     }
+}
+
+fn one_line_status(text: &str, limit: usize) -> String {
+    text.chars()
+        .take(limit)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+}
+
+fn scroll_for_wrapped_recall(starts: &[usize], total_rows: usize, visible_pos: usize, viewport: usize, anchor_row: Option<usize>) -> Option<u16> {
+    let start = *starts.get(visible_pos)?;
+    if viewport == 0 {
+        return None;
+    }
+    let desired_start = start.saturating_sub(viewport / 3);
+    let mut scroll = total_rows.saturating_sub(desired_start.saturating_add(viewport));
+    // A fresh screen clear pins post-clear lines at scroll=0. A recalled line
+    // before that boundary needs nonzero scroll even when all rows fit: the
+    // renderer checks the requested scroll before clamping to its maximum.
+    if scroll == 0 && anchor_row.is_some_and(|anchor| start < anchor) {
+        scroll = 1;
+    }
+    Some(scroll.min(u16::MAX as usize) as u16)
 }
 
 /// Append this render pass's pipeline stage labels to trace.log when `on`. (trace feature)
@@ -8254,6 +8444,20 @@ mod tests {
     }
 
     #[test]
+    fn recall_is_modal_and_yields_to_an_existing_dialog() {
+        let mut s = AppState::default();
+        s.recall_mode = true;
+        assert!(s.any_modal_overlay_open());
+        assert!(!s.any_modal_overlay_open_except_recall());
+        assert!(s.open_modal_overlays().contains(&"recall"));
+        s.overlays.reset_dialog = true;
+        assert!(s.any_modal_overlay_open_except_recall());
+        s.overlays.reset_dialog = false;
+        s.clear_search();
+        assert!(!s.any_modal_overlay_open());
+    }
+
+    #[test]
     fn toggle_map_flips_the_panel_and_never_moves_focus() {
         let mut s = AppState::default();
         assert!(matches!(s.layout, Layout::Split));
@@ -9315,6 +9519,110 @@ mod tests {
         assert_eq!(s.search_idx, 0);
         s.clear_search();
         assert!(s.search_query.is_none() && s.search_matches.is_empty());
+    }
+
+    #[test]
+    fn recall_scope_ignores_meta_append_but_not_new_story_text() {
+        let mut s = AppState::default();
+        s.push_transcript("The brass key is on the shelf.");
+        s.recall_scope_edits = s.transcript_edits;
+        s.recall_scope_len = s.transcript.len();
+        s.push_transcript_kind("App notification", TranscriptKind::Meta);
+        assert!(s.recall_scope_current(), "app output must not restart a pending recall");
+        s.push_transcript("A new room appears.");
+        assert!(!s.recall_scope_current(), "new observed text changes the search scope");
+        s.recall_scope_len = s.transcript.len();
+        s.game_dir = std::path::PathBuf::from("other-story.save");
+        assert!(!s.recall_scope_current(), "a different story cannot reuse ranked positions");
+    }
+
+    #[test]
+    fn recall_keeps_its_query_separate_from_literal_search() {
+        let mut s = AppState::default();
+        s.run_search("lamp", false);
+        s.recall_mode = true;
+        s.search_query = Some("thing that lights the dark".into());
+        s.recall_last_query = s.search_query.clone();
+        s.clear_search();
+        assert_eq!(s.search_last_literal_query.as_deref(), Some("lamp"));
+        assert_eq!(s.recall_last_query.as_deref(), Some("thing that lights the dark"));
+        s.reset_transcript_sidecars();
+        assert!(s.recall_last_query.is_none(), "restore must forget the previous timeline's recall");
+    }
+
+    #[test]
+    fn recall_stores_the_same_trimmed_query_as_its_worker_reply() {
+        let mut s = AppState::default();
+        assert!(s.transcript.is_empty()); // empty corpus returns without loading a model
+        s.begin_recall(" lantern ").unwrap();
+        assert_eq!(s.search_query.as_deref(), Some("lantern"));
+        assert_eq!(s.recall_last_query.as_deref(), Some("lantern"));
+        let reply = (0..100)
+            .find_map(|_| {
+                let reply = s.recall_worker.poll();
+                if reply.is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                reply
+            })
+            .expect("empty-corpus reply should arrive without model loading");
+        assert_eq!(s.recall_pending_id, Some(reply.request_id));
+        assert_eq!(s.search_query.as_deref(), Some(reply.query.as_str()));
+    }
+
+    #[test]
+    fn recall_wrap_scroll_uses_display_rows_and_handles_missing_viewport() {
+        let starts = [0, 8, 9, 10];
+        assert_eq!(scroll_for_wrapped_recall(&starts, 11, 0, 4, None), Some(7));
+        assert_eq!(scroll_for_wrapped_recall(&starts, 11, 1, 4, None), Some(0));
+        assert_eq!(scroll_for_wrapped_recall(&starts, 11, 2, 4, None), Some(0));
+        assert_eq!(scroll_for_wrapped_recall(&starts, 11, 1, 0, None), None);
+    }
+
+    #[test]
+    fn recall_before_screen_clear_bypasses_fresh_screen_anchor() {
+        use crate::render::transcript::{window_wrapped_rows, WrappedRow};
+        let rows: Vec<_> = ["old clue", "new room"].into_iter().map(|text| WrappedRow {
+            text: text.to_string(), kind: TranscriptKind::Story,
+            style: ratatui::style::Style::default(), runs: Vec::new(),
+            band: None, float: None,
+        }).collect();
+        let scroll = scroll_for_wrapped_recall(&[0, 1], rows.len(), 0, 10, Some(1)).unwrap();
+        assert_eq!(scroll, 1);
+        let (visible, _, _) = window_wrapped_rows(&rows, Some(1), 10, scroll);
+        assert_eq!(visible[0].text, "old clue");
+    }
+
+    #[test]
+    fn closing_recall_uses_native_raster_rows_and_raw_source_indices() {
+        let mut s = AppState::default();
+        s.config.v6_render = crate::config::V6RenderMode::Raster;
+        s.transcript_filter = TranscriptFilter::Story;
+        s.transcript = vec!["notice ".repeat(70), "LANTERN lights the dark corridor".into(), "later scenery ".repeat(80)];
+        s.transcript_kinds = vec![TranscriptKind::Meta, TranscriptKind::Story, TranscriptKind::Story];
+        let (_, metrics) = crate::render::screen::build_main_text(&s, 20, 8);
+        s.v6_raster_metrics.set(Some(metrics));
+        s.recall_mode = true;
+        s.search_matches = vec![0]; // visible position zero is raw line one
+        s.transcript_scroll = 1; // a different terminal-cell offset
+        s.close_recall();
+        let (visible, _) = crate::render::screen::build_main_text(&s, 20, 8);
+        assert!(visible.lines.iter().any(|line| line.contains("LANTERN")), "{:?}", visible.lines);
+        assert!(!s.recall_mode);
+    }
+
+    #[test]
+    fn closing_recall_can_show_raster_source_before_a_screen_clear() {
+        let mut s = AppState::default();
+        s.config.v6_render = crate::config::V6RenderMode::Raster;
+        s.transcript = vec!["old clue".into(), "new room".into()];
+        s.transcript_kinds = vec![TranscriptKind::Story; 2];
+        s.clear_anchor = Some(1);
+        let (_, metrics) = crate::render::screen::build_main_text(&s, 40, 12);
+        s.v6_raster_metrics.set(Some(metrics));
+        s.recall_mode = true;
+        s.search_matches = vec![0];
+        s.close_recall();
+        let (visible, _) = crate::render::screen::build_main_text(&s, 40, 12);
+        assert_eq!(visible.lines[0], "old clue");
     }
 
     #[test]

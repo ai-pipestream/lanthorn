@@ -1,0 +1,10 @@
+# QLoRA training stack for train_qlora.py (Python 3.12, CUDA 12.8+).
+# Create with:  uv venv --python 3.12 training/.venv
+#               uv pip install --python training/.venv/bin/python -r training/requirements-qlora.txt
+torch
+transformers
+peft
+trl
+datasets
+bitsandbytes
+accelerate

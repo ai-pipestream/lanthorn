@@ -2525,10 +2525,17 @@ fn render_middle(
         let cur_idx = if match_count > 0 { state.search_idx + 1 } else { 0 };
         let key_back = state.config.search.key_back;
         let key_forward = state.config.search.key_forward;
-        let hint = format!(
-            "search: {}  [{}/{}]  {}:back {}:fwd  Esc:clear",
-            q, cur_idx, match_count, key_back, key_forward
-        );
+        let hint = if state.recall_mode {
+            if state.recall_pending_id.is_some() {
+                format!("recall: {q}  loading model/searching in background  Esc:cancel")
+            } else {
+                let mode = if state.recall_keyword_only_reason.is_some() { "keyword only" }
+                    else if state.recall_empty { "empty" } else { "hybrid" };
+                format!("recall ({mode}): {q}  [{cur_idx}/{match_count}]  {key_back}:next ranked {key_forward}:previous  Esc:clear")
+            }
+        } else {
+            format!("search: {q}  [{cur_idx}/{match_count}]  {key_back}:back {key_forward}:fwd  Esc:clear")
+        };
         let hint_trunc = truncate_line(&hint, w);
         let hint_style = suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, hint_trunc, hint_style, area);
@@ -2972,6 +2979,16 @@ fn render_middle(
     // selector (SQ-0643; default reproduces the old hardcoded black-on-yellow).
     let search_highlight_style = state.colors.theme.get("transcript_search_highlight").style;
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
+    // Recall can match by meaning with no query word in the passage. Mark the
+    // selected source line, including its wrapped rows, rather than pretending
+    // a semantic match is a literal substring match.
+    let recall_rows = state.recall_mode.then(|| {
+        state.search_matches.get(state.search_idx).and_then(|&line| {
+            entry.starts.get(line).map(|&start| {
+                start..entry.starts.get(line + 1).copied().unwrap_or(entry.rows.len())
+            })
+        })
+    }).flatten();
 
     // Per-frame map from rendered cell (col, row) → Glk hyperlink value, so a
     // mouse click can be hit-tested to its link (consumed downstream in the
@@ -3022,11 +3039,18 @@ fn render_middle(
             draw_str_clipped(buf, body_area.x, row_y, &glyph.to_string(), marker_style, body_area);
         }
         let text_x = body_area.x + text_origin_col(wr.kind);
-        let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
+        let search = (has_search && !state.recall_mode).then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(
             buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area,
             crate::render::TextInk::of_with_game_input(state, game_input).with_typed_input(typed_input),
         );
+        if recall_rows.as_ref().is_some_and(|rows| rows.contains(&(first_abs_row + i))) {
+            let end = (text_x as usize + unicode_width::UnicodeWidthStr::width(wr.text.as_str()))
+                .min(body_area.right() as usize) as u16;
+            for x in text_x..end {
+                buf[(x, row_y)].set_style(search_highlight_style);
+            }
+        }
         // …and, while a reveal is lit, re-style the words on this row that name
         // one of the story's own things (SQ-1107, SQ-1207). A pass OVER the
         // drawn cells, after the text and its runs: the reveal is a property of
@@ -8118,6 +8142,71 @@ mod tests {
             "hello world!",
             "an in-place edit of a wrapped line must rebuild"
         );
+    }
+
+    #[test]
+    fn recall_highlights_semantic_source_without_literal_query_words() {
+        for width in [24, 80] {
+            for honor in [false, true] {
+                let mut state = AppState::default();
+                state.config.honor_game_colours = honor;
+                state.push_transcript_kind("A brass lantern rests beside the wooden door.", TranscriptKind::Story);
+                state.push_transcript_kind("Coins fill the chest.", TranscriptKind::Story);
+                state.search_query = Some("illumination".into());
+                state.search_matches = vec![0];
+                state.recall_mode = true;
+                let area = Rect::new(0, 0, width, 10);
+                let mut buf = Buffer::empty(area);
+                render_middle(&state, &mut buf, area, Style::default(), None);
+                let highlight = state.colors.theme.get("transcript_search_highlight").style.bg.unwrap();
+                let mut selected = false;
+                let mut unrelated = false;
+                for y in 0..area.height {
+                    let row = (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+                    if row.contains("brass lantern") {
+                        selected = true;
+                        assert_eq!(buf[(0, y)].bg, highlight);
+                    }
+                    if row.contains("Coins fill") {
+                        unrelated = true;
+                        assert_ne!(buf[(0, y)].bg, highlight);
+                    }
+                }
+                assert!(selected && unrelated, "both sources must actually render");
+            }
+        }
+    }
+
+    #[test]
+    fn recall_pending_hint_explains_background_work() {
+        let mut state = AppState::default();
+        state.search_query = Some("lantern".into());
+        state.recall_mode = true;
+        state.recall_pending_id = Some(1);
+        let area = Rect::new(0, 0, 120, 6);
+        let mut buf = Buffer::empty(area);
+        render_middle(&state, &mut buf, area, Style::default(), None);
+        let row = (0..area.width).map(|x| buf[(x, 5)].symbol()).collect::<String>();
+        assert!(row.contains("loading model/searching"), "{row}");
+        assert!(row.contains("Esc:cancel"), "{row}");
+    }
+
+    #[test]
+    fn recall_fallback_is_labelled_even_after_navigation() {
+        let mut state = AppState::default();
+        state.push_transcript("A lantern.");
+        state.push_transcript("Another lantern.");
+        state.search_query = Some("lantern".into());
+        state.search_matches = vec![0, 1];
+        state.recall_mode = true;
+        state.recall_keyword_only_reason = Some("model unavailable".into());
+        state.search_next(true);
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        render_middle(&state, &mut buf, area, Style::default(), None);
+        let row = (0..area.width).map(|x| buf[(x, 5)].symbol()).collect::<String>();
+        assert!(row.contains("recall (keyword only)"), "{row}");
+        assert!(row.contains("[2/2]"), "{row}");
     }
 
     #[test]

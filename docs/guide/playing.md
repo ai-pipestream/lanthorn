@@ -83,6 +83,52 @@ to just the game's own output, just lanthorn's, or both. `/export-transcript`
 writes what's on screen out to a text file in the game's own save
 directory.
 
+### Recall something you have seen
+
+Use `/recall what can light a dark room` to search your playthrough by meaning
+as well as words. Exact names still matter: `/recall brass lantern` combines
+keyword ranking with sentence similarity. A panel shows the original passage;
+`n` selects the next ranked result, `N` the previous one, and arrows or
+PageUp/PageDown scroll the full excerpt. `Esc` closes the panel and leaves the
+transcript positioned at the source paragraph. A bare
+`/recall` repeats your last recall query. No command is sent to the game and no
+turn is spent.
+
+Recall searches the story text and player commands in the current transcript
+view. It excludes lanthorn's messages, assistance output, hidden game data and
+external walkthroughs. Command context is included when the transcript records
+it; unusual game prompts remain searchable as original text. Failed actions
+retain the game's refusal. Results are evidence of what happened, not
+instructions about what to do next.
+Restoring or restarting invalidates results, and a new search uses the restored
+transcript. It does not retain a separate history of abandoned timelines.
+
+The Docker image includes the pinned **all-MiniLM-L6-v2** model and loads it
+locally, including when the container has no network access. For native installs,
+the first query downloads the model (about 91 MB)
+from Hugging Face into `$XDG_CACHE_HOME/lanthorn/recall/` or
+`~/.cache/lanthorn/recall/` (`%LOCALAPPDATA%/lanthorn/recall/` on Windows).
+Model loading and search run in the background. Later searches use the cached
+model; the transcript and query stay on your machine. The vectors and keyword
+index are kept in memory for this session. A 384-component float vector uses
+1,536 bytes, so 10,000 vectors use about 15 MB, plus text/index storage and the
+model's own memory.
+
+For offline setup, set `LANTHORN_RECALL_MODEL_DIR` to a directory containing
+`config.json`, `tokenizer.json`, and `model.safetensors` from model revision
+`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`. Files are checked against pinned
+SHA-256 digests. An explicit directory never downloads replacements. If the
+model cannot load, recall reports **keyword-only** results and explains why;
+it does not present that fallback as semantic search.
+
+Similarity is a ranking aid, not proof that a passage answers a question.
+Read the returned game text in context. The initial model is intended for
+English; lexical matching still helps with exact names in other languages.
+Indirect references can be missed: in Mini-Zork, "what was written on the
+paper" does not reliably find the leaflet text. Including the observed name,
+such as `leaflet`, helps. Recall does not generate an answer when it finds a
+similar passage; it shows the original text for you to judge.
+
 When a turn prints more than fits the pane — a long room description, a
 hint page — lanthorn stops at the first full screen with a `[MORE]` bar
 instead of scrolling straight past it, exactly like the original Infocom
