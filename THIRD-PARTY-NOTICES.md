@@ -39,6 +39,28 @@ SOFTWARE.
 
 ## Bundled Components
 
+### Recall model
+
+Recall uses Sentence Transformers **all-MiniLM-L6-v2**, revision
+`1110a243fdf4706b3f48f1d95db1a4f5529b4d41` (Apache-2.0).
+The executable does not contain weights: a native install downloads them on
+first use. The Docker image bundles the model's pinned `config.json`,
+`tokenizer.json`, and `model.safetensors`, verified against
+`crates/app/src/recall/model-manifest.json` during the build. The image also
+contains `LICENSE` (the Apache 2.0 text, verified against the manifest) and
+`MODEL.txt` (model, revision, model card, and artifact hashes) in
+`/usr/local/share/lanthorn/recall-model/`.
+
+- Model card and license declaration: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+- License text: https://www.apache.org/licenses/LICENSE-2.0.txt
+- Inference uses Hugging Face Candle (MIT OR Apache-2.0) and Tokenizers
+  (Apache-2.0). The BERT masked-mean pooling implementation follows Candle's
+  BERT example and the model's Sentence Transformers pooling configuration.
+- Candle: https://github.com/huggingface/candle
+- Tokenizers: https://github.com/huggingface/tokenizers
+
+### Docker components
+
 These components are bundled and distributed as part of the Docker image (`docker build -t lanthorn .`).
 
 ### ttyd

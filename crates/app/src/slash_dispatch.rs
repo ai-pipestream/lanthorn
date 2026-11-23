@@ -424,7 +424,8 @@ pub(crate) fn dispatch_slash_outcome(
         SlashOutcome::Search(q_opt) => {
             let query_to_run: Option<String> = match q_opt {
                 Some(q) => Some(q),
-                None => state.search_query.clone(),
+                None if state.recall_mode => state.search_last_literal_query.clone(),
+                None => state.search_query.clone().or_else(|| state.search_last_literal_query.clone()),
             };
             match query_to_run {
                 None => {
@@ -449,7 +450,18 @@ pub(crate) fn dispatch_slash_outcome(
                 }
             }
         }
+        SlashOutcome::Recall(q_opt) => {
+            let query = q_opt.or_else(|| state.recall_last_query.clone());
+            match query {
+                None => state.set_status("recall: use /recall <what you remember>"),
+                Some(query) => match state.begin_recall(&query) {
+                    Ok(()) => state.set_status("recall: searching in background; first use may download a model (~90 MB)"),
+                    Err(err) => state.set_status(format!("recall: could not start search: {err}")),
+                },
+            }
+        }
         SlashOutcome::Filter(arg) => {
+            let recall_query = state.recall_mode.then(|| state.search_query.clone()).flatten();
             state.transcript_filter = match arg {
                 TranscriptFilterArg::Both  => TranscriptFilter::Both,
                 TranscriptFilterArg::Story => TranscriptFilter::Story,
@@ -462,7 +474,9 @@ pub(crate) fn dispatch_slash_outcome(
             };
             // If a search is active, recompute it against the new filter
             // so highlights and the [i/N] hint stay consistent.
-            if let Some(query) = state.search_query.clone() {
+            let recall_error = if let Some(query) = recall_query {
+                state.begin_recall(&query).err()
+            } else if let Some(query) = state.search_query.clone() {
                 let count = state.run_search(&query, state.config.search.start_backward);
                 if count > 0 {
                     let pos = state.search_matches[state.search_idx];
@@ -474,8 +488,14 @@ pub(crate) fn dispatch_slash_outcome(
                     };
                     state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
                 }
-            }
+                None
+            } else {
+                None
+            };
             state.set_status(format!("filter: {}", label));
+            if let Some(err) = recall_error {
+                state.set_status(format!("recall: could not refresh after filter change: {err}"));
+            }
         }
         SlashOutcome::Export(dest) => {
             // The VISIBLE transcript as a FILE should carry it: an assist

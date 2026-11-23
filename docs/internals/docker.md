@@ -15,6 +15,26 @@ The multi-stage build compiles the workspace with the repo's pinned toolchain
 Debian-slim runtime carrying all four release binaries (`lanthorn`,
 `zvm-cli`, `gvm-cli`, `scott-cli`). No Rust toolchain is needed on the host.
 
+### Bundled recall model
+
+The image includes the current `/recall` baseline, Sentence Transformers
+`all-MiniLM-L6-v2` (about 91 MB). A separate build stage downloads the three
+model artifacts named in `crates/app/src/recall/model-manifest.json` and checks
+each file's pinned size and SHA-256 before copying it into the runtime image.
+The same manifest drives the Rust loader. The stage also verifies and bundles
+the Apache-2.0 license text and writes `MODEL.txt` with the model card, revision,
+and artifact hashes. Both are under
+`/usr/local/share/lanthorn/recall-model/` beside the weights.
+
+`LANTHORN_RECALL_MODEL_DIR` points the app at that read-only directory, so a
+player's first recall can load the model without downloading it. The first
+query still indexes that player's observed transcript in the background.
+Building the image needs network access for the pinned artifacts; using recall
+in an already built image does not. A native install still uses the normal
+per-user model cache and first-use download unless this environment variable
+points at a prepopulated directory with the same verified files. This bundle
+does not train or substitute a different model.
+
 ## Mode 1: play in your own terminal
 
 ```sh

@@ -2126,6 +2126,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         }
         needs_redraw |= app::hints_tab::ensure_started(&mut state, &story_path, &ifid);
         needs_redraw |= app::hints_tab::poll_download(&mut state);
+        needs_redraw |= loop_tick::poll_recall(&mut state, &last_panes);
         loop_tick::sync_theme_colours(&state, &mut *session);
         needs_redraw |= loop_tick::poll_glulx_resize(
             &mut *session,
@@ -2524,6 +2525,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // text field currently owns typing and does NOT submit — the user reads it
         // back and presses Enter.
         if let Event::Paste(text) = &event {
+            if state.recall_mode && !state.any_modal_overlay_open_except_recall() {
+                continue; // a recall preview never edits the game's prompt
+            }
             app::input::apply_paste(&mut state, text);
             continue;
         }
@@ -2902,6 +2906,36 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             }
         }
 
+        // ── Recall preview — owns input until closed ──────────────────────────
+        if state.recall_mode && !state.any_modal_overlay_open_except_recall() {
+            let panel_area = recall_panel_area(&state, last_panes.story);
+            let max = app::render::recall_panel::max_scroll(&state, panel_area);
+            let page = panel_area.height.saturating_sub(3).max(1) as usize;
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    let action = recall_key_action(k.code, state.config.search.key_back, state.config.search.key_forward);
+                    match action {
+                        RecallKeyAction::Close => state.close_recall(),
+                        RecallKeyAction::Next | RecallKeyAction::Previous => {
+                            let forward = matches!(action, RecallKeyAction::Next);
+                            if let Some(pos) = state.search_next(forward) {
+                                state.transcript_scroll = scroll_for_recall_match(&state, &last_panes, pos);
+                            }
+                        }
+                        action => state.recall_preview_scroll = recall_preview_scroll(action, state.recall_preview_scroll, max, page),
+                    }
+                }
+                Event::Mouse(m) => {
+                    if let Some(delta) = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert) {
+                        state.recall_preview_scroll = recall_preview_scroll_delta(state.recall_preview_scroll, max, delta);
+                    }
+                }
+                Event::Resize(_, _) => clear_terminal(&mut terminal, &state),
+                _ => {}
+            }
+            continue; // every other event is swallowed; no VM input or move
+        }
+
         // ── Search-nav intercept — before normal action routing ───────────────
         // When a search is active and no modal is open, intercept the configured
         // back/forward keys and Esc to navigate matches.  Any other key clears
@@ -2916,11 +2950,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         KeyCode::Char(c) if c == key_back => {
                             if let Some(pos) = state.search_next(false) {
                                 let total_vis = state.visible_transcript_indices().len();
-                                let pane_rows = if last_panes.story.height > 0 {
-                                    last_panes.story.height as usize
-                                } else {
-                                    24
-                                };
+                                let pane_rows = if last_panes.story.height > 0 { last_panes.story.height as usize } else { 24 };
                                 state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
                             }
                             continue;
@@ -2928,11 +2958,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         KeyCode::Char(c) if c == key_forward => {
                             if let Some(pos) = state.search_next(true) {
                                 let total_vis = state.visible_transcript_indices().len();
-                                let pane_rows = if last_panes.story.height > 0 {
-                                    last_panes.story.height as usize
-                                } else {
-                                    24
-                                };
+                                let pane_rows = if last_panes.story.height > 0 { last_panes.story.height as usize } else { 24 };
                                 state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
                             }
                             continue;
@@ -4440,6 +4466,60 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
         .saturating_sub(pane_rows) as u16
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecallKeyAction {
+    Close, Next, Previous, Up, Down, PageUp, PageDown, Home, End, Ignore,
+}
+
+fn recall_key_action(code: crossterm::event::KeyCode, next: char, previous: char) -> RecallKeyAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => RecallKeyAction::Close,
+        KeyCode::Char(c) if c == next => RecallKeyAction::Next,
+        KeyCode::Char(c) if c == previous => RecallKeyAction::Previous,
+        KeyCode::Up => RecallKeyAction::Up,
+        KeyCode::Down => RecallKeyAction::Down,
+        KeyCode::PageUp => RecallKeyAction::PageUp,
+        KeyCode::PageDown => RecallKeyAction::PageDown,
+        KeyCode::Home => RecallKeyAction::Home,
+        KeyCode::End => RecallKeyAction::End,
+        _ => RecallKeyAction::Ignore,
+    }
+}
+
+fn recall_preview_scroll(action: RecallKeyAction, current: usize, max: usize, page: usize) -> usize {
+    let current = current.min(max);
+    match action {
+        RecallKeyAction::Up => current.saturating_sub(1),
+        RecallKeyAction::Down => current.saturating_add(1).min(max),
+        RecallKeyAction::PageUp => current.saturating_sub(page.max(1)),
+        RecallKeyAction::PageDown => current.saturating_add(page.max(1)).min(max),
+        RecallKeyAction::Home => 0,
+        RecallKeyAction::End => max,
+        _ => current.min(max),
+    }
+}
+
+fn recall_preview_scroll_delta(current: usize, max: usize, delta: isize) -> usize {
+    let current = current.min(max);
+    if delta < 0 { current.saturating_sub(delta.unsigned_abs() as usize) }
+    else { current.saturating_add(delta as usize).min(max) }
+}
+
+fn recall_panel_area(state: &app::state::AppState, fallback: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let painted = state.recall_panel_area.get();
+    if painted.width == 0 || painted.height == 0 { fallback } else { painted }
+}
+
+/// Place a ranked recall hit using the rows the renderer actually wrapped.
+/// A passage may occupy several terminal rows, so logical-line arithmetic can
+/// leave it outside the viewport even when its line number looked correct.
+fn scroll_for_recall_match(state: &app::state::AppState, panes: &PaneRects, visible_pos: usize) -> u16 {
+    let viewport = panes.transcript_viewport_rows as usize;
+    state.recall_scroll_for_match(visible_pos, viewport)
+        .unwrap_or_else(|| scroll_for_match(visible_pos, state.visible_transcript_indices().len(), viewport.max(1)))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(all(test, feature = "t-misc"))]
@@ -5479,6 +5559,44 @@ mod tests {
         // scroll = 5 - 0 - 10 = saturates to 0.
         assert_eq!(scroll_for_match(0, 5, 10), 0);
     }
+
+    #[test]
+    fn recall_n_moves_to_the_next_ranked_hit() {
+        use crossterm::event::KeyCode;
+        let mut state = app::state::AppState::default();
+        state.recall_mode = true;
+        state.search_matches = vec![8, 3, 14];
+        state.recall_preview_scroll = 5;
+        assert_eq!(super::recall_key_action(KeyCode::Char('n'), 'n', 'N'), super::RecallKeyAction::Next);
+        assert_eq!(state.search_next(true), Some(3));
+        assert_eq!(state.recall_preview_scroll, 0);
+        assert_eq!(super::recall_key_action(KeyCode::Char('N'), 'n', 'N'), super::RecallKeyAction::Previous);
+        assert_eq!(state.search_next(false), Some(8));
+    }
+
+    #[test]
+    fn recall_preview_scroll_clamps_and_other_keys_do_not_reach_the_game() {
+        use crossterm::event::KeyCode;
+        assert_eq!(super::recall_key_action(KeyCode::Char('l'), 'n', 'N'), super::RecallKeyAction::Ignore);
+        assert_eq!(super::recall_key_action(KeyCode::Esc, 'n', 'N'), super::RecallKeyAction::Close);
+        assert_eq!(super::recall_preview_scroll(super::RecallKeyAction::PageDown, 0, 12, 5), 5);
+        assert_eq!(super::recall_preview_scroll(super::RecallKeyAction::PageDown, 10, 12, 5), 12);
+        assert_eq!(super::recall_preview_scroll(super::RecallKeyAction::PageUp, 3, 12, 5), 0);
+        assert_eq!(super::recall_preview_scroll(super::RecallKeyAction::End, 0, 12, 5), 12);
+        assert_eq!(super::recall_preview_scroll_delta(5, 12, -2), 3);
+        assert_eq!(super::recall_preview_scroll_delta(11, 12, 3), 12);
+    }
+
+    #[test]
+    fn recall_controls_use_the_painted_panel_area() {
+        let state = app::state::AppState::default();
+        let fallback = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let painted = ratatui::layout::Rect::new(0, 5, 80, 19);
+        assert_eq!(super::recall_panel_area(&state, fallback), fallback);
+        state.recall_panel_area.set(painted);
+        assert_eq!(super::recall_panel_area(&state, fallback), painted);
+    }
+
 
     // ── is_slash ──────────────────────────────────────────────────────────────
 

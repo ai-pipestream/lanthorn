@@ -321,6 +321,14 @@ font8x8 = "0.3"
 # Already in the graph three times over (png, ureq, zip), so naming it here
 # compiles nothing new.
 flate2 = "1"
+# Local recall: CPU-only sentence embeddings; no external inference service.
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
+rayon = "1"
+sha2 = "0.10"
+tempfile = "3"
 
 # SQ-0764: a SECOND opinion on the bytes lanthorn emits. The pty harness
 # (SQ-0762) decodes the stream with our own hand-rolled decoder, which is

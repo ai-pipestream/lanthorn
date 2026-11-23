@@ -83,6 +83,17 @@ RUN arch="$(dpkg --print-architecture)" \
 RUN sh -c '/ttyd -p 7999 true & pid=$!; sleep 1; curl -fsS -o /ttyd-index.html http://127.0.0.1:7999/; kill $pid' \
     && grep -q "</head>" /ttyd-index.html
 
+# Recall uses the same pinned manifest as the Rust loader. Downloading and
+# verifying in a separate stage leaves Python and its package cache out of the
+# runtime image. The model and its license are present before any player starts.
+FROM debian:trixie-slim AS recall-model-fetch
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY crates/app/src/recall/model-manifest.json /tmp/model-manifest.json
+COPY docker/fetch-recall-model.py /tmp/fetch-recall-model.py
+RUN python3 /tmp/fetch-recall-model.py /tmp/model-manifest.json /model
+
 # The browser page ships its own font, so a visitor's default monospace stops
 # deciding whether lanthorn's Nerd Font icons and the map's Legacy Computing
 # half-diagonals (U+1FBA0-1FBA3) render at all. IosevkaTerm Nerd Font Mono is
@@ -140,6 +151,7 @@ COPY --from=builder /out/ /usr/local/bin/
 COPY --from=ttyd-fetch /ttyd /usr/local/bin/ttyd
 COPY --from=ttyd-fetch /ttyd-index.html /usr/local/share/lanthorn/ttyd-index.html
 COPY --from=font-fetch /fonts/ /usr/local/share/lanthorn/fonts/
+COPY --from=recall-model-fetch /model/ /usr/local/share/lanthorn/recall-model/
 COPY docker/web-session.js /usr/local/share/lanthorn/web-session.js
 COPY docker/web-audio.js /usr/local/share/lanthorn/web-audio.js
 COPY docker/web-touch.js /usr/local/share/lanthorn/web-touch.js
@@ -161,6 +173,7 @@ RUN useradd --uid 1000 --create-home --home-dir /data lanthorn \
 USER lanthorn
 ENV HOME=/data \
     TERM=xterm-256color \
+    LANTHORN_RECALL_MODEL_DIR=/usr/local/share/lanthorn/recall-model \
     LANTHORN_WEB_PORT=7681 \
     LANTHORN_WEB_AUDIO_PORT=7682
 
